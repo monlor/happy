@@ -1,6 +1,6 @@
 {
   "name": "happy",
-  "version": "1.1.10-beta.3",
+  "version": "1.1.10-beta.7",
   "description": "Mobile and Web client for Claude Code and Codex",
   "author": "Kirill Dubovitskiy",
   "license": "MIT",
@@ -54,7 +54,8 @@
     "dist",
     "bin",
     "scripts",
-    "tools",
+    "tools/archives",
+    "tools/licenses",
     "package.json"
   ],
   "scripts": {
@@ -63,7 +64,8 @@
     "bundle:server:all": "node scripts/bundle-server.cjs --all-platforms",
     "bundle:webapp": "node scripts/bundle-webapp.cjs",
     "build": "shx rm -rf dist && tsc --noEmit && pkgroll",
-    "test": "pnpm run build && vitest run",
+    "test": "pnpm run build && vitest run --project unit",
+    "test:integration": "pnpm run build && vitest run --project integration-empty --project integration-plan-mode --project integration-authenticated",
     "cli:install": "node scripts/install-local.cjs",
     "prepublishOnly": "pnpm test",
     "postinstall": "node scripts/unpack-tools.cjs"
