@@ -54,6 +54,7 @@ jobs:
         if: steps.check.outputs.behind != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: gh workflow run build-images.yml --ref main
 
       - name: Report status
