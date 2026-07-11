@@ -120,7 +120,10 @@ export interface SpawnSessionOptions {
     directory: string;
     sessionId?: string;
     approvedNewDirectoryCreation?: boolean;
-    agent?: 'claude' | 'codex' | 'gemini' | 'openclaw';
+    agent?: 'claude' | 'codex' | 'gemini' | 'openclaw' | 'agy';
+    permissionMode?: string;
+    modelMode?: string;
+    effortLevel?: string;
     environmentVariables?: Record<string, string>;
     token?: string;
     /**
