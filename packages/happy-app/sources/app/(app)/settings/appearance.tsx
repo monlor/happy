@@ -10,7 +10,7 @@ import { Switch } from '@/components/Switch';
 import { Appearance, Pressable, Text, View } from 'react-native';
 import * as SystemUI from 'expo-system-ui';
 import { darkTheme, lightTheme } from '@/theme';
-import { SESSION_STATUS_INFO_PLACEMENTS, type SessionStatusInfoPlacement } from '@/sync/settings';
+import { SESSION_STATUS_BAR_DISPLAY_MODES, type SessionStatusBarDisplay } from '@/sync/settings';
 import { t, getLanguageNativeName, SUPPORTED_LANGUAGES } from '@/text';
 import {
     normalizeUserMessageBubbleColor,
@@ -44,12 +44,29 @@ const getUserMessageBubbleColorLabel = (color: UserMessageBubbleColor): string =
     }
 };
 
-const getSessionStatusPlacementLabel = (placement: SessionStatusInfoPlacement): string => {
-    switch (placement) {
-        case 'composer':
-            return t('settingsAppearance.sessionStatusPlacementOptions.composer');
-        case 'gearbox':
-            return t('settingsAppearance.sessionStatusPlacementOptions.gearbox');
+const getSessionStatusDisplayLabel = (mode: SessionStatusBarDisplay): string => {
+    switch (mode) {
+        case 'hidden':
+            return t('settingsAppearance.sessionStatusDisplayOptions.hidden');
+        case 'hiddenOnMobile':
+            return t('settingsAppearance.sessionStatusDisplayOptions.hiddenOnMobile');
+        case 'above':
+            return t('settingsAppearance.sessionStatusDisplayOptions.above');
+        case 'below':
+            return t('settingsAppearance.sessionStatusDisplayOptions.below');
+    }
+};
+
+const getSessionStatusDisplayIcon = (mode: SessionStatusBarDisplay): React.ComponentProps<typeof Ionicons>['name'] => {
+    switch (mode) {
+        case 'hidden':
+            return 'eye-off-outline';
+        case 'hiddenOnMobile':
+            return 'phone-portrait-outline';
+        case 'above':
+            return 'chevron-up-outline';
+        case 'below':
+            return 'chevron-down-outline';
     }
 };
 
@@ -89,8 +106,8 @@ function BubbleColorDropdownValue(props: {
     );
 }
 
-function StatusPlacementDropdownValue(props: {
-    placement: SessionStatusInfoPlacement;
+function StatusDisplayDropdownValue(props: {
+    mode: SessionStatusBarDisplay;
     expanded: boolean;
 }) {
     const { theme } = useUnistyles();
@@ -99,7 +116,7 @@ function StatusPlacementDropdownValue(props: {
     return (
         <View style={styles.dropdownValue}>
             <Text style={styles.dropdownValueText} numberOfLines={1}>
-                {getSessionStatusPlacementLabel(props.placement)}
+                {getSessionStatusDisplayLabel(props.mode)}
             </Text>
             <Ionicons
                 name={props.expanded ? 'chevron-up' : 'chevron-down'}
@@ -110,8 +127,8 @@ function StatusPlacementDropdownValue(props: {
     );
 }
 
-function StatusPlacementOption(props: {
-    placement: SessionStatusInfoPlacement;
+function StatusDisplayOption(props: {
+    mode: SessionStatusBarDisplay;
     selected: boolean;
     onPress: () => void;
 }) {
@@ -128,12 +145,12 @@ function StatusPlacementOption(props: {
             ]}
         >
             <Ionicons
-                name={props.placement === 'composer' ? 'reorder-three-outline' : 'settings-outline'}
+                name={getSessionStatusDisplayIcon(props.mode)}
                 size={20}
                 color={props.selected ? theme.colors.status.connecting : theme.colors.textSecondary}
             />
             <Text style={styles.statusPlacementOptionText} numberOfLines={1}>
-                {getSessionStatusPlacementLabel(props.placement)}
+                {getSessionStatusDisplayLabel(props.mode)}
             </Text>
             {props.selected ? (
                 <Ionicons name="checkmark-circle" size={20} color={theme.colors.status.connecting} />
@@ -187,8 +204,7 @@ export default function AppearanceSettingsScreen() {
     const [avatarStyle, setAvatarStyle] = useSettingMutable('avatarStyle');
     const [showFlavorIcons, setShowFlavorIcons] = useSettingMutable('showFlavorIcons');
     const [userMessageBubbleColor, setUserMessageBubbleColor] = useSettingMutable('userMessageBubbleColor');
-    const [sessionStatusInfoPlacement, setSessionStatusInfoPlacement] = useSettingMutable('sessionStatusInfoPlacement');
-    const [, setShowSessionStatusBar] = useSettingMutable('showSessionStatusBar');
+    const [sessionStatusBarDisplay, setSessionStatusBarDisplay] = useSettingMutable('sessionStatusBarDisplay');
     const [themePreference, setThemePreference] = useLocalSettingMutable('themePreference');
     const [preferredLanguage] = useSettingMutable('preferredLanguage');
     const [statusPlacementDropdownOpen, setStatusPlacementDropdownOpen] = React.useState(false);
@@ -199,11 +215,10 @@ export default function AppearanceSettingsScreen() {
     const displayBubbleColor = normalizeUserMessageBubbleColor(userMessageBubbleColor);
     const displayBubblePalette = resolveUserMessageBubbleColor(displayBubbleColor, theme.dark);
     const displayBubbleColorLabel = getUserMessageBubbleColorLabel(displayBubbleColor);
-    const applySessionStatusPlacement = React.useCallback((placement: SessionStatusInfoPlacement) => {
-        setSessionStatusInfoPlacement(placement);
-        setShowSessionStatusBar(placement === 'composer');
+    const applySessionStatusDisplay = React.useCallback((mode: SessionStatusBarDisplay) => {
+        setSessionStatusBarDisplay(mode);
         setStatusPlacementDropdownOpen(false);
-    }, [setSessionStatusInfoPlacement, setShowSessionStatusBar]);
+    }, [setSessionStatusBarDisplay]);
     
     // Language display
     const getLanguageDisplayText = () => {
@@ -273,8 +288,8 @@ export default function AppearanceSettingsScreen() {
                     subtitle={t('settingsAppearance.sessionStatusBarDescription')}
                     icon={<Ionicons name="stats-chart-outline" size={29} color={theme.colors.status.connecting} />}
                     rightElement={
-                        <StatusPlacementDropdownValue
-                            placement={sessionStatusInfoPlacement}
+                        <StatusDisplayDropdownValue
+                            mode={sessionStatusBarDisplay}
                             expanded={statusPlacementDropdownOpen}
                         />
                     }
@@ -286,12 +301,12 @@ export default function AppearanceSettingsScreen() {
                 />
                 {statusPlacementDropdownOpen && (
                     <View style={stylesheet.statusPlacementDropdown}>
-                        {SESSION_STATUS_INFO_PLACEMENTS.map((placement) => (
-                            <StatusPlacementOption
-                                key={placement}
-                                placement={placement}
-                                selected={placement === sessionStatusInfoPlacement}
-                                onPress={() => applySessionStatusPlacement(placement)}
+                        {SESSION_STATUS_BAR_DISPLAY_MODES.map((mode) => (
+                            <StatusDisplayOption
+                                key={mode}
+                                mode={mode}
+                                selected={mode === sessionStatusBarDisplay}
+                                onPress={() => applySessionStatusDisplay(mode)}
                             />
                         ))}
                     </View>

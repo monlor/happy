@@ -491,7 +491,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
     const sessionUsage = useSessionUsage(sessionId);
     const gitStatus = useSessionGitStatus(sessionId);
     const alwaysShowContextSize = useSetting('alwaysShowContextSize');
-    const sessionStatusInfoPlacement = useSetting('sessionStatusInfoPlacement');
+    const sessionStatusBarDisplay = useSetting('sessionStatusBarDisplay');
     const experiments = useSetting('experiments');
     const expResumeSession = useSetting('expResumeSession');
     const { canResume, resumeSession, resumingSession } = useSessionQuickActions(session);
@@ -745,7 +745,7 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
             usageData={usageData}
             alwaysShowContextSize={alwaysShowContextSize}
             zenMode={zenMode}
-            showSessionStatusInfoInSettings={sessionStatusInfoPlacement === 'gearbox'}
+            showSessionStatusInfoInSettings={false}
             sessionStatusGitBranch={statusBarGitBranch}
             sessionStatusModelLabel={statusBarModelLabel}
             sessionStatusEffortLabel={statusBarEffortLabel}
@@ -770,7 +770,13 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
         </CenteredInputWidth>
     ) : null;
 
-    const sessionStatusBar = sessionStatusInfoPlacement === 'composer' ? (
+    // 'hiddenOnMobile' hides the bar on phones but still shows it (below the
+    // composer) on tablet/desktop/web. 'above'/'below' show it everywhere.
+    const showSessionStatusBar = sessionStatusBarDisplay === 'above'
+        || sessionStatusBarDisplay === 'below'
+        || (sessionStatusBarDisplay === 'hiddenOnMobile' && deviceType !== 'phone');
+    const sessionStatusBarPosition = sessionStatusBarDisplay === 'above' ? 'above' : 'below';
+    const sessionStatusBar = showSessionStatusBar ? (
         <CenteredInputWidth horizontalPadding={sessionInputHorizontalPadding}>
             <SessionStatusBar
                 gitBranch={statusBarGitBranch}
@@ -800,8 +806,9 @@ function SessionViewLoaded({ sessionId, session }: { sessionId: string, session:
                     />
                 </CenteredInputWidth>
             )}
+            {sessionStatusBarPosition === 'above' ? sessionStatusBar : null}
             {composer}
-            {sessionStatusBar}
+            {sessionStatusBarPosition === 'below' ? sessionStatusBar : null}
         </>
     );
 

@@ -165,9 +165,11 @@ export const ca: TranslationStructure = {
         chatDescription: 'Personalitza l\'aspecte dels missatges del xat',
         sessionStatusBar: 'Informació d\'estat de la sessió',
         sessionStatusBarDescription: 'Tria on es mostren la branca, el model, l\'esforç i el context',
-        sessionStatusPlacementOptions: {
-            composer: 'Sota el compositor',
-            gearbox: 'Menú d\'engranatge',
+        sessionStatusDisplayOptions: {
+            hidden: 'Ocult',
+            hiddenOnMobile: 'Ocult al mòbil',
+            above: 'Sobre el compositor',
+            below: 'Sota el compositor',
         },
         userMessageBubbleColor: 'Color dels teus missatges',
         userMessageBubbleColorDescription: 'Fes que els teus missatges siguin més fàcils de trobar en xats llargs',

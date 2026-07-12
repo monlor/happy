@@ -182,9 +182,11 @@ export const pl: TranslationStructure = {
         chatDescription: 'Dostosuj wygląd wiadomości czatu',
         sessionStatusBar: 'Informacje o stanie sesji',
         sessionStatusBarDescription: 'Wybierz, gdzie wyświetlać gałąź, model, wysiłek i kontekst',
-        sessionStatusPlacementOptions: {
-            composer: 'Pod polem wprowadzania',
-            gearbox: 'Menu zębatki',
+        sessionStatusDisplayOptions: {
+            hidden: 'Ukryte',
+            hiddenOnMobile: 'Ukryte na telefonie',
+            above: 'Nad polem wprowadzania',
+            below: 'Pod polem wprowadzania',
         },
         userMessageBubbleColor: 'Kolor Twoich wiadomości',
         userMessageBubbleColorDescription: 'Ułatw znajdowanie swoich wiadomości w długich czatach',

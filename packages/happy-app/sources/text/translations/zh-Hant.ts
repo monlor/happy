@@ -165,9 +165,11 @@ export const zhHant: TranslationStructure = {
         chatDescription: '自訂聊天訊息外觀',
         sessionStatusBar: '工作階段狀態資訊',
         sessionStatusBarDescription: '選擇分支、模型、工作量和上下文的顯示位置',
-        sessionStatusPlacementOptions: {
-            composer: '輸入框下方',
-            gearbox: '齒輪選單',
+        sessionStatusDisplayOptions: {
+            hidden: '隱藏',
+            hiddenOnMobile: '在手機上隱藏',
+            above: '輸入框上方',
+            below: '輸入框下方',
         },
         userMessageBubbleColor: '使用者氣泡顏色',
         userMessageBubbleColorDescription: '讓您的訊息在長聊天中更容易找到',

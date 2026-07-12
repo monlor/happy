@@ -163,9 +163,11 @@ export const it: TranslationStructure = {
         chatDescription: 'Personalizza l\'aspetto dei messaggi della chat',
         sessionStatusBar: 'Informazioni sullo stato della sessione',
         sessionStatusBarDescription: 'Scegli dove mostrare branch, modello, impegno e contesto',
-        sessionStatusPlacementOptions: {
-            composer: 'Sotto il compositore',
-            gearbox: 'Menu ingranaggio',
+        sessionStatusDisplayOptions: {
+            hidden: 'Nascosto',
+            hiddenOnMobile: 'Nascosto su mobile',
+            above: 'Sopra il compositore',
+            below: 'Sotto il compositore',
         },
         userMessageBubbleColor: 'Colore dei tuoi messaggi',
         userMessageBubbleColorDescription: 'Rendi i tuoi messaggi più facili da trovare nelle chat lunghe',

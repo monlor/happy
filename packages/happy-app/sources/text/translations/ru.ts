@@ -151,9 +151,11 @@ export const ru: TranslationStructure = {
         chatDescription: 'Настройте внешний вид сообщений в чате',
         sessionStatusBar: 'Информация о сессии',
         sessionStatusBarDescription: 'Выберите, где показывать ветку, модель, усилия и контекст',
-        sessionStatusPlacementOptions: {
-            composer: 'Под полем ввода',
-            gearbox: 'В меню шестерёнки',
+        sessionStatusDisplayOptions: {
+            hidden: 'Скрыто',
+            hiddenOnMobile: 'Скрыто на телефоне',
+            above: 'Над полем ввода',
+            below: 'Под полем ввода',
         },
         userMessageBubbleColor: 'Цвет ваших сообщений',
         userMessageBubbleColorDescription: 'Сделайте ваши сообщения заметнее в длинных чатах',

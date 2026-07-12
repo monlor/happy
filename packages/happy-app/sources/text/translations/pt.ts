@@ -164,9 +164,11 @@ export const pt: TranslationStructure = {
         chatDescription: 'Personalize a aparência das mensagens do chat',
         sessionStatusBar: 'Informações de status da sessão',
         sessionStatusBarDescription: 'Escolha onde a branch, o modelo, o esforço e o contexto aparecem',
-        sessionStatusPlacementOptions: {
-            composer: 'Abaixo do compositor',
-            gearbox: 'Menu de engrenagem',
+        sessionStatusDisplayOptions: {
+            hidden: 'Oculto',
+            hiddenOnMobile: 'Oculto no celular',
+            above: 'Acima do compositor',
+            below: 'Abaixo do compositor',
         },
         userMessageBubbleColor: 'Cor das suas mensagens',
         userMessageBubbleColorDescription: 'Torne suas mensagens mais fáceis de encontrar em chats longos',

@@ -166,9 +166,11 @@ export const ja: TranslationStructure = {
         chatDescription: 'チャットメッセージの見た目をカスタマイズ',
         sessionStatusBar: 'セッションステータス情報',
         sessionStatusBarDescription: 'ブランチ、モデル、エフォート、コンテキストの表示場所を選択',
-        sessionStatusPlacementOptions: {
-            composer: '入力欄の下',
-            gearbox: '歯車メニュー',
+        sessionStatusDisplayOptions: {
+            hidden: '非表示',
+            hiddenOnMobile: 'モバイルで非表示',
+            above: '入力欄の上',
+            below: '入力欄の下',
         },
         userMessageBubbleColor: 'ユーザーバブルの色',
         userMessageBubbleColorDescription: '長いチャットで自分のメッセージを見つけやすくします',

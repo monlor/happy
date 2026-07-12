@@ -163,9 +163,11 @@ export const en = {
         chatDescription: 'Customize chat message appearance',
         sessionStatusBar: 'Session Status Info',
         sessionStatusBarDescription: 'Choose where branch, model, effort, and context appear',
-        sessionStatusPlacementOptions: {
-            composer: 'Below composer',
-            gearbox: 'Gear menu',
+        sessionStatusDisplayOptions: {
+            hidden: 'Hidden',
+            hiddenOnMobile: 'Hidden on mobile',
+            above: 'Above composer',
+            below: 'Below composer',
         },
         userMessageBubbleColor: 'User Bubble Color',
         userMessageBubbleColorDescription: 'Make your messages easier to spot in long chats',

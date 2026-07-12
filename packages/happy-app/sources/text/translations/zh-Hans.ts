@@ -166,9 +166,11 @@ export const zhHans: TranslationStructure = {
         chatDescription: '自定义聊天消息外观',
         sessionStatusBar: '会话状态信息',
         sessionStatusBarDescription: '选择分支、模型、工作量和上下文的显示位置',
-        sessionStatusPlacementOptions: {
-            composer: '输入框下方',
-            gearbox: '齿轮菜单',
+        sessionStatusDisplayOptions: {
+            hidden: '隐藏',
+            hiddenOnMobile: '在手机上隐藏',
+            above: '输入框上方',
+            below: '输入框下方',
         },
         userMessageBubbleColor: '用户气泡颜色',
         userMessageBubbleColorDescription: '让您的消息在长聊天中更容易找到',

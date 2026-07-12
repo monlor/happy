@@ -9,8 +9,11 @@ import { DEFAULT_USER_MESSAGE_BUBBLE_COLOR } from '../utils/userMessageBubbleCol
 // Current schema version for backward compatibility
 export const SUPPORTED_SCHEMA_VERSION = 2;
 
-export const SESSION_STATUS_INFO_PLACEMENTS = ['composer', 'gearbox'] as const;
-export type SessionStatusInfoPlacement = typeof SESSION_STATUS_INFO_PLACEMENTS[number];
+// Where (and whether) the branch/model/effort/context status bar renders
+// around the composer. 'hiddenOnMobile' hides it on phones but shows it
+// below the composer on tablet/desktop/web.
+export const SESSION_STATUS_BAR_DISPLAY_MODES = ['hidden', 'hiddenOnMobile', 'above', 'below'] as const;
+export type SessionStatusBarDisplay = typeof SESSION_STATUS_BAR_DISPLAY_MODES[number];
 
 export const SettingsSchema = z.object({
     // Schema version for compatibility detection
@@ -30,8 +33,7 @@ export const SettingsSchema = z.object({
     avatarStyle: z.string().describe('Avatar display style'),
     showFlavorIcons: z.boolean().describe('Whether to show AI provider icons in avatars'),
     userMessageBubbleColor: z.string().describe('User message bubble color preset'),
-    sessionStatusInfoPlacement: z.enum(SESSION_STATUS_INFO_PLACEMENTS).describe('Where to show branch, model, effort, and context info'),
-    showSessionStatusBar: z.boolean().describe('Whether to show branch, model, effort, and context below the composer'),
+    sessionStatusBarDisplay: z.enum(SESSION_STATUS_BAR_DISPLAY_MODES).describe('Whether/where to show the branch, model, effort, and context status bar'),
 
     hideInactiveSessions: z.boolean().describe('Hide inactive sessions in the main list'),
     sortSessionsByActivity: z.boolean().describe('Sort the session list by last activity instead of creation date'),
@@ -105,8 +107,9 @@ export const settingsDefaults: Settings = {
     avatarStyle: 'brutalist',
     showFlavorIcons: false,
     userMessageBubbleColor: DEFAULT_USER_MESSAGE_BUBBLE_COLOR,
-    sessionStatusInfoPlacement: 'composer',
-    showSessionStatusBar: true,
+    // Hidden everywhere by default — the context usage indicator is still too
+    // raw to roll out; users can opt back in from appearance settings.
+    sessionStatusBarDisplay: 'hidden',
 
     hideInactiveSessions: false,
     sortSessionsByActivity: false,
@@ -153,12 +156,6 @@ export function settingsParse(settings: unknown): Settings {
     if (parsed.data.preferredLanguage === 'zh') {
         console.log('[Settings Migration] Converting language code from "zh" to "zh-Hans"');
         parsed.data.preferredLanguage = 'zh-Hans';
-    }
-
-    if (parsed.data.sessionStatusInfoPlacement === undefined) {
-        parsed.data.sessionStatusInfoPlacement = parsed.data.showSessionStatusBar === false
-            ? 'gearbox'
-            : settingsDefaults.sessionStatusInfoPlacement;
     }
 
     // Merge defaults, parsed settings, and preserve unknown fields
