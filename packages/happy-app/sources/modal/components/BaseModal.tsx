@@ -8,6 +8,7 @@ import {
     KeyboardAvoidingView,
     Platform
 } from 'react-native';
+import { AnimatedBlurBackdrop } from '@/components/AnimatedOverlay';
 
 // On web, stop events from propagating to expo-router's modal overlay
 // which intercepts clicks when it applies pointer-events: none to body
@@ -66,22 +67,33 @@ export function BaseModal({
         >
             <KeyboardAvoidingView
                 style={styles.container}
-                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                // Android already resizes the modal window for the IME. Applying
+                // another height adjustment here makes a centered, animated modal
+                // repeatedly re-layout while its input is taking focus.
+                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
                 {...webEventHandlers}
             >
-                <TouchableWithoutFeedback onPress={handleBackdropPress}>
-                    <Animated.View 
-                        style={[
-                            styles.backdrop,
-                            {
-                                opacity: fadeAnim.interpolate({
-                                    inputRange: [0, 1],
-                                    outputRange: [0, 0.5]
-                                })
-                            }
-                        ]}
+                {Platform.OS === 'web' ? (
+                    <TouchableWithoutFeedback onPress={handleBackdropPress}>
+                        <Animated.View
+                            style={[
+                                styles.backdrop,
+                                {
+                                    opacity: fadeAnim.interpolate({
+                                        inputRange: [0, 1],
+                                        outputRange: [0, 0.5],
+                                    }),
+                                },
+                            ]}
+                        />
+                    </TouchableWithoutFeedback>
+                ) : (
+                    <AnimatedBlurBackdrop
+                        blurIntensity={44}
+                        dimColor="rgba(0, 0, 0, 0.42)"
+                        onPress={handleBackdropPress}
                     />
-                </TouchableWithoutFeedback>
+                )}
                 
                 <Animated.View
                     style={[
@@ -114,7 +126,7 @@ const styles = StyleSheet.create({
     },
     backdrop: {
         ...StyleSheet.absoluteFillObject,
-        backgroundColor: 'black'
+        backgroundColor: 'black',
     },
     content: {
         zIndex: 1

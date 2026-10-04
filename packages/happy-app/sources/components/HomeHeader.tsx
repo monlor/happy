@@ -1,15 +1,17 @@
 import * as React from 'react';
 import { Header } from './navigation/Header';
-import { useSocketStatus } from '@/sync/storage';
-import { Platform, Pressable, Text, View } from 'react-native';
-import { Typography } from '@/constants/Typography';
-import { StatusDot } from './StatusDot';
+import { Platform, Pressable, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useSegments } from 'expo-router';
 import { getServerInfo } from '@/sync/serverConfig';
 import { Image } from 'expo-image';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { t } from '@/text';
+import { ShortcutHintBadge, useShortcutHints } from './ShortcutHints';
+import { HomeHeaderTitle } from './HomeHeaderTitle';
+import { OnboardingHeader } from './onboarding/OnboardingHeader';
+
+const HEADER_LOGO_SIZE = 19;
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     headerButton: {
@@ -18,6 +20,15 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         height: 32,
         alignItems: 'center',
         justifyContent: 'center',
+    },
+    headerButtonShortcutActive: {
+        borderRadius: 8,
+        backgroundColor: theme.colors.surfaceSelected,
+    },
+    headerShortcutBadge: {
+        position: 'absolute',
+        top: -8,
+        right: -12,
     },
     iconButton: {
         color: theme.colors.header.tint,
@@ -30,86 +41,41 @@ const stylesheet = StyleSheet.create((theme, runtime) => ({
         justifyContent: 'center',
         tintColor: theme.colors.header.tint,
     },
-    titleContainer: {
-        flex: 1,
-        alignItems: 'center',
-    },
-    titleText: {
-        fontSize: 17,
-        color: theme.colors.header.tint,
-        fontWeight: '600',
-        ...Typography.default('semiBold'),
-    },
-    subtitleText: {
-        fontSize: 12,
-        color: theme.colors.textSecondary,
-        marginTop: -2,
-    },
-    statusContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        marginTop: -2,
-    },
-    statusDot: {
-        marginRight: 4,
-    },
-    statusText: {
-        fontSize: 12,
-        fontWeight: '500',
-        lineHeight: 16,
-        ...Typography.default(),
-    },
-    // Status colors
-    statusConnected: {
-        color: theme.colors.status.connected,
-    },
-    statusConnecting: {
-        color: theme.colors.status.connecting,
-    },
-    statusDisconnected: {
-        color: theme.colors.status.disconnected,
-    },
-    statusError: {
-        color: theme.colors.status.error,
-    },
-    statusDefault: {
-        color: theme.colors.status.default,
-    },
-    centeredTitle: {
-        textAlign: Platform.OS === 'ios' ? 'center' : 'left',
-        alignSelf: Platform.OS === 'ios' ? 'center' : 'flex-start',
-        flex: 1,
-    },
 }));
 
 
 export const HomeHeader = React.memo(() => {
     const { theme } = useUnistyles();
+    const header = (
+        <Header
+            title={<HomeHeaderTitle title={t('sidebar.sessionsTitle')} />}
+            headerRight={() => <HeaderRight />}
+            headerLeft={() => <HeaderLeft />}
+            headerLeftGlass={Platform.OS !== 'web'}
+            headerShadowVisible={false}
+            headerTransparent={true}
+            mobileTitleSurface="plain"
+            mobileTitleAlignment="center"
+        />
+    );
 
-    return (
-        <View style={{ backgroundColor: theme.colors.groupped.background }}>
-            <Header
-                title={<HeaderTitleWithSubtitle />}
-                headerRight={() => <HeaderRight />}
-                headerLeft={() => <HeaderLeft />}
-                headerShadowVisible={false}
-                headerTransparent={true}
-            />
-        </View>
-    )
+    return Platform.OS === 'web'
+        ? <View style={{ backgroundColor: theme.colors.groupped.background }}>{header}</View>
+        : header;
 })
 
+/**
+ * The create-account screen's header. No title, no logo, and no socket
+ * status: nothing is connected yet, so the only chrome is the server
+ * settings action and, for self-hosters, the hostname they are pointed at.
+ */
 export const HomeHeaderNotAuth = React.memo(() => {
     useSegments(); // Re-rendered automatically when screen navigates back
     const serverInfo = getServerInfo();
-    const { theme } = useUnistyles();
     return (
-        <Header
-            title={<HeaderTitleWithSubtitle subtitle={serverInfo.isCustom ? serverInfo.hostname + (serverInfo.port ? `:${serverInfo.port}` : '') : undefined} />}
+        <OnboardingHeader
+            subtitle={serverInfo.isCustom ? serverInfo.hostname + (serverInfo.port ? `:${serverInfo.port}` : '') : undefined}
             headerRight={() => <HeaderRightNotAuth />}
-            headerLeft={() => <HeaderLeft />}
-            headerShadowVisible={false}
-            headerBackgroundColor={theme.colors.groupped.background}
         />
     )
 });
@@ -118,14 +84,19 @@ function HeaderRight() {
     const router = useRouter();
     const styles = stylesheet;
     const { theme } = useUnistyles();
+    const { visible: shortcutHintsVisible } = useShortcutHints();
 
     return (
         <Pressable
             onPress={() => router.navigate('/new')}
             hitSlop={15}
-            style={styles.headerButton}
+            style={[
+                styles.headerButton,
+                shortcutHintsVisible && styles.headerButtonShortcutActive,
+            ]}
         >
             <Ionicons name="add-outline" size={28} color={theme.colors.header.tint} />
+            <ShortcutHintBadge shortcutKey="N" style={styles.headerShortcutBadge} />
         </Pressable>
     );
 }
@@ -135,14 +106,17 @@ function HeaderRightNotAuth() {
     const { theme } = useUnistyles();
     const styles = stylesheet;
 
-
+    // Same gear the signed-in home uses: this is a settings action, and the
+    // server-rack glyph named an object most people have never seen.
     return (
         <Pressable
             onPress={() => router.push('/server')}
             hitSlop={15}
+            accessibilityRole="button"
+            accessibilityLabel={t('server.title')}
             style={styles.headerButton}
         >
-            <Ionicons name="server-outline" size={24} color={theme.colors.header.tint} />
+            <Ionicons name="settings-outline" size={22} color={theme.colors.header.tint} />
         </Pressable>
     );
 }
@@ -155,89 +129,9 @@ function HeaderLeft() {
             <Image
                 source={require('@/assets/images/logo-black.png')}
                 contentFit="contain"
-                style={[{ width: 24, height: 24 }]}
+                style={{ width: HEADER_LOGO_SIZE, height: HEADER_LOGO_SIZE }}
                 tintColor={theme.colors.header.tint}
             />
-        </View>
-    );
-}
-
-function HeaderTitleWithSubtitle({ subtitle }: { subtitle?: string }) {
-    const socketStatus = useSocketStatus();
-    const styles = stylesheet;
-
-    // Get connection status styling (matching sessionUtils.ts pattern)
-    const getConnectionStatus = () => {
-        const { status } = socketStatus;
-        switch (status) {
-            case 'connected':
-                return {
-                    color: styles.statusConnected.color,
-                    isPulsing: false,
-                    text: t('status.connected'),
-                    textColor: styles.statusConnected.color
-                };
-            case 'connecting':
-                return {
-                    color: styles.statusConnecting.color,
-                    isPulsing: true,
-                    text: t('status.connecting'),
-                    textColor: styles.statusConnecting.color
-                };
-            case 'disconnected':
-                return {
-                    color: styles.statusDisconnected.color,
-                    isPulsing: false,
-                    text: t('status.disconnected'),
-                    textColor: styles.statusDisconnected.color
-                };
-            case 'error':
-                return {
-                    color: styles.statusError.color,
-                    isPulsing: false,
-                    text: t('status.error'),
-                    textColor: styles.statusError.color
-                };
-            default:
-                return {
-                    color: styles.statusDefault.color,
-                    isPulsing: false,
-                    text: '',
-                    textColor: styles.statusDefault.color
-                };
-        }
-    };
-
-    const hasCustomSubtitle = !!subtitle;
-    const connectionStatus = getConnectionStatus();
-    const showConnectionStatus = !hasCustomSubtitle && connectionStatus.text;
-
-    return (
-        <View style={styles.titleContainer}>
-            <Text style={styles.titleText}>
-                {t('sidebar.sessionsTitle')}
-            </Text>
-            {hasCustomSubtitle && (
-                <Text style={styles.subtitleText}>
-                    {subtitle}
-                </Text>
-            )}
-            {showConnectionStatus && (
-                <View style={styles.statusContainer}>
-                    <StatusDot
-                        color={connectionStatus.color}
-                        isPulsing={connectionStatus.isPulsing}
-                        size={6}
-                        style={styles.statusDot}
-                    />
-                    <Text style={[
-                        styles.statusText,
-                        { color: connectionStatus.textColor }
-                    ]}>
-                        {connectionStatus.text}
-                    </Text>
-                </View>
-            )}
         </View>
     );
 }

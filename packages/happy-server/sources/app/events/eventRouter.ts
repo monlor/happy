@@ -4,6 +4,13 @@ import { GitHubProfile } from "@/app/api/types";
 import { AccountProfile } from "@/types";
 import { getPublicUrl } from "@/storage/files";
 import type { SessionMessageContent } from "@slopus/happy-wire";
+import { sessionAvatar, type SessionAvatar } from '@/app/session/sessionAvatar';
+
+/**
+ * Cross-replica presence lookups must stay well inside the CLI's 15s push
+ * timeout, and a stalled peer replica should degrade to "send" quickly.
+ */
+const PRESENCE_FETCH_TIMEOUT_MS = 2_000;
 
 // === CONNECTION TYPES ===
 
@@ -62,10 +69,20 @@ export type UpdateEvent = {
     agentState: string | null;
     agentStateVersion: number;
     dataEncryptionKey: string | null;
+    projectId: string | null;
     active: boolean;
     activeAt: number;
     createdAt: number;
     updatedAt: number;
+} | {
+    type: 'new-project';
+    projectId: string;
+} | {
+    type: 'update-project';
+    projectId: string;
+} | {
+    type: 'delete-project';
+    projectId: string;
 } | {
     type: 'update-session';
     sessionId: string;
@@ -281,20 +298,32 @@ class EventRouter {
     // === PRESENCE QUERIES ===
 
     /**
-     * Returns true if the user has any non-machine socket that hasn't
-     * reported `app-state: background`.  Old clients that never send
-     * `app-state` are treated as active (connected = present).
+     * Returns true if the user is demonstrably looking at a Happy UI client
+     * right now. Used to suppress a push they would only find redundant.
      *
-     * Uses fetchSockets() which works cross-replica via Redis streams adapter.
+     * Both conditions are deliberately positive — presence must be proven, not
+     * assumed. The costs are asymmetric: a redundant push is a buzz the user
+     * dismisses, while a missed push leaves an agent blocked on a permission
+     * prompt with nobody watching.
+     *
+     *   - Only `user-scoped` sockets are notification surfaces. `session-scoped`
+     *     is the coding agent itself and `machine-scoped` is the daemon; neither
+     *     displays anything. Counting `session-scoped` meant a running session's
+     *     own socket suppressed the very push that session was asking for, so
+     *     mobile push went silent whenever a session was live.
+     *   - Only an explicit `app-state: active` counts. A client that never
+     *     reported is unknown, not present.
+     *
+     * Uses fetchSockets() which works cross-replica via Redis streams adapter,
+     * bounded so an unresponsive peer replica cannot stall a push. On timeout
+     * this throws and the caller fails open — an infrastructure problem must
+     * never turn into silence.
      */
-    async hasActiveNonMachineSocket(userId: string): Promise<boolean> {
-        const sockets = await this.io.in(`user:${userId}`).fetchSockets();
-        return sockets.some(s => {
-            if (s.data.clientType === 'machine-scoped') return false;
-            // No app-state yet → old client or just connected; assume active
-            const appState = s.data.appState as string | undefined;
-            return appState !== 'background';
-        });
+    async hasActiveUiClient(userId: string): Promise<boolean> {
+        const sockets = await this.io.in(`user:${userId}`)
+            .timeout(PRESENCE_FETCH_TIMEOUT_MS)
+            .fetchSockets();
+        return sockets.some(s => s.data.clientType === 'user-scoped' && s.data.appState === 'active');
     }
 
     // === PRIVATE ROUTING LOGIC ===
@@ -337,12 +366,16 @@ export const eventRouter = new EventRouter();
 
 export function buildNewSessionUpdate(session: {
     id: string;
+    avatarRef?: string | null;
+    avatarPreview?: string | null;
+    avatarVersion?: number;
     seq: number;
     metadata: string;
     metadataVersion: number;
     agentState: string | null;
     agentStateVersion: number;
     dataEncryptionKey: Uint8Array | null;
+    projectId: string | null;
     active: boolean;
     lastActiveAt: Date;
     createdAt: Date;
@@ -360,10 +393,49 @@ export function buildNewSessionUpdate(session: {
             agentState: session.agentState,
             agentStateVersion: session.agentStateVersion,
             dataEncryptionKey: session.dataEncryptionKey ? Buffer.from(session.dataEncryptionKey).toString('base64') : null,
+            projectId: session.projectId,
+            avatar: sessionAvatar(session),
+            avatarVersion: session.avatarVersion ?? 0,
             active: session.active,
             activeAt: session.lastActiveAt.getTime(),
             createdAt: session.createdAt.getTime(),
             updatedAt: session.updatedAt.getTime()
+        },
+        createdAt: Date.now()
+    };
+}
+
+export function buildNewProjectUpdate(project: { id: string }, updateSeq: number, updateId: string): UpdatePayload {
+    return {
+        id: updateId,
+        seq: updateSeq,
+        body: {
+            t: 'new-project',
+            projectId: project.id,
+        },
+        createdAt: Date.now()
+    };
+}
+
+export function buildUpdateProjectUpdate(project: { id: string }, updateSeq: number, updateId: string): UpdatePayload {
+    return {
+        id: updateId,
+        seq: updateSeq,
+        body: {
+            t: 'update-project',
+            projectId: project.id,
+        },
+        createdAt: Date.now()
+    };
+}
+
+export function buildDeleteProjectUpdate(projectId: string, updateSeq: number, updateId: string): UpdatePayload {
+    return {
+        id: updateId,
+        seq: updateSeq,
+        body: {
+            t: 'delete-project',
+            projectId
         },
         createdAt: Date.now()
     };
@@ -396,7 +468,7 @@ export function buildNewMessageUpdate(message: {
     };
 }
 
-export function buildUpdateSessionUpdate(sessionId: string, updateSeq: number, updateId: string, metadata?: { value: string; version: number }, agentState?: { value: string; version: number }): UpdatePayload {
+export function buildUpdateSessionUpdate(sessionId: string, updateSeq: number, updateId: string, metadata?: { value: string; version: number }, agentState?: { value: string; version: number }, projectId?: string | null, avatar?: SessionAvatar | null, avatarVersion?: number): UpdatePayload {
     return {
         id: updateId,
         seq: updateSeq,
@@ -404,7 +476,10 @@ export function buildUpdateSessionUpdate(sessionId: string, updateSeq: number, u
             t: 'update-session',
             id: sessionId,
             metadata,
-            agentState
+            agentState,
+            ...(avatar !== undefined ? { avatar } : {}),
+            ...(avatarVersion !== undefined ? { avatarVersion } : {}),
+            ...(projectId !== undefined ? { projectId } : {})
         },
         createdAt: Date.now()
     };

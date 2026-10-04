@@ -8,14 +8,22 @@ import { CodeView } from '../CodeView';
 import { ToolSectionView } from './ToolSectionView';
 import { useElapsedTime } from '@/hooks/useElapsedTime';
 import { ToolError } from './ToolError';
-import { knownTools } from '@/components/tools/knownTools';
+import { getToolCategoryIcon, knownTools } from '@/components/tools/knownTools';
 import { Metadata } from '@/sync/storageTypes';
 import { useRouter } from 'expo-router';
 import { PermissionFooter } from './PermissionFooter';
 import { parseToolUseError } from '@/utils/toolErrorParser';
-import { formatMCPTitle } from './views/MCPToolView';
 import { t } from '@/text';
-import { getTerminalToolCommand, shouldRenderToolCardHeader } from '@/utils/toolDisplay';
+import {
+    formatMCPTitle,
+    getToolActivityLabel,
+    getToolDisplayTitle,
+    getToolSummaryCategory,
+    getTerminalToolCommand,
+    shouldRenderToolCardHeader,
+    shouldUseCompactToolRow,
+} from '@/utils/toolDisplay';
+import { useSetting } from '@/sync/storage';
 
 interface ToolViewProps {
     metadata: Metadata | null;
@@ -30,6 +38,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     const { tool, onPress, sessionId, messageId } = props;
     const router = useRouter();
     const { theme } = useUnistyles();
+    const compactToolCalls = useSetting('compactToolCalls');
 
     // For file-editing tools, navigate to file route instead of message detail
     const fileEditTools = ['Edit', 'MultiEdit', 'Write'];
@@ -60,7 +69,8 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     let description: string | null = null;
     let status: string | null = null;
     let minimal = false;
-    let icon = <Ionicons name="construct-outline" size={18} color={theme.colors.textSecondary} />;
+    let icon = getToolCategoryIcon(getToolSummaryCategory(tool.name), 18, theme.colors.text)
+        ?? <Ionicons name="construct-outline" size={18} color={theme.colors.textSecondary} />;
     let noStatus = false;
     let hideDefaultError = false;
     
@@ -81,7 +91,7 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     }
 
     // Handle optional title and function type
-    let toolTitle = tool.name;
+    let toolTitle = getToolDisplayTitle(tool);
     
     // Special handling for MCP tools
     if (tool.name.startsWith('mcp__')) {
@@ -166,8 +176,16 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
 
     const terminalCommand = getTerminalToolCommand(tool);
     const isCompactTerminalTool = terminalCommand !== null;
-    const isInlineCodexPatch = Platform.OS === 'web' && tool.name === 'CodexPatch';
-    const renderCardHeader = shouldRenderToolCardHeader(tool.name, Platform.OS);
+    const SpecificToolView = getToolViewComponent(tool.name);
+    const needsApprovalInput = tool.permission?.status === 'pending' && SpecificToolView === null;
+    const isCompactActivityTool = !needsApprovalInput && (shouldUseCompactToolRow(tool, compactToolCalls, SpecificToolView !== null)
+        || minimal
+        || isCompactTerminalTool);
+    const activityLabel = getToolActivityLabel(tool);
+    const isInlineCodexPatch = Platform.OS === 'web' && (tool.name === 'CodexPatch' || tool.name === 'apply_patch');
+    // A user attachment is shown as a bare picture, not inside a tool card.
+    const isInlineAttachment = tool.name === 'file';
+    const renderCardHeader = isCompactActivityTool || shouldRenderToolCardHeader(tool.name, Platform.OS);
     const renderPermissionFooter = () => (
         tool.permission && sessionId && tool.name !== 'AskUserQuestion'
             ? <PermissionFooter permission={tool.permission} sessionId={sessionId} toolName={tool.name} toolInput={tool.input} metadata={props.metadata} />
@@ -175,16 +193,14 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     );
 
     const renderHeaderContent = () => {
-        if (isCompactTerminalTool) {
+        if (isCompactActivityTool) {
             return (
                 <View style={styles.compactHeaderLeft}>
                     <View style={styles.compactIconContainer}>
                         {icon}
                     </View>
-                    <Text style={styles.compactToolName} numberOfLines={1}>{toolTitle}</Text>
-                    {status ? <Text style={styles.compactStatus} numberOfLines={1}>{status}</Text> : null}
-                    <Text style={styles.compactCommandText} numberOfLines={1}>
-                        {terminalCommand}
+                    <Text style={styles.compactActivityText} numberOfLines={1}>
+                        {activityLabel}
                     </Text>
                     {tool.state === 'running' && (
                         <View style={styles.elapsedContainer}>
@@ -220,14 +236,14 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
     };
 
     return (
-        <View style={isCompactTerminalTool ? styles.compactContainer : isInlineCodexPatch ? styles.inlineContainer : styles.container}>
+        <View style={isCompactActivityTool ? styles.compactContainer : isInlineCodexPatch || isInlineAttachment ? styles.inlineContainer : styles.container}>
             {renderCardHeader ? (
                 isPressable ? (
-                    <TouchableOpacity style={isCompactTerminalTool ? styles.compactHeader : styles.header} onPress={handlePress} activeOpacity={0.8}>
+                    <TouchableOpacity style={isCompactActivityTool ? styles.compactHeader : styles.header} onPress={handlePress} activeOpacity={0.8}>
                         {renderHeaderContent()}
                     </TouchableOpacity>
                 ) : (
-                    <View style={isCompactTerminalTool ? styles.compactHeader : styles.header}>
+                    <View style={isCompactActivityTool ? styles.compactHeader : styles.header}>
                         {renderHeaderContent()}
                     </View>
                 )
@@ -236,20 +252,20 @@ export const ToolView = React.memo<ToolViewProps>((props) => {
             {/* Content area - either custom children or tool-specific view */}
             {(() => {
                 // Check if minimal first - minimal tools don't show content
-                if (minimal || isCompactTerminalTool) {
+                if (isCompactActivityTool) {
                     return null;
                 }
 
                 // Try to use a specific tool view component first
-                const SpecificToolView = getToolViewComponent(tool.name);
                 if (SpecificToolView) {
                     return (
-                        <View style={styles.content}>
+                        <View style={isInlineAttachment ? undefined : styles.content}>
                             <SpecificToolView
                                 tool={tool}
                                 metadata={props.metadata}
                                 messages={props.messages ?? []}
                                 sessionId={sessionId}
+                                messageId={messageId}
                                 permissionFooter={isInlineCodexPatch ? renderPermissionFooter() : undefined}
                             />
                             {tool.state === 'error' && tool.result &&
@@ -315,7 +331,7 @@ const styles = StyleSheet.create((theme) => ({
     },
     compactContainer: {
         backgroundColor: 'transparent',
-        marginVertical: 1,
+        marginVertical: 2,
         overflow: 'visible',
     },
     inlineContainer: {
@@ -354,13 +370,13 @@ const styles = StyleSheet.create((theme) => ({
     compactHeaderLeft: {
         flexDirection: 'row',
         alignItems: 'center',
-        gap: 6,
+        gap: 10,
         flex: 1,
         minWidth: 0,
     },
     compactIconContainer: {
-        width: 18,
-        height: 18,
+        width: 20,
+        height: 20,
         alignItems: 'center',
         justifyContent: 'center',
     },
@@ -380,27 +396,12 @@ const styles = StyleSheet.create((theme) => ({
         fontWeight: '500',
         color: theme.colors.text,
     },
-    compactToolName: {
-        fontSize: 13,
-        lineHeight: 18,
-        fontWeight: '500',
-        color: theme.colors.text,
-        flexShrink: 0,
-        maxWidth: 150,
-    },
-    compactStatus: {
-        fontSize: 12,
-        lineHeight: 18,
-        color: theme.colors.textSecondary,
-        flexShrink: 0,
-    },
-    compactCommandText: {
+    compactActivityText: {
         flex: 1,
         minWidth: 0,
-        fontSize: 13,
-        lineHeight: 18,
+        fontSize: 15,
+        lineHeight: 20,
         color: theme.colors.textSecondary,
-        fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
     },
     status: {
         fontWeight: '400',

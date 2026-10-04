@@ -1,38 +1,44 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, TextInput, Pressable, StyleSheet, KeyboardTypeOptions, Platform } from 'react-native';
+import { View, Text, TextInput, Pressable, StyleSheet, KeyboardTypeOptions, Platform, InteractionManager } from 'react-native';
 import { BaseModal } from './BaseModal';
 import { PromptModalConfig } from '../types';
 import { Typography } from '@/constants/Typography';
 import { useUnistyles } from 'react-native-unistyles';
+import { MobileGlassSurface } from '@/components/MobileGlass';
 
 interface WebPromptModalProps {
     config: PromptModalConfig;
-    onClose: () => void;
     onConfirm: (value: string | null) => void;
 }
 
-export function WebPromptModal({ config, onClose, onConfirm }: WebPromptModalProps) {
+export function WebPromptModal({ config, onConfirm }: WebPromptModalProps) {
     const { theme } = useUnistyles();
     const [inputValue, setInputValue] = useState(config.defaultValue || '');
     const inputRef = useRef<TextInput>(null);
 
     useEffect(() => {
-        // Auto-focus the input when modal opens
-        const timer = setTimeout(() => {
-            inputRef.current?.focus();
-        }, 100);
-        return () => clearTimeout(timer);
+        if (Platform.OS === 'web') {
+            return;
+        }
+
+        // Let the modal's opening animation settle before showing the native
+        // keyboard. Focusing on a fixed timer races Android's window resize.
+        let frame: number | undefined;
+        const interaction = InteractionManager.runAfterInteractions(() => {
+            frame = requestAnimationFrame(() => inputRef.current?.focus());
+        });
+
+        return () => {
+            interaction.cancel();
+            if (frame !== undefined) {
+                cancelAnimationFrame(frame);
+            }
+        };
     }, []);
 
-    const handleCancel = () => {
-        onConfirm(null);
-        onClose();
-    };
+    const handleCancel = () => onConfirm(null);
 
-    const handleConfirm = () => {
-        onConfirm(inputValue);
-        onClose();
-    };
+    const handleConfirm = () => onConfirm(inputValue);
 
     const getKeyboardType = (): KeyboardTypeOptions => {
         switch (config.inputType) {
@@ -47,10 +53,17 @@ export function WebPromptModal({ config, onClose, onConfirm }: WebPromptModalPro
 
     const styles = StyleSheet.create({
         container: {
-            backgroundColor: theme.colors.surface,
+            backgroundColor: Platform.select({
+                web: theme.colors.surface,
+                ios: theme.colors.glass.overlay,
+                android: theme.colors.glass.backgroundStrong,
+                default: theme.colors.surface,
+            }),
             borderRadius: 14,
             width: 270,
             overflow: 'hidden',
+            borderWidth: Platform.OS === 'web' ? 0 : StyleSheet.hairlineWidth,
+            borderColor: theme.colors.glass.border,
             shadowColor: theme.colors.shadow.color,
             shadowOffset: {
                 width: 0,
@@ -120,7 +133,14 @@ export function WebPromptModal({ config, onClose, onConfirm }: WebPromptModalPro
 
     return (
         <BaseModal visible={true} onClose={handleCancel} closeOnBackdrop={false}>
-            <View style={styles.container}>
+            <MobileGlassSurface
+                enabled={Platform.OS !== 'web'}
+                nativeEffect
+                glassEffectStyle="regular"
+                intensity={88}
+                tintColor={theme.colors.glass.overlayTint}
+                style={styles.container}
+            >
                 <View style={styles.content}>
                     <Text style={[styles.title, Typography.default('semiBold')]}>
                         {config.title}
@@ -179,7 +199,7 @@ export function WebPromptModal({ config, onClose, onConfirm }: WebPromptModalPro
                         </Text>
                     </Pressable>
                 </View>
-            </View>
+            </MobileGlassSurface>
         </BaseModal>
     );
 }

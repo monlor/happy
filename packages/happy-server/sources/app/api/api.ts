@@ -1,5 +1,5 @@
 import fastify from "fastify";
-import { log, logger } from "@/utils/log";
+import { isProduction, log, logger } from "@/utils/log";
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-type-provider-zod";
 import { onShutdown } from "@/utils/shutdown";
 import { Fastify } from "./types";
@@ -23,7 +23,9 @@ import { feedRoutes } from "./routes/feedRoutes";
 import { kvRoutes } from "./routes/kvRoutes";
 import { v3SessionRoutes } from "./routes/v3SessionRoutes";
 import { attachmentRoutes } from "./routes/attachmentRoutes";
+import { projectRoutes } from "./routes/projectRoutes";
 import { isLocalStorage, getLocalFilesDir } from "@/storage/files";
+import { publicLocalFilePath } from './publicLocalFilePath';
 import * as path from "path";
 import * as fs from "fs";
 
@@ -42,12 +44,13 @@ export async function startApi(opts: StartApiOptions = {}) {
     // Start API
     const app = fastify({
         loggerInstance: logger,
+        disableRequestLogging: isProduction,
         bodyLimit: 1024 * 1024 * 100, // 100MB
     });
     app.register(import('@fastify/cors'), {
         origin: '*',
         allowedHeaders: '*',
-        methods: ['GET', 'POST', 'PUT', 'DELETE']
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
     });
 
     // Required for local-mode attachment uploads (PUT /v1/sessions/:id/attachments/:file).
@@ -81,8 +84,8 @@ export async function startApi(opts: StartApiOptions = {}) {
         app.get('/files/*', function (request, reply) {
             const filePath = (request.params as any)['*'];
             const baseDir = path.resolve(getLocalFilesDir());
-            const fullPath = path.resolve(baseDir, filePath);
-            if (!fullPath.startsWith(baseDir + path.sep)) {
+            const fullPath = publicLocalFilePath(baseDir, filePath);
+            if (fullPath === null) {
                 reply.code(403).send('Forbidden');
                 return;
             }
@@ -112,6 +115,7 @@ export async function startApi(opts: StartApiOptions = {}) {
     kvRoutes(typed);
     v3SessionRoutes(typed);
     attachmentRoutes(typed);
+    projectRoutes(typed);
 
     // Static webapp (self-host mode)
     if (opts.staticDir) {

@@ -1,4 +1,4 @@
-import type { TranslationStructure } from '../_default';
+import { en, type TranslationStructure } from '../_default';
 
 /**
  * Russian plural helper function
@@ -26,10 +26,17 @@ function plural({ count, one, few, many }: { count: number; one: string; few: st
  * Must match the exact structure of the English translations
  */
 export const ru: TranslationStructure = {
+    voiceStatusBar: {
+        tapToEnd: 'нажмите, чтобы завершить',
+        connecting: 'Подключение…',
+        error: 'Ошибка соединения',
+        active: 'Голосовой ассистент активен',
+    },
+
     tabs: {
         // Tab navigation labels
         inbox: 'Входящие',
-        sessions: 'Терминалы',
+        sessions: 'Сессии',
         settings: 'Настройки',
     },
 
@@ -69,6 +76,7 @@ export const ru: TranslationStructure = {
         fileViewer: 'Просмотр файла',
         loading: 'Загрузка...',
         retry: 'Повторить',
+        loadMore: 'Загрузить ещё',
         delete: 'Удалить',
         optional: 'необязательно',
     },
@@ -149,14 +157,8 @@ export const ru: TranslationStructure = {
         },
         chat: 'Чат',
         chatDescription: 'Настройте внешний вид сообщений в чате',
-        sessionStatusBar: 'Информация о сессии',
-        sessionStatusBarDescription: 'Выберите, где показывать ветку, модель, усилия и контекст',
-        sessionStatusDisplayOptions: {
-            hidden: 'Скрыто',
-            hiddenOnMobile: 'Скрыто на телефоне',
-            above: 'Над полем ввода',
-            below: 'Под полем ввода',
-        },
+        usageLimitShowRemaining: 'Показывать остаток',
+        usageLimitShowRemainingDescription: 'Индикаторы лимита отсчитывают остаток, а не использование',
         userMessageBubbleColor: 'Цвет ваших сообщений',
         userMessageBubbleColorDescription: 'Сделайте ваши сообщения заметнее в длинных чатах',
         userMessageBubbleColorOptions: {
@@ -169,33 +171,38 @@ export const ru: TranslationStructure = {
         },
         display: 'Отображение',
         displayDescription: 'Управление макетом и интервалами',
-        inlineToolCalls: 'Встроенные вызовы инструментов',
-        inlineToolCallsDescription: 'Отображать вызовы инструментов прямо в сообщениях чата',
-        expandTodoLists: 'Развернуть списки задач',
-        expandTodoListsDescription: 'Показывать все задачи вместо только изменений',
-        showLineNumbersInDiffs: 'Показывать номера строк в различиях',
-        showLineNumbersInDiffsDescription: 'Отображать номера строк в различиях кода',
+        compactToolCalls: 'Компактные вызовы инструментов',
+        compactToolCallsDescription: 'Показывать неинтерактивные вызовы одной строкой; нажмите строку для подробностей',
         showLineNumbersInToolViews: 'Показывать номера строк в представлениях инструментов',
         showLineNumbersInToolViewsDescription: 'Отображать номера строк в различиях представлений инструментов',
-        wrapLinesInDiffs: 'Перенос строк в различиях',
-        wrapLinesInDiffsDescription: 'Переносить длинные строки вместо горизонтальной прокрутки в представлениях различий',
-        diffStyle: 'Вид сравнения',
-        diffStyleDescription: 'Показывать различия в одну колонку (unified) или рядом (split). Режим split доступен только на web.',
-        diffStyleOptions: {
-            unified: 'Unified',
-            split: 'Split',
+        alwaysShowContextSize: 'Показывать использование',
+        alwaysShowContextSizeDescription: 'Контекст и лимиты плана под полем ввода. Предупреждения у лимита видны всегда.',
+        input: 'Ввод',
+        inputDescription: 'Настройка поля ввода',
+        showHarnessIconInSessionHeader: 'Показывать значок harness в заголовке сессии',
+        showHarnessIconInSessionHeaderDescription: 'Отображать значок harness в заголовке сессии',
+        showHarnessIconsInSessionList: 'Показывать значки harness в списке сессий',
+        showHarnessIconsInSessionListDescription: 'Отображать значки harness на аватарах в списке сессий',
+        avatars: 'Аватары',
+        avatarsDescription: 'Выберите, как выглядят генерируемые аватары сессий',
+        avatarStyle: 'Стиль аватаров',
+        avatarStyleOptions: {
+            brutalist: 'Брутализм',
+            pixelated: 'Пиксельный',
+            gradient: 'Градиент',
         },
-        alwaysShowContextSize: 'Всегда показывать размер контекста',
-        alwaysShowContextSizeDescription: 'Отображать использование контекста даже когда не близко к лимиту',
-        avatarStyle: 'Стиль аватара',
-        avatarStyleDescription: 'Выберите внешний вид аватара сессии',
-        avatarOptions: {
-            pixelated: 'Пиксельная',
-            gradient: 'Градиентная',
-            brutalist: 'Бруталистская',
-        },
-        showFlavorIcons: 'Показывать иконки провайдеров ИИ',
-        showFlavorIconsDescription: 'Отображать иконки провайдеров ИИ на аватарах сессий',
+        avatarMonochrome: 'Чёрно-белые аватары',
+        avatarMonochromeDescription: 'Отображать аватары без цвета',
+    },
+
+    sessionsFilter: {
+        // Filter menu on the home sessions list header
+        title: 'Фильтр',
+        groupingTitle: 'Группировка',
+        flatList: 'Общий список',
+        groupByProject: 'Группировать по проектам',
+        appearanceSettings: 'Настройки внешнего вида',
+        worktreeTabs: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'вкладка', few: 'вкладки', many: 'вкладок' })}`,
     },
 
     settingsFeatures: {
@@ -215,17 +222,8 @@ export const ru: TranslationStructure = {
         commandPaletteDisabled: 'Быстрый доступ к командам отключён',
         markdownCopyV2: 'Markdown Copy v2',
         markdownCopyV2Subtitle: 'Долгое нажатие открывает модальное окно копирования',
-        hideInactiveSessions: 'Скрывать неактивные сессии',
-        hideInactiveSessionsSubtitle: 'Показывать в списке только активные чаты',
         groupToolCalls: 'Группировать вызовы инструментов',
         groupToolCallsSubtitle: 'Сворачивать подряд идущие вызовы инструментов в один блок',
-        privacy: 'Конфиденциальность',
-        privacyDescription: 'Полностью отключает всю аналитику и телеметрию. Никакие данные не будут отправляться в PostHog или другие сервисы отслеживания.',
-        disableAnalytics: 'Отключить аналитику',
-        analyticsDisabled: 'Вся аналитика и телеметрия отключены',
-        analyticsEnabled: 'Анонимная аналитика использования активна',
-        imageUpload: 'Загрузка изображений',
-        imageUploadSubtitle: 'Прикрепляйте изображения к сообщениям для анализа поддерживаемыми агентами',
     },
 
     errors: {
@@ -295,6 +293,9 @@ export const ru: TranslationStructure = {
     },
 
     server: {
+        title: en.server.title,
+        serverUrlLabel: en.server.serverUrlLabel,
+        selfHostFooter: en.server.selfHostFooter,
         // Used by Server Configuration screen (app/(app)/server.tsx)
         serverConfiguration: 'Настройка сервера',
         enterServerUrl: 'Пожалуйста, введите URL сервера',
@@ -309,7 +310,12 @@ export const ru: TranslationStructure = {
         failedToConnectToServer: 'Не удалось подключиться к серверу',
         currentlyUsingCustomServer: 'Сейчас используется пользовательский сервер',
         customServerUrlLabel: 'URL пользовательского сервера',
-        advancedFeatureFooter: 'Это расширенная функция. Изменяйте сервер только если знаете, что делаете. Вам нужно будет выйти и войти снова после изменения серверов.'
+        advancedFeatureFooter: 'Это расширенная функция. Изменяйте сервер только если знаете, что делаете. Вам нужно будет выйти и войти снова после изменения серверов.',
+        services: 'Сервисы',
+        useCustomServerForVoice: 'Использовать пользовательский сервер для голоса',
+        customServerVoiceEnabled: 'Голосовые учетные данные и данные об использовании обрабатываются вашим сервером',
+        customServerVoiceDisabled: 'Голос использует Happy Cloud и вашу подписку Happy',
+        customServerVoiceFooter: 'Если выключено, при запуске голосового режима используются Happy Cloud и ElevenLabs. Включайте только если на вашем сервере настроена голосовая связь.',
     },
 
     sessionInfo: {
@@ -339,11 +345,12 @@ export const ru: TranslationStructure = {
         quickActions: 'Быстрые действия',
         viewMachine: 'Посмотреть машину',
         viewMachineSubtitle: 'Посмотреть детали машины и сессии',
+        viewChanges: 'Изменения',
+        viewChangesSubtitle: 'Диффы всех незакоммиченных файлов',
         resumeSession: 'Resume Session',
         resumeSessionSubtitle: 'Resume this session on the same machine',
         resumeSessionSameMachineOnly: 'This session can only be resumed on the same machine it started on.',
         resumeSessionMachineOffline: 'This machine is offline. Resume is only available while it is online.',
-        resumeSessionNeedsHappyAgent: 'Resume is unavailable on this machine. Run `happy-agent auth login` to enable it.',
         resumeSessionMissingMachine: 'This session is missing its machine metadata, so it cannot be resumed.',
         resumeSessionMissingBackendId: 'This session does not have a resumable Claude or Codex identifier.',
         resumeSessionUnexpectedDirectoryPrompt: 'Resume cannot create directories. Start the session manually from its original path.',
@@ -381,6 +388,7 @@ export const ru: TranslationStructure = {
 
     components: {
         emptyMainScreen: {
+            ...en.components.emptyMainScreen,
             // Used by EmptyMainScreen component
             readyToCode: 'Готовы к программированию?',
             installCli: 'Установите Happy CLI',
@@ -394,9 +402,6 @@ export const ru: TranslationStructure = {
             clearGoal: 'Очистить цель',
             stopGoal: 'Остановить цель',
             editGoal: 'Изменить цель',
-        },
-        sessionStatusBar: {
-            contextUsage: ({ used, total, percent }: { used: string; total: string; percent: number }) => `Контекст ${used} из ${total} токенов, ${percent}%`,
         },
     },
 
@@ -419,6 +424,7 @@ export const ru: TranslationStructure = {
         offline: 'offline',
         lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
         permissionRequired: 'требуется разрешение',
+        inputRequired: 'ожидает вашего ответа',
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
         unread: 'новые результаты',
@@ -455,6 +461,9 @@ export const ru: TranslationStructure = {
         forkErrorMissingMetadata: 'Не хватает метаданных сессии для форка.',
         forkErrorGeneric: 'Не удалось форкнуть сессию.',
         forkClaudeOnly: 'Форк сейчас поддерживается только для Claude-сессий.',
+        archiveAction: 'Архивировать',
+        startingChat: 'Запускаем новый чат…',
+        actionsTitle: 'Сессия',
     },
 
     commandPalette: {
@@ -464,7 +473,10 @@ export const ru: TranslationStructure = {
     agentInput: {
         permissionMode: {
             title: 'РЕЖИМ РАЗРЕШЕНИЙ',
+            auto: 'решает сам, спрашивает при сомнении',
             default: 'По умолчанию',
+            agyDefault: 'песочница agy, без запросов',
+            openclawInert: 'не применяется в openclaw',
             acceptEdits: 'Принимать правки',
             plan: 'Режим планирования',
             dontAsk: 'Не спрашивать',
@@ -493,6 +505,7 @@ export const ru: TranslationStructure = {
             safeYolo: 'Safe YOLO',
             yolo: 'YOLO',
             defaultDescription: 'спрашивать перед недоверенными командами',
+            autoDescription: 'решает сам, спрашивает при сомнении',
             readOnlyDescription: 'без записи',
             safeYoloDescription: 'без запросов, песочница рабочей папки',
             yoloDescription: 'без запросов, полный доступ',
@@ -521,7 +534,14 @@ export const ru: TranslationStructure = {
             badgePlan: 'Планирование',
         },
         context: {
-            remaining: ({ percent }: { percent: number }) => `Осталось ${percent}%`,
+            detailContext: ({ used, total }: { used: string; total: string }) => `Контекст ${used} / ${total}`,
+            percentContext: ({ percent }: { percent: number }) => `${percent}% контекста`,
+            percentWeek: ({ percent }: { percent: number }) => `${percent}% за неделю`,
+        },
+        usagePopup: {
+            session: 'Сессия',
+            week: 'Неделя',
+            resets: ({ time }: { time: string }) => `Сброс ${time}`,
         },
         suggestion: {
             fileLabel: 'ФАЙЛ',
@@ -537,11 +557,29 @@ export const ru: TranslationStructure = {
         offlineUnableToSpawn: 'Невозможно создать сессию, машина offline',
     },
 
+    agentQuestion: {
+        title: "Вопрос",
+        submit: "Отправить ответ",
+        chooseMultiple: "Выберите все подходящие",
+        ownAnswer: "Свой ответ",
+        ownAnswerPlaceholder: "Напишите свой ответ",
+        submitFailed: "Не удалось отправить ответ",
+        dismiss: "Скрыть",
+        unsupportedTitle: "Неподдерживаемый запрос",
+        unsupportedDescription: ({ kind }: { kind: string }) => `Эта версия Happy не может показать запрос «${kind}». Обновите приложение, чтобы ответить.`,
+        moreQuestions: ({ count }: { count: number }) =>
+            count === 1 ? "ещё 1 вопрос" : `${count} вопросов ещё`,
+    },
+
     sidebar: {
         sessionsTitle: 'Happy',
         showArchived: 'Показать архив',
         hideArchived: 'Скрыть архив',
         newSession: 'Новая сессия',
+        projects: "Проекты",
+        bots: 'Боты',
+        showAllWorkspaces: ({ count }: { count: number }) => `Показать все пространства (${count})`,
+        showFewerWorkspaces: 'Показать меньше',
     },
 
     zen: {
@@ -554,15 +592,14 @@ export const ru: TranslationStructure = {
     },
 
     toolGroup: {
-        editedFile: 'Отредактированный файл',
-        editedFiles: ({ count }: { count: number }) => `${plural({ count, one: 'Отредактирован', few: 'Отредактировано', many: 'Отредактировано' })} ${count} ${plural({ count, one: 'файл', few: 'файла', many: 'файлов' })}`,
-        readFiles: ({ count }: { count: number }) => `${plural({ count, one: 'Прочитан', few: 'Прочитано', many: 'Прочитано' })} ${count} ${plural({ count, one: 'файл', few: 'файла', many: 'файлов' })}`,
-        ranCommands: ({ count }: { count: number }) => `${plural({ count, one: 'Выполнена', few: 'Выполнено', many: 'Выполнено' })} ${count} ${plural({ count, one: 'команда', few: 'команды', many: 'команд' })}`,
-        searched: ({ count }: { count: number }) => `${plural({ count, one: 'Выполнен', few: 'Выполнено', many: 'Выполнено' })} ${count} ${plural({ count, one: 'поиск', few: 'поиска', many: 'поисков' })}`,
-        fetchedUrls: ({ count }: { count: number }) => `${plural({ count, one: 'Загружен', few: 'Загружено', many: 'Загружено' })} ${count} URL`,
-        ranTasks: ({ count }: { count: number }) => `${plural({ count, one: 'Выполнена', few: 'Выполнено', many: 'Выполнено' })} ${count} ${plural({ count, one: 'задача', few: 'задачи', many: 'задач' })}`,
-        usedTools: ({ count }: { count: number }) => `${plural({ count, one: 'Использован', few: 'Использовано', many: 'Использовано' })} ${count} ${plural({ count, one: 'инструмент', few: 'инструмента', many: 'инструментов' })}`,
+        ran: 'Выполнено',
+        edited: 'Отредактировано',
+        read: 'Прочитано',
+        searched: 'Поиск',
+        fetched: 'Загружено',
+        ranTask: 'Выполнена задача',
         workedFor: ({ duration }: { duration: string }) => `Работало ${duration}`,
+        hide: 'Скрыть',
     },
 
     tools: {
@@ -659,6 +696,8 @@ export const ru: TranslationStructure = {
         deleted: 'Удалён',
         changedFiles: ({ count }: { count: number }) => `${count} ${count === 1 ? 'изменённый файл' : count < 5 ? 'изменённых файла' : 'изменённых файлов'}`,
         allFiles: 'Все файлы',
+        addPanel: 'Добавить панель',
+        closePanel: 'Закрыть панель',
         editFile: 'Редактировать',
         saveFile: 'Сохранить',
         failedToRead: 'Не удалось прочитать файл',
@@ -667,6 +706,31 @@ export const ru: TranslationStructure = {
         fileConflictDescription: 'Файл был изменён на устройстве пока вы его редактировали. Перезагрузите чтобы увидеть актуальную версию.',
         reload: 'Перезагрузить',
         overwrite: 'Перезаписать',
+    },
+    diff: {
+        showMoreLines: ({ count }: { count: number }) =>
+            `Показать ещё ${count} ${plural({ count, one: 'строку', few: 'строки', many: 'строк' })}`,
+        tapToExpand: ({ count }: { count: number }) =>
+            `${count} ${plural({ count, one: 'изменённая строка', few: 'изменённые строки', many: 'изменённых строк' })} — нажмите, чтобы развернуть`,
+        ignoreWhitespace: 'Игнорировать пробелы',
+        imageBefore: 'Было',
+        imageAfter: 'Стало',
+        unchangedLines: ({ count }: { count: number }) => `${count} без изменений`,
+        noChanges: 'Нет изменений',
+        binaryFile: 'Бинарный файл не показан',
+    },
+    sideChat: {
+        panelTitle: 'Боковой чат',
+        emptyTitle: 'Начните боковой чат',
+        emptySubtitle: 'Спросите агента что-нибудь в стороне. Он наследует контекст этого чата, но остаётся изолированным — ничто здесь не затрагивает основной разговор.',
+        startButton: 'Начать боковой чат',
+        creating: 'Запуск бокового чата…',
+        unavailable: 'Эта сессия пока не может начать боковой чат — дождитесь, когда агент выйдет в сеть.',
+        composerPlaceholder: 'Написать в боковой чат…',
+        expand: 'Открыть на весь экран',
+        tabLabel: ({ index }: { index: number }) => `Боковой чат ${index}`,
+        newChat: 'Новый боковой чат',
+        close: 'Закрыть боковой чат',
     },
 
     settingsVoice: {
@@ -814,6 +878,14 @@ export const ru: TranslationStructure = {
         friends: 'Друзья',
     },
 
+    onboarding: {
+        ...en.onboarding,
+    },
+
+    troubleshoot: {
+        ...en.troubleshoot,
+    },
+
     welcome: {
         // Main welcome screen for unauthenticated users
         title: 'Мобильный клиент Codex и Claude Code',
@@ -878,6 +950,9 @@ export const ru: TranslationStructure = {
         unknownEvent: 'Неизвестное событие',
         usageLimitUntil: ({ time }: { time: string }) => `Лимит использования достигнут до ${time}`,
         sentAsGoal: 'Отправлено в качестве цели',
+        sendsAfterThisTurn: 'Будет отправлено после текущего ответа',
+        sending: 'Отправка…',
+        sendFailed: ({ reason }: { reason: string }) => `Не отправлено: ${reason}`,
         unknownTime: 'неизвестное время',
     },
 
@@ -1047,6 +1122,11 @@ export const ru: TranslationStructure = {
             : `${count} изображений не удалось загрузить — они не были отправлены.`,
         notSupportedTitle: 'Изображения не поддерживаются',
         notSupportedMessage: 'Этот агент не поддерживает вложения изображений. Изображения не были отправлены.',
+        attachTitle: 'Добавить изображение',
+        pasteFromClipboard: 'Вставить из буфера обмена',
+        chooseFromLibrary: 'Библиотека фото',
+        nothingToPasteTitle: 'Нечего вставить',
+        nothingToPasteMessage: 'Сначала скопируйте изображение, затем попробуйте снова.',
     },
 
     feed: {

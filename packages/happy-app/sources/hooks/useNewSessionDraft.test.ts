@@ -4,7 +4,7 @@ type Draft = {
     input: string;
     selectedMachineId: string | null;
     selectedPath: string | null;
-    agentType: 'claude' | 'codex' | 'gemini' | 'openclaw';
+    agentType: 'claude' | 'codex' | 'gemini' | 'openclaw' | 'agy' | 'rig';
     permissionMode: string | null;
     modelMode: string | null;
     effortLevel: string | null;
@@ -55,6 +55,13 @@ describe('useNewSessionDraft', () => {
         expect(useNewSessionDraft.getState().permissionMode).toBeNull();
         expect(useNewSessionDraft.getState().modelMode).toBeNull();
         expect(useNewSessionDraft.getState().effortLevel).toBeNull();
+        expect(useNewSessionDraft.getState().agentType).toBe('claude');
+    });
+
+    it.each(['claude', 'codex', 'rig'] as const)('preserves the saved %s selection', async (agentType) => {
+        mockPersistence.draft = persistedDraft({ agentType });
+        const { useNewSessionDraft } = await import('./useNewSessionDraft');
+        expect(useNewSessionDraft.getState().agentType).toBe(agentType);
     });
 
     it('loads persisted permission, model, and effort defaults', async () => {
@@ -78,5 +85,23 @@ describe('useNewSessionDraft', () => {
 
         expect(useNewSessionDraft.getState().effortLevel).toBe('high');
         expect(mockPersistence.saved.at(-1)).toMatchObject({ effortLevel: 'high' });
+    });
+
+    it('keeps temporary image attachments in memory without persisting their file URIs', async () => {
+        const { useNewSessionDraft } = await import('./useNewSessionDraft');
+        const attachment = {
+            id: 'photo-1',
+            uri: 'file:///temporary/photo.jpg',
+            width: 100,
+            height: 100,
+            mimeType: 'image/jpeg',
+            size: 1024,
+            name: 'photo.jpg',
+        };
+
+        useNewSessionDraft.getState().setAttachments([attachment]);
+
+        expect(useNewSessionDraft.getState().attachments).toEqual([attachment]);
+        expect(mockPersistence.saved).toHaveLength(0);
     });
 });

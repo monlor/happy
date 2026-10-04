@@ -58,6 +58,23 @@ export const lightTheme = {
             color: Platform.select({ default: '#000000', web: 'rgba(0, 0, 0, 0.1)' }),
             opacity: 0.1,
         },
+        glass: {
+            background: 'rgba(255, 255, 255, 0.68)',
+            backgroundStrong: 'rgba(255, 255, 255, 0.84)',
+            backgroundSubtle: 'rgba(255, 255, 255, 0.42)',
+            overlay: 'rgba(245, 245, 248, 0.58)',
+            overlayTint: 'rgba(255, 255, 255, 0.46)',
+            border: 'rgba(255, 255, 255, 0.82)',
+            divider: 'rgba(60, 60, 67, 0.12)',
+            highlight: 'rgba(255, 255, 255, 0.94)',
+            shadow: 'rgba(39, 47, 54, 0.16)',
+            tint: 'rgba(255, 255, 255, 0.14)',
+            // Plain white, mirroring the dark theme's plain black: the tinted
+            // gradient + colored glows read as a stain behind white surfaces.
+            backdrop: ['#FFFFFF', '#FFFFFF', '#FFFFFF'] as readonly [string, string, string],
+            glowPrimary: 'transparent',
+            glowSecondary: 'transparent',
+        },
 
         //
         // System components
@@ -196,6 +213,35 @@ export const lightTheme = {
             inlineAddedText: '#0A3F0A',
             inlineRemovedBg: '#FFCECB',
             inlineRemovedText: '#5A0A05',
+
+            // Renderer palette (components/diff). Tuned against GitHub's
+            // current light diff so a screenshot of either reads the same.
+            rowAddedBg: '#E6FFEC',
+            rowRemovedBg: '#FFEBE9',
+            rowContextBg: 'transparent',
+            gutterAddedBg: '#CCFFD8',
+            gutterRemovedBg: '#FFD7D5',
+            gutterContextBg: 'transparent',
+            gutterBorder: '#D8DEE4',
+            markerAdded: '#1A7F37',
+            markerRemoved: '#CF222E',
+            wordAddedBg: '#ABF2BC',
+            wordRemovedBg: '#FFC1C0',
+            sectionText: '#6E7781',
+            syntax: {
+                plain: '#1F2328',
+                keyword: '#CF222E',
+                string: '#0A3069',
+                comment: '#6E7781',
+                number: '#0550AE',
+                function: '#8250DF',
+                operator: '#0550AE',
+                punctuation: '#1F2328',
+                type: '#953800',
+                variable: '#953800',
+                tag: '#116329',
+                attr: '#0550AE',
+            },
         },
 
         // Message View colors
@@ -255,18 +301,34 @@ export const darkTheme = {
         warningCritical: '#FF453A',
         warning: '#8E8E93',
         success: '#32D74B',
-        surface: Platform.select({ ios: '#18171C', default: '#212121' }),
-        surfaceRipple: 'rgba(255, 255, 255, 0.08)',
-        surfacePressed: '#2C2C2E',
-        surfaceSelected: '#2C2C2E',
-        surfacePressedOverlay: Platform.select({ ios: '#2C2C2E', default: 'transparent' }),
-        // iOS dark theme is #1c1c1e for items, and #000 for the background
-        surfaceHigh: Platform.select({ ios: '#2C2C2E', default: '#171717' }),
-        surfaceHighest: Platform.select({ ios: '#38383A', default: '#292929' }),
-        divider: Platform.select({ ios: '#38383A', default: '#292929' }),
+        // Keep the established desktop palette while using the new neutral
+        // graphite elevation scale for the native glass redesign.
+        surface: Platform.select({ web: '#212121', default: '#161616' }),
+        surfaceRipple: Platform.select({ web: 'rgba(255, 255, 255, 0.08)', default: 'rgba(255, 255, 255, 0.07)' }),
+        surfacePressed: Platform.select({ web: '#2C2C2E', default: '#242424' }),
+        surfaceSelected: Platform.select({ web: '#2C2C2E', default: '#242424' }),
+        surfacePressedOverlay: Platform.select({ web: 'transparent', default: '#242424' }),
+        surfaceHigh: Platform.select({ web: '#171717', default: '#1E1E1E' }),
+        surfaceHighest: Platform.select({ web: '#292929', default: '#282828' }),
+        divider: Platform.select({ web: '#292929', default: '#2A2A2A' }),
         shadow: {
             color: Platform.select({ default: '#000000', web: 'rgba(0, 0, 0, 0.1)' }),
             opacity: 0.1,
+        },
+        glass: {
+            background: 'rgba(22, 22, 22, 0.44)',
+            backgroundStrong: 'rgba(28, 28, 28, 0.68)',
+            backgroundSubtle: 'rgba(255, 255, 255, 0.07)',
+            overlay: 'rgba(0, 0, 0, 0.72)',
+            overlayTint: 'rgba(0, 0, 0, 0.56)',
+            border: 'rgba(255, 255, 255, 0.14)',
+            divider: 'rgba(255, 255, 255, 0.08)',
+            highlight: 'rgba(255, 255, 255, 0.22)',
+            shadow: 'rgba(0, 0, 0, 0.55)',
+            tint: 'rgba(16, 16, 16, 0.08)',
+            backdrop: ['#000000', '#000000', '#000000'] as readonly [string, string, string],
+            glowPrimary: 'transparent',
+            glowSecondary: 'transparent',
         },
 
         //
@@ -274,13 +336,13 @@ export const darkTheme = {
         //
 
         header: {
-            background: Platform.select({ ios: '#18171C', default: '#212121' }),
+            background: Platform.select({ web: '#212121', default: '#000000' }),
             tint: '#ffffff'
         },
         switch: {
             track: {
                 active: Platform.select({ ios: '#34C759', default: '#1976D2' }),
-                inactive: '#3a393f',
+                inactive: Platform.select({ web: '#3a393f', default: '#363636' }),
             },
             thumb: {
                 active: '#FFFFFF',
@@ -288,8 +350,8 @@ export const darkTheme = {
             },
         },
         groupped: {
-            background: Platform.select({ ios: '#1C1C1E', default: '#1e1e1e' }),
-            chevron: Platform.select({ ios: '#48484A', default: '#CAC4D0' }),
+            background: Platform.select({ web: '#1e1e1e', default: '#000000' }),
+            chevron: Platform.select({ ios: '#505050', default: '#CAC4D0' }),
             sectionTitle: Platform.select({ ios: '#8E8E93', default: '#CAC4D0' }),
         },
         fab: {
@@ -316,7 +378,7 @@ export const darkTheme = {
             }
         },
         input: {
-            background: Platform.select({ ios: '#1C1C1E', default: '#303030' }),
+            background: Platform.select({ web: '#303030', default: '#1E1E1E' }),
             text: '#FFFFFF',
             placeholder: '#8E8E93',
         },
@@ -406,6 +468,34 @@ export const darkTheme = {
             inlineAddedText: '#7AFF7A',
             inlineRemovedBg: '#5A2A2A',
             inlineRemovedText: '#FF7A7A',
+
+            // Renderer palette (components/diff), matched to GitHub dark default.
+            rowAddedBg: '#12261E',
+            rowRemovedBg: '#25171C',
+            rowContextBg: 'transparent',
+            gutterAddedBg: '#1B4721',
+            gutterRemovedBg: '#78191B',
+            gutterContextBg: 'transparent',
+            gutterBorder: '#21262D',
+            markerAdded: '#3FB950',
+            markerRemoved: '#F85149',
+            wordAddedBg: '#1F6F2E',
+            wordRemovedBg: '#8B2C2F',
+            sectionText: '#8B949E',
+            syntax: {
+                plain: '#E6EDF3',
+                keyword: '#FF7B72',
+                string: '#A5D6FF',
+                comment: '#8B949E',
+                number: '#79C0FF',
+                function: '#D2A8FF',
+                operator: '#79C0FF',
+                punctuation: '#E6EDF3',
+                type: '#FFA657',
+                variable: '#FFA657',
+                tag: '#7EE787',
+                attr: '#79C0FF',
+            },
         },
 
         // Message View colors

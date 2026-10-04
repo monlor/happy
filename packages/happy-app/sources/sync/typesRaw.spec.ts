@@ -1658,6 +1658,60 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             }
         });
 
+        it('drops persisted control-only task notifications for user and agent envelopes', () => {
+            const notification = `<task-notification>
+<task-id>agent-123</task-id>
+<status>completed</status>
+<result>already rendered in the subagent sidechain</result>
+<usage><subagent_tokens>29207</subagent_tokens></usage>
+</task-notification>`;
+            const user = normalizeRawMessage('db-task-user', null, 1, {
+                role: 'session',
+                content: {
+                    id: 'env-task-user',
+                    time: 1,
+                    role: 'user',
+                    codexItemId: 'codex-task-user',
+                    ev: { t: 'text', text: notification }
+                }
+            } as any);
+            const agent = normalizeRawMessage('db-task-agent', null, 1, {
+                role: 'session',
+                content: {
+                    id: 'env-task-agent',
+                    time: 1,
+                    role: 'agent',
+                    turn: 'turn-task-agent',
+                    codexItemId: 'codex-task-agent',
+                    ev: { t: 'text', text: notification }
+                }
+            } as any);
+
+            expect(user).toBeNull();
+            expect(agent).toBeNull();
+        });
+
+        it('preserves visible text after a persisted task notification wrapper', () => {
+            const normalized = normalizeRawMessage('db-task-followup', null, 1, {
+                role: 'session',
+                content: {
+                    id: 'env-task-followup',
+                    time: 1,
+                    role: 'user',
+                    codexItemId: 'codex-task-followup',
+                    ev: {
+                        t: 'text',
+                        text: '<task-notification>internal</task-notification>\nContinue with the fix'
+                    }
+                }
+            } as any);
+
+            expect(normalized).toMatchObject({
+                role: 'user',
+                content: { type: 'text', text: 'Continue with the fix' }
+            });
+        });
+
         it('renders legacy user text messages', () => {
             const normalized = normalizeRawMessage('db-legacy-user-1', null, 1, {
                 role: 'user',
@@ -2009,6 +2063,121 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             } as any);
 
             expect(normalized).toBeNull();
+        });
+
+        it('accepts acceptance receipts, which belong to no turn', () => {
+            // The receipt sits between the turn it interrupted and the run it
+            // starts, so it carries no turn — the guard above must let it through.
+            const normalized = normalizeRawMessage('db-accepted-1', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-accepted-1',
+                        time: 4200,
+                        role: 'agent',
+                        ev: {
+                            t: 'user-message-accepted',
+                            id: 'agent-message-1',
+                            ref: 'server-message-1',
+                            runId: 'run-1'
+                        }
+                    }
+                }
+            });
+
+            expect(normalized).not.toBeNull();
+            expect(normalized?.role).toBe('event');
+            expect(normalized?.createdAt).toBe(4200);
+            if (normalized && normalized.role === 'event') {
+                expect(normalized.content).toEqual({
+                    type: 'user-message-accepted',
+                    ref: 'server-message-1'
+                });
+            }
+        });
+
+        it('carries the turn id on agent rows so the chat can tell turns apart', () => {
+            const text = normalizeRawMessage('db-turn-1', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-turn-1',
+                        time: 10,
+                        role: 'agent',
+                        turn: 'turn-a',
+                        ev: { t: 'text', text: 'hello' }
+                    }
+                }
+            });
+            const tool = normalizeRawMessage('db-turn-2', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-turn-2',
+                        time: 11,
+                        role: 'agent',
+                        turn: 'turn-a',
+                        ev: { t: 'tool-call-start', call: 'call-1', name: 'Read', title: 'Read', description: 'Read a file', args: {} }
+                    }
+                }
+            });
+            const ready = normalizeRawMessage('db-turn-3', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-turn-3',
+                        time: 12,
+                        role: 'agent',
+                        turn: 'turn-a',
+                        ev: { t: 'turn-end', status: 'completed' }
+                    }
+                }
+            });
+
+            expect(text?.turn).toBe('turn-a');
+            expect(tool?.turn).toBe('turn-a');
+            expect(ready?.turn).toBe('turn-a');
+        });
+
+        it('carries the author of a user message from another participant', () => {
+            const normalized = normalizeRawMessage('db-author-1', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-author-1',
+                        time: 10,
+                        role: 'user',
+                        author: { id: 'user-2', name: 'Alex', owner: false },
+                        ev: { t: 'text', text: 'from the desktop' }
+                    }
+                }
+            });
+
+            expect(normalized?.role).toBe('user');
+            expect(normalized?.author).toEqual({ id: 'user-2', name: 'Alex', owner: false });
+        });
+
+        it('leaves the author absent on user messages that do not name one', () => {
+            const normalized = normalizeRawMessage('db-author-2', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-author-2',
+                        time: 10,
+                        role: 'user',
+                        ev: { t: 'text', text: 'from an older daemon' }
+                    }
+                }
+            });
+
+            expect(normalized?.role).toBe('user');
+            expect(normalized?.author).toBeUndefined();
         });
 
         it('returns null for agent session events without turn', () => {
