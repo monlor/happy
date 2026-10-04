@@ -16,7 +16,6 @@ COPY patches ./patches
 RUN mkdir -p \
     packages/happy-app \
     packages/happy-server \
-    packages/happy-server-self-host \
     packages/happy-cli \
     packages/happy-agent \
     packages/happy-wire \
@@ -26,7 +25,6 @@ RUN mkdir -p \
 
 COPY packages/happy-app/package.json packages/happy-app/
 COPY packages/happy-server/package.json packages/happy-server/
-COPY packages/happy-server-self-host/package.json packages/happy-server-self-host/
 COPY packages/happy-cli/package.json packages/happy-cli/
 COPY packages/happy-agent/package.json packages/happy-agent/
 COPY packages/happy-wire/package.json packages/happy-wire/
@@ -40,7 +38,10 @@ COPY packages/happy-server/prisma packages/happy-server/prisma
 COPY packages/happy-cli/scripts packages/happy-cli/scripts
 COPY packages/happy-cli/tools packages/happy-cli/tools
 
-RUN SKIP_HAPPY_WIRE_BUILD=1 pnpm install --frozen-lockfile
+# happy-server-self-host is the published CLI bundle. Its postinstall expects
+# scripts that are not part of this image, and the server does not import it.
+RUN SKIP_HAPPY_WIRE_BUILD=1 pnpm install --frozen-lockfile \
+    --filter '!happy-server-self-host'
 
 # Stage 2: copy source and type-check
 FROM deps AS builder
