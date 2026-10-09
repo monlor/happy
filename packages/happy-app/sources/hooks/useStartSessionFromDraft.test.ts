@@ -62,6 +62,7 @@ vi.mock('@/sync/agentDefaults', () => ({
         modelMode: 'default',
         effortLevel: null,
     }),
+    retireModelMode: (_agentType: string, modelMode: string | null | undefined) => modelMode,
 }));
 
 vi.mock('@/sync/ops', () => ({
@@ -197,6 +198,7 @@ function createDraft(overrides: Record<string, unknown> = {}) {
         selectedMachineId: 'machine-1',
         selectedPath: '~/project',
         agentType: 'codex',
+        pickedAgentType: null,
         permissionMode: null,
         modelMode: null,
         effortLevel: null,
@@ -423,6 +425,7 @@ describe('useStartSessionFromDraft', () => {
         mocks.draft = createDraft({
             selectedMachineId: 'machine-cli',
             agentType: 'codex',
+            pickedAgentType: 'codex',
         });
 
         const { startSession } = useStartSessionFromDraft();
@@ -434,6 +437,100 @@ describe('useStartSessionFromDraft', () => {
             'Happy CLI is offline on your computer. Run `happy daemon start` on your computer, then try again.',
         );
         expect(mocks.machineSpawnNewSession).not.toHaveBeenCalled();
+    });
+
+    describe('a computer that runs both Happy CLI and Happy Agent', () => {
+        function pairedMachines(options: { rigOnline?: boolean } = {}) {
+            return [
+                {
+                    id: 'machine-cli',
+                    online: true,
+                    metadata: {
+                        homeDir: '/Users/dev',
+                        cliAvailability: { claude: true, codex: true },
+                    },
+                },
+                {
+                    ...createRigMachine({ siblingMachineId: 'machine-cli' }),
+                    id: 'machine-rig',
+                    online: options.rigOnline ?? true,
+                },
+            ];
+        }
+
+        it('starts Happy even when the saved draft says Claude Code', async () => {
+            mocks.machines = pairedMachines();
+            mocks.draft = createDraft({ selectedMachineId: 'machine-cli', agentType: 'claude' });
+
+            const { startSession } = useStartSessionFromDraft();
+
+            await expect(startSession()).resolves.toBe(true);
+
+            expect(mocks.machineSpawnNewSession).toHaveBeenCalledWith(expect.objectContaining({
+                machineId: 'machine-rig',
+                agent: 'rig',
+            }));
+        });
+
+        it('stays on Happy while Happy Agent is offline, and says so rather than starting Claude Code', async () => {
+            mocks.machines = pairedMachines({ rigOnline: false });
+            mocks.draft = createDraft({ selectedMachineId: 'machine-cli', agentType: 'claude' });
+
+            const { startSession } = useStartSessionFromDraft();
+
+            await expect(startSession()).resolves.toBe(false);
+
+            expect(mocks.alert).toHaveBeenCalledWith('common.error', 'Machine is offline');
+            expect(mocks.machineSpawnNewSession).not.toHaveBeenCalled();
+        });
+
+        it('starts the harness last tapped in the composer, and the next session too', async () => {
+            mocks.machines = pairedMachines();
+            mocks.draft = createDraft({ selectedMachineId: 'machine-cli', agentType: 'claude', pickedAgentType: 'claude' });
+
+            const { startSession } = useStartSessionFromDraft();
+
+            await expect(startSession()).resolves.toBe(true);
+            await expect(startSession()).resolves.toBe(true);
+
+            expect(mocks.machineSpawnNewSession).toHaveBeenCalledTimes(2);
+            for (const call of mocks.machineSpawnNewSession.mock.calls) {
+                expect(call[0]).toMatchObject({ machineId: 'machine-cli', agent: 'claude' });
+            }
+            expect(mocks.draft.pickedAgentType).toBe('claude');
+        });
+
+        it('starts Happy when the composer pick is a harness this computer lacks', async () => {
+            mocks.machines = pairedMachines();
+            mocks.draft = createDraft({ selectedMachineId: 'machine-cli', agentType: 'agy', pickedAgentType: 'agy' });
+
+            const { startSession } = useStartSessionFromDraft();
+
+            await expect(startSession()).resolves.toBe(true);
+
+            expect(mocks.machineSpawnNewSession).toHaveBeenCalledWith(expect.objectContaining({
+                machineId: 'machine-rig',
+                agent: 'rig',
+            }));
+        });
+
+        it('keeps the harness of the chat a new chat is made like', async () => {
+            mocks.machines = pairedMachines();
+            mocks.draft = createDraft({ selectedMachineId: 'machine-cli', agentType: 'rig' });
+
+            const { startSession } = useStartSessionFromDraft();
+
+            await expect(startSession({
+                selectedMachineId: 'machine-cli',
+                agentType: 'codex',
+                input: '',
+            })).resolves.toBe(true);
+
+            expect(mocks.machineSpawnNewSession).toHaveBeenCalledWith(expect.objectContaining({
+                machineId: 'machine-cli',
+                agent: 'codex',
+            }));
+        });
     });
 
     it('uses an online Happy Agent when the selected computer has no legacy daemon', async () => {

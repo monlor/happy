@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { storage, useAllMachines, useSetting } from '@/sync/storage';
-import { getCodeAgentDefaults, resolveAgentDefaultConfig } from '@/sync/agentDefaults';
+import { getCodeAgentDefaults, resolveAgentDefaultConfig, retireModelMode } from '@/sync/agentDefaults';
 import {
     machineSpawnNewSession,
     machineStopSession,
@@ -29,7 +29,7 @@ import {
     collectMachineChoices,
     findMachineChoice,
     resolveAgentMachine,
-    resolveChoiceAgent,
+    resolveNewSessionAgent,
     resolveWorktreeCreationMachine,
 } from '@/sync/machineChoices';
 import { delay } from '@/utils/time';
@@ -320,7 +320,10 @@ export function useStartSessionFromDraft() {
         // The draft survives machine changes and app upgrades. Resolve it again
         // at launch time so a stale Claude selection cannot spawn Claude while
         // the selected computer only reports Codex (the Android 1.7.0 regression).
-        // A bot is Happy Agent's to make whatever harness the draft last chose.
+        // A bot is Happy Agent's to make whatever harness the draft last chose. A caller that names
+        // the agent (a new chat like an existing one) has picked it for this start alone; otherwise
+        // the pick is the harness last tapped in the composer, which outlives this session.
+        const pickedAgentType = draftOverrides.agentType ?? draftStore.pickedAgentType;
         const createsBot = draft.createsBot;
         const botName = draft.botName.trim();
         const botFaceSeed = draft.botFaceSeeds[draft.botFaceSlot];
@@ -329,7 +332,7 @@ export function useStartSessionFromDraft() {
             Modal.alert(t('common.error'), botNameProblem);
             return false;
         }
-        const agentType = createsBot ? 'rig' : resolveChoiceAgent(choice, draft.agentType);
+        const agentType = createsBot ? 'rig' : resolveNewSessionAgent(choice, draft.agentType, pickedAgentType);
         const agentChanged = agentType !== draft.agentType;
         const machine = resolveAgentMachine(choice, agentType);
         if (!machine) {
@@ -390,7 +393,7 @@ export function useStartSessionFromDraft() {
             ),
             agentChanged
                 ? [defaults.modelMode]
-                : [draft.modelMode, defaults.modelMode],
+                : [retireModelMode(agentType, draft.modelMode), defaults.modelMode],
         );
         const effortDefault = rigCreation?.defaultEffortForModel(model?.key)
             ?? defaults.effortLevel;
