@@ -1,0 +1,213 @@
+import Foundation
+import HappyCrypto
+import HappyStore
+import HappyWire
+
+/// Everything that exists while an account is signed in: its keys, the
+/// signed-in API, its local store, the sync engine and the live socket.
+public final class AccountSession: Sendable {
+    public let credentials: Credentials
+    public let keys: AccountKeys
+    public let api: HappyAPI
+    public let store: LocalStore
+    /// The account's own `files/` directory (copied attachments). Accounts
+    /// without a store directory (in-memory, tests) get a temporary one.
+    public let filesDirectory: URL
+    public let sync: SyncEngine
+    /// Sends chat messages through the outbox.
+    public let sender: OutboxSender
+    /// The chat of any session, from this account's store.
+    public let chatFeed: LocalChatFeed
+    public let realtime: SocketIOClient
+    public let pairing: PairingService
+    /// Archive, delete and mark read, for the session list.
+    public let actions: SessionActions
+    /// Socket status for the UI (connection dot in settings).
+    public let statusUpdates: AsyncStream<RealtimeStatus>
+
+    private let statusContinuation: AsyncStream<RealtimeStatus>.Continuation
+    private let pump = PumpHolder()
+
+    public struct Dependencies: Sendable {
+        public var serverURL: URL
+        public var clientID: String
+        public var transport: HTTPTransport
+        public var connector: WebSocketConnector
+        public var appState: @Sendable () async -> String
+        /// Called with true before an upload or post and false after it, so
+        /// the app can keep a send alive in the background (see
+        /// `SyncEngine.Options.deliveryActivity`).
+        public var deliveryActivity: @Sendable (Bool) async -> Void
+
+        public init(
+            serverURL: URL,
+            clientID: String,
+            transport: HTTPTransport,
+            connector: WebSocketConnector = URLSessionWebSocketConnector(),
+            appState: @escaping @Sendable () async -> String = { "active" },
+            deliveryActivity: @escaping @Sendable (Bool) async -> Void = { _ in }
+        ) {
+            self.serverURL = serverURL
+            self.clientID = clientID
+            self.transport = transport
+            self.connector = connector
+            self.appState = appState
+            self.deliveryActivity = deliveryActivity
+        }
+    }
+
+    public init(credentials: Credentials, store: LocalStore, dependencies: Dependencies, filesDirectory: URL? = nil) throws {
+        guard let secret = credentials.secretData else { throw CryptoError.invalidInput("credentials secret") }
+        self.credentials = credentials
+        self.keys = try AccountKeys(secret: secret)
+        self.store = store
+        self.filesDirectory = filesDirectory ?? FileManager.default.temporaryDirectory
+            .appendingPathComponent("happy-files-\(keys.anonID)", isDirectory: true)
+        self.api = HappyAPI(serverURL: dependencies.serverURL, clientID: dependencies.clientID, transport: dependencies.transport)
+            .authenticated(token: credentials.token)
+        var syncOptions = SyncEngine.Options()
+        syncOptions.deliveryActivity = dependencies.deliveryActivity
+        self.sync = SyncEngine(api: api, store: store, keys: keys, options: syncOptions)
+        self.sender = OutboxSender(store: store, sync: sync, filesDirectory: self.filesDirectory)
+        self.chatFeed = LocalChatFeed(store: store)
+        self.pairing = PairingService(api: api, keys: keys)
+
+        guard let socketURL = SocketIOURL.make(serverURL: dependencies.serverURL) else {
+            throw ServerURLError.invalid
+        }
+        let token = credentials.token
+        let clientID = dependencies.clientID
+        let appState = dependencies.appState
+        self.realtime = SocketIOClient(url: socketURL, connector: dependencies.connector) {
+            .object([
+                "token": .string(token),
+                "clientType": .string("user-scoped"),
+                "happyClient": .string(clientID),
+                "appState": .string(await appState()),
+            ])
+        }
+        (statusUpdates, statusContinuation) = AsyncStream.makeStream(of: RealtimeStatus.self, bufferingPolicy: .bufferingNewest(1))
+        self.actions = SessionActions(api: api, store: store, sync: sync, rpc: realtime)
+    }
+
+    /// Changes synced account settings (sync.ts `applySettings`).
+    public func updateSettings(_ delta: [String: JSONValue]) {
+        let sync = self.sync
+        Task { try? await sync.updateSettings(delta) }
+    }
+
+    /// The account's id on the server: the token's `sub` claim, which
+    /// happy-app shows as the Public ID.
+    public var serverID: String? {
+        Self.subject(ofToken: credentials.token)
+    }
+
+    /// A JWT's `sub` claim, read without verifying the signature.
+    static func subject(ofToken token: String) -> String? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3 else { return nil }
+        var payload = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload), let claims = try? JSONValue.decode(data) else { return nil }
+        return claims["sub"]?.stringValue
+    }
+
+    /// The store file for an account. Named by the account's analytics id so
+    /// two accounts on one device can never read each other's data.
+    public static func storeURL(directory: URL, keys: AccountKeys) -> URL {
+        accountDirectory(directory: directory, id: keys.anonID).appendingPathComponent("store.sqlite")
+    }
+
+    public static func accountDirectory(directory: URL, id: String) -> URL {
+        directory.appendingPathComponent("accounts", isDirectory: true).appendingPathComponent(id, isDirectory: true)
+    }
+
+    /// Move sidecars before the database, which is the migration's commit
+    /// marker. Retrying an interrupted migration completes the remaining moves.
+    public static func prepareDirectory(directory: URL, id: String) throws {
+        let manager = FileManager.default
+        let target = accountDirectory(directory: directory, id: id)
+        try manager.createDirectory(at: target.appendingPathComponent("files", isDirectory: true), withIntermediateDirectories: true)
+        let old = directory.appendingPathComponent("happy-\(id).sqlite")
+        let new = target.appendingPathComponent("store.sqlite")
+        guard manager.fileExists(atPath: old.path), !manager.fileExists(atPath: new.path) else { return }
+        for suffix in ["-wal", "-shm", ""] {
+            let source = URL(fileURLWithPath: old.path + suffix)
+            let destination = URL(fileURLWithPath: new.path + suffix)
+            if manager.fileExists(atPath: source.path), !manager.fileExists(atPath: destination.path) {
+                try manager.moveItem(at: source, to: destination)
+            }
+        }
+    }
+
+    /// Shows local data immediately; sync and the socket catch up behind it.
+    public func start() async {
+        await sync.configureSending(filesDirectory: sender.filesDirectory)
+        await sync.syncAll()
+        let realtime = self.realtime
+        let sync = self.sync
+        let statusContinuation = self.statusContinuation
+        pump.set(Task {
+            for await event in realtime.events {
+                await Self.route(event, sync: sync, status: statusContinuation)
+            }
+        })
+        await realtime.connect()
+    }
+
+    public func stop() async {
+        let task = pump.cancel()
+        await realtime.disconnect()
+        await sync.stop()
+        await task?.value
+        statusContinuation.finish()
+    }
+
+    /// Tells the server whether the app is in the foreground, so it can
+    /// suppress pushes while the user is looking at the app.
+    public func sendAppState(_ state: String) async {
+        await sync.setBackgrounded(state != "active")
+        try? await realtime.emit("app-state", .object(["state": .string(state)]))
+    }
+
+    static func route(_ event: RealtimeEvent, sync: SyncEngine, status: AsyncStream<RealtimeStatus>.Continuation) async {
+        switch event {
+        case .status(let value):
+            status.yield(value)
+        case .connected:
+            await sync.syncAll()
+        case .event("update", let payload?):
+            if let update = try? payload.decode(as: UpdateContainer.self) {
+                await sync.handle(update)
+            }
+        case .event("ephemeral", let payload?):
+            if let ephemeral = try? payload.decode(as: EphemeralEvent.self) {
+                await sync.handle(ephemeral)
+            }
+        case .event:
+            break
+        }
+    }
+}
+
+private final class PumpHolder: @unchecked Sendable {
+    private var task: Task<Void, Never>?
+    private let lock = NSLock()
+
+    func set(_ task: Task<Void, Never>) {
+        lock.lock()
+        let previous = self.task
+        self.task = task
+        lock.unlock()
+        previous?.cancel()
+    }
+
+    func cancel() -> Task<Void, Never>? {
+        lock.lock()
+        let task = self.task
+        self.task = nil
+        lock.unlock()
+        task?.cancel()
+        return task
+    }
+}
