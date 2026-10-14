@@ -17,6 +17,9 @@ import UIKit
 /// Every other state is MainView.tsx's phone home: the bar is hidden, and
 /// the home header floats over content that scrolls under it.
 ///
+/// The dock sits at the foot of every state but Link Your Computer, which
+/// is not MainView in happy-app; content leaves it 108pt.
+///
 /// Screens pushed over it (settings, server, troubleshoot) stay where they
 /// are when a computer arrives, as they do in happy-app.
 public final class HomeViewController: UIViewController {
@@ -24,8 +27,18 @@ public final class HomeViewController: UIViewController {
     private let session: AccountSession
     private let titleView = NavigationTitleView()
     private let header = HomeHeaderView()
-    private var observation: StoreObservation?
-    private var state: HomeState?
+    private let dockView = HomeDockView()
+    private var dock: HomeDockController?
+    /// Home's content worked out off the main thread from the account's
+    /// home feed (`HomeDerivation`); only what changed is applied here.
+    private var pipeline: ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>?
+    private var observation: ApplyObservation?
+    /// Derives home again when a stamp or heading can next read differently
+    /// (`HomeClockBoundary`), with no store change.
+    private let clockWake = ClockWake()
+    private var state: HomeContent?
+    /// The home filter's choice, as last derived.
+    private var grouping: SessionListGrouping = .flat
     private var content: UIViewController?
 
     public init(context: AppContext, session: AccountSession) {
@@ -42,6 +55,8 @@ public final class HomeViewController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(Palette.groupedBackground)
+        // OnboardingHeader's title, which scales; the rows below don't yet.
+        titleView.traitOverrides.followsTextSize = true
         navigationItem.titleView = titleView
         showsBackTitle()
         header.isHidden = true
@@ -49,10 +64,26 @@ public final class HomeViewController: UIViewController {
         header.filterButton.menu = filterMenu()
         header.filterButton.showsMenuAsPrimaryAction = true
         header.filterButton.preferredMenuElementOrder = .fixed
+        dockView.isHidden = true
+        view.addSubview(dockView)
         view.addSubview(header)
-        observation = session.observeHome { [weak self] state in
-            self?.show(state)
-        }
+        let pipeline = ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>(
+            input: HomeDerivation.Input(expandedProjects: context.account.localSettings.expandedProjects, includesDock: true),
+            state: HomeDerivation.Applied(),
+            derive: { [clockWake] in HomeDerivation.derive($0, applied: $1, wake: clockWake) },
+            apply: { [weak self] update in
+                // Nothing from an account that is no longer the active one.
+                guard let self, self.isCurrentAccount else { return false }
+                ApplyPerf.measure(.home) { self.apply(update) }
+                return true
+            }
+        )
+        clockWake.onWake { [weak pipeline] in pipeline?.update { _ in } }
+        pipeline.follow(session.homeFeed.snapshots()) { $0.snapshot = $1 }
+        self.pipeline = pipeline
+        observation = pipeline.observation
+        // Tablet (HappyUI/Tablet): the shell flips this with the window's width.
+        registerForTraitChanges([TabletLayoutTrait.self]) { (self: Self, _) in self.updateNavigation(animated: false) }
         // The stream ends when the session stops.
         let statusUpdates = session.statusUpdates
         Task { @MainActor [weak self] in
@@ -60,6 +91,32 @@ public final class HomeViewController: UIViewController {
                 self?.header.status = status
             }
         }
+        // sync.ts `nativeUpdateSync`: asked at start and whenever the app
+        // becomes active.
+        checkNativeUpdate()
+        NotificationCenter.default.addObserver(self, selector: #selector(appBecameActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        // Midnight, a new time zone, a clock set by hand: the stamps are
+        // written again, off the main thread.
+        NotificationCenter.default.addObserver(self, selector: #selector(clockChanged), name: UIApplication.significantTimeChangeNotification, object: nil)
+    }
+
+    deinit {
+        clockWake.cancel()
+    }
+
+    @objc private func appBecameActive() {
+        checkNativeUpdate()
+        // A wake that fell due while the app was suspended.
+        clockChanged()
+    }
+
+    @objc private func clockChanged() {
+        pipeline?.update { _ in }
+    }
+
+    private func checkNativeUpdate() {
+        guard let request = NativeUpdateCheck.Request.current() else { return }
+        NativeUpdateCheck.shared.invalidate(api: session.api, request: request)
     }
 
     public override func viewWillAppear(_ animated: Bool) {
@@ -78,9 +135,39 @@ public final class HomeViewController: UIViewController {
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let layout = HomeScreenLayout(size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets), dock: 0)
+        let showsDock = state != nil && state != .link
+        let layout = HomeScreenLayout(
+            size: view.bounds.size,
+            safeArea: LayoutInsets(view.safeAreaInsets),
+            dock: showsDock ? HomeDockLayout.Metrics.contentInset : 0
+        )
         header.frame = layout.header
+        dockView.frame = view.bounds
         applyInsets(layout.insets)
+    }
+
+    private var isCurrentAccount: Bool {
+        context.account.session === session
+    }
+
+    /// Returns how many rows it touched.
+    private func apply(_ update: HomeUpdate) -> Int {
+        grouping = update.grouping
+        if let snapshot = update.dock {
+            if let dock {
+                dock.update(snapshot)
+            } else {
+                dock = HomeDockController(restingView: dockView, host: self, context: context, session: session, snapshot: snapshot)
+            }
+        }
+        guard update.contentChanged else { return 0 }
+        return show(update)
+    }
+
+    /// The list's projects were opened or closed: derive the rows again.
+    private func expandedProjectsChanged() {
+        let expanded = context.account.localSettings.expandedProjects
+        pipeline?.update { $0.expandedProjects = expanded }
     }
 
     /// The list pads itself under the header; every other state sees the
@@ -101,36 +188,51 @@ public final class HomeViewController: UIViewController {
         if child.additionalSafeAreaInsets != insets { child.additionalSafeAreaInsets = insets }
     }
 
-    private func show(_ state: HomeState) {
-        guard state != self.state else { return }
+    private func show(_ update: HomeUpdate) -> Int {
+        let state = update.content
         let previous = self.state
         self.state = state
+        // The scrim is for a list that scrolls under the dock.
+        dockView.showsScrim = state.kind == .list
+        var rows = 0
         switch (previous, state) {
         case (.offline?, .offline(let choices, let hasArchived)):
             let checklist = content as? OfflineChecklistViewController
-            checklist?.choices = choices
-            checklist?.hasArchived = hasArchived
-        case (.list?, .list(let list, let offline)):
-            (content as? SessionListViewController)?.update(list, offline: offline)
+            if checklist?.choices != choices { checklist?.choices = choices }
+            if checklist?.hasArchived != hasArchived { checklist?.hasArchived = hasArchived }
+        case (.list?, .list(let model)):
+            rows = (content as? SessionListViewController)?.apply(model, changeset: update.changeset, animated: view.window != nil) ?? 0
         default:
-            embed(makeContent(for: state), animated: previous != nil)
+            embed(makeContent(for: update), animated: previous != nil)
+            rows = state.list?.rows.count ?? 0
         }
-        updateNavigation(animated: previous != nil)
+        if update.kindChanged { updateNavigation(animated: previous != nil) }
+        return rows
     }
 
-    private func makeContent(for state: HomeState) -> UIViewController {
-        switch state {
+    private func makeContent(for update: HomeUpdate) -> UIViewController {
+        switch update.content {
         case .loading:
             LoadingViewController()
         case .link:
             LinkComputerViewController(context: context, session: session)
         case .offline(let choices, let hasArchived):
-            OfflineChecklistViewController(session: session, choices: choices, hasArchived: hasArchived)
+            OfflineChecklistViewController(context: context, session: session, choices: choices, hasArchived: hasArchived)
         case .noSessions:
-            NoSessionsViewController(session: session)
-        case .list(let list, let offline):
-            SessionListViewController(context: context, session: session, list: list, offline: offline)
+            NoSessionsViewController(context: context, session: session)
+        case .list(let model):
+            makeList(model, changeset: update.changeset)
         }
+    }
+
+    private func makeList(_ model: HomeListModel, changeset: RowChangeset) -> SessionListViewController {
+        let controller = SessionListViewController(context: context, session: session)
+        controller.onCreateWorkspace = { [weak self] origin in
+            self?.dock?.createWorkspace(origin) ?? false
+        }
+        controller.onExpandedProjectsChange = { [weak self] in self?.expandedProjectsChanged() }
+        controller.apply(model, changeset: changeset, animated: false)
+        return controller
     }
 
     private func embed(_ next: UIViewController, animated: Bool) {
@@ -142,7 +244,7 @@ public final class HomeViewController: UIViewController {
         next.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         let swap = {
             previous?.view.removeFromSuperview()
-            self.view.insertSubview(next.view, belowSubview: self.header)
+            self.view.insertSubview(next.view, belowSubview: self.dockView)
         }
         if animated {
             UIView.transition(with: view, duration: 0.25, options: .transitionCrossDissolve, animations: swap)
@@ -160,7 +262,12 @@ public final class HomeViewController: UIViewController {
     private func updateNavigation(animated: Bool) {
         guard let state else { return }
         let floating = state != .link
-        header.isHidden = !floating
+        // Tablet (HappyUI/Tablet): beside the sidebar the index route draws
+        // nothing, nor its header and dock (MainView.tsx `isTablet`).
+        let blank = floating && traitCollection.isTabletLayout
+        content?.view.isHidden = blank
+        header.isHidden = !floating || blank
+        dock?.isAvailable = floating && !blank
         if navigationController?.topViewController === self {
             navigationController?.setNavigationBarHidden(floating, animated: animated)
         }
@@ -189,13 +296,13 @@ public final class HomeViewController: UIViewController {
     }
 
     private func filterMenuElements() -> [UIMenuElement] {
-        let settings = (try? session.store.settingsSnapshot()).map { AccountSettings($0) } ?? AccountSettings()
+        let current = grouping
         let options: [(SessionListGrouping, String)] = [
             (.flat, Strings.SessionsFilter.flatList),
             (.project, Strings.SessionsFilter.groupByProject),
         ]
         let choices = options.map { mode, title in
-            UIAction(title: title, state: settings.sessionListGrouping == mode ? .on : .off) { [weak self] _ in
+            UIAction(title: title, state: current == mode ? .on : .off) { [weak self] _ in
                 self?.session.updateSettings(["sessionListGrouping": .string(mode.rawValue)])
             }
         }
@@ -254,6 +361,7 @@ final class LinkComputerViewController: UIViewController {
         self.context = context
         self.session = session
         super.init(nibName: nil, bundle: nil)
+        followsTextSize()
     }
 
     @available(*, unavailable)
@@ -367,17 +475,20 @@ final class OfflineChecklistViewController: UIViewController {
         didSet { applyChoices() }
     }
 
+    private let context: AppContext
     private let session: AccountSession
     private let checklist = OfflineChecklistView()
     private var linking = false
     private var approved = false
     private var approvalTimeout: Task<Void, Never>?
 
-    init(session: AccountSession, choices: [MachineChoice], hasArchived: Bool = false) {
+    init(context: AppContext, session: AccountSession, choices: [MachineChoice], hasArchived: Bool = false) {
+        self.context = context
         self.session = session
         self.choices = choices
         self.hasArchived = hasArchived
         super.init(nibName: nil, bundle: nil)
+        followsTextSize()
     }
 
     @available(*, unavailable)
@@ -393,7 +504,7 @@ final class OfflineChecklistViewController: UIViewController {
         super.viewDidLoad()
         checklist.troubleshoot.onTap = { [weak self] in
             guard let self else { return }
-            navigationController?.pushViewController(TroubleshootViewController(session: session), animated: true)
+            navigationController?.pushViewController(TroubleshootViewController(context: context, session: session), animated: true)
         }
         checklist.linkAnother.onTap = { [weak self] in self?.scan() }
         checklist.showArchived.onTap = { [weak self] in
@@ -448,13 +559,14 @@ final class OfflineChecklistViewController: UIViewController {
 
 @MainActor
 enum ComputerRow {
-    /// A computer as troubleshoot.tsx lists it. happy-app opens the machine
-    /// screen on tap; that screen isn't ported yet, so the row is inert.
-    static func make(_ choice: MachineChoice) -> ItemRowView {
+    /// A computer as troubleshoot.tsx lists it; a tap opens its machine
+    /// screen.
+    static func make(_ computer: TroubleshootComputer, onTap: @escaping () -> Void) -> ItemRowView {
         ItemRowView(
-            title: choice.name,
-            subtitle: choice.online ? nil : Strings.Troubleshoot.machineOffline,
-            icon: ItemIcon(.ionicons("desktop-outline"), tint: Palette.textSecondary, size: 28)
+            title: computer.name,
+            subtitle: computer.online ? nil : Strings.Troubleshoot.machineOffline,
+            icon: ItemIcon(.ionicons("desktop-outline"), tint: Palette.textSecondary, size: 28),
+            onTap: onTap
         )
     }
 }
@@ -462,17 +574,19 @@ enum ComputerRow {
 /// app/(app)/troubleshoot.tsx: what to check when every linked computer is
 /// offline, the computers, and an AI prompt pointed at the local logs.
 final class TroubleshootViewController: UIViewController {
+    private let context: AppContext
     private let session: AccountSession
     private let list = GroupedListView()
     private let guide = TroubleshootGuideView()
     private let prompt = CopyPromptView()
-    private var observation: StoreObservation?
     private var aiPrompt = ""
     private var copiedReset: Task<Void, Never>?
 
-    init(session: AccountSession) {
+    init(context: AppContext, session: AccountSession) {
+        self.context = context
         self.session = session
         super.init(nibName: nil, bundle: nil)
+        followsTextSize()
     }
 
     @available(*, unavailable)
@@ -491,18 +605,40 @@ final class TroubleshootViewController: UIViewController {
             UIApplication.shared.open(Strings.Onboarding.desktopURL)
         }
         prompt.button.onTap = { [weak self] in self?.copyPrompt() }
-        observation = session.store.observeMachines { [weak self] snapshot in
-            self?.update(snapshot)
-        }
     }
 
-    private func update(_ snapshot: MachinesSnapshot) {
-        let choices = MachineChoice.collect(snapshot.machines)
-        let sessions = (try? session.store.sessions()) ?? []
-        aiPrompt = OfflineTroubleshooting(choices: choices, sessions: sessions).aiPrompt
+    /// The computers and the prompt, worked out off the main thread by the
+    /// account's troubleshooting feed, and read only while this screen is
+    /// on screen.
+    private lazy var feed = VisibleFeed<TroubleshootState> { [weak self] state in
+        guard let self, self.context.account.session === self.session else { return false }
+        ApplyPerf.measure(.screen) {
+            self.update(state)
+            return state.computers.count
+        }
+        return true
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        feed.start { session.troubleshootingFeed.snapshots() }
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        feed.stop()
+    }
+
+    private func update(_ state: TroubleshootState) {
+        aiPrompt = state.aiPrompt
         var sections: [UIView] = [guide]
-        if !choices.isEmpty {
-            sections.append(ItemGroupView(title: Strings.Troubleshoot.machines, rows: choices.map(ComputerRow.make)))
+        if !state.computers.isEmpty {
+            sections.append(ItemGroupView(title: Strings.Troubleshoot.machines, rows: state.computers.map { computer in
+                ComputerRow.make(computer) { [weak self] in
+                    guard let self else { return }
+                    push(.machine(id: computer.id), context: context)
+                }
+            }))
         }
         sections.append(prompt)
         list.sections = sections

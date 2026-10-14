@@ -81,15 +81,86 @@ public final class LocalSettings: Sendable {
         set { storage.set(newValue ? "true" : nil, forKey: Keys.devModeEnabled) }
     }
 
+    /// Developer › Markdown Copy v2: a long press on an agent's markdown
+    /// opens the text selection screen instead of copying the paragraph
+    /// (localSettings.ts `markdownCopyV2`).
+    public var markdownCopyV2: Bool {
+        get { storage.string(forKey: Keys.markdownCopyV2) == "true" }
+        set { storage.set(newValue ? "true" : nil, forKey: Keys.markdownCopyV2) }
+    }
+
+    /// localSettings.ts `zenMode`: the tablet shell's zen control collapses
+    /// the sidebar, and the composer trims its controls.
+    public var zenMode: Bool {
+        get { storage.string(forKey: Keys.zenMode) == "true" }
+        set { storage.set(newValue ? "true" : nil, forKey: Keys.zenMode) }
+    }
+
+    /// The projects showing every worktree on the grouped home list
+    /// (localSettings.ts `expandedProjects`, keyed by project id).
+    public var expandedProjects: Set<String> {
+        get {
+            guard let json = storage.string(forKey: Keys.expandedProjects),
+                  let value = try? JSONDecoder().decode([String: Bool].self, from: Data(json.utf8)) else {
+                return []
+            }
+            return Set(value.filter(\.value).keys)
+        }
+        set {
+            let record = Dictionary(uniqueKeysWithValues: newValue.map { ($0, true) })
+            let data = (try? JSONEncoder().encode(record)) ?? Data()
+            storage.set(newValue.isEmpty ? nil : String(decoding: data, as: UTF8.self), forKey: Keys.expandedProjects)
+        }
+    }
+
+    /// The CLI versions whose outdated warning was dismissed in the chat, by
+    /// machine id (localSettings.ts `acknowledgedCliVersions`).
+    public var acknowledgedCliVersions: [String: String] {
+        get {
+            guard let json = storage.string(forKey: Keys.acknowledgedCliVersions),
+                  let value = try? JSONDecoder().decode([String: String].self, from: Data(json.utf8)) else {
+                return [:]
+            }
+            return value
+        }
+        set {
+            let data = (try? JSONEncoder().encode(newValue)) ?? Data()
+            storage.set(newValue.isEmpty ? nil : String(decoding: data, as: UTF8.self), forKey: Keys.acknowledgedCliVersions)
+        }
+    }
+
+    /// The new-session draft (persistence.ts `new-session-draft-v1`), nil
+    /// until one is saved.
+    public var newSessionDraft: NewSessionDraft? {
+        get {
+            storage.string(forKey: NewSessionDraft.storageKey).flatMap {
+                NewSessionDraft(json: $0, now: Int64(Date().timeIntervalSince1970 * 1000))
+            }
+        }
+        set { storage.set(newValue?.json, forKey: NewSessionDraft.storageKey) }
+    }
+
     public func clear() {
-        for key in [Keys.linkComputerChecklist, Keys.themePreference, Keys.devModeEnabled] {
+        for key in [Keys.linkComputerChecklist, Keys.themePreference, Keys.devModeEnabled, Keys.markdownCopyV2, Keys.expandedProjects, Keys.acknowledgedCliVersions, Keys.registeredPushToken, Keys.zenMode, NewSessionDraft.storageKey] {
             storage.set(nil, forKey: key)
         }
+    }
+
+    /// persistence.registered-push-token-v1, scoped to this account's local-settings suite.
+    /// Sign-out clears it so a later sign-in registers the installation again.
+    public var registeredPushToken: String? {
+        get { storage.string(forKey: Keys.registeredPushToken) }
+        set { storage.set(newValue, forKey: Keys.registeredPushToken) }
     }
 
     private enum Keys {
         static let linkComputerChecklist = "linkComputerChecklist"
         static let themePreference = "themePreference"
         static let devModeEnabled = "devModeEnabled"
+        static let markdownCopyV2 = "markdownCopyV2"
+        static let expandedProjects = "expandedProjects"
+        static let acknowledgedCliVersions = "acknowledgedCliVersions"
+        static let registeredPushToken = "registered-push-token-v1"
+        static let zenMode = "zenMode"
     }
 }

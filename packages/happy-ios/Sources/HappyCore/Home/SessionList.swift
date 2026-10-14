@@ -133,6 +133,11 @@ public struct SessionList: Equatable, Sendable {
     /// How the avatars are drawn (Settings › Appearance).
     public var avatarStyle: AvatarStyle
     public var avatarMonochrome: Bool
+    /// The home filter's choice (`sessionListGrouping`).
+    public var grouping: SessionListGrouping
+    /// The list grouped by project, built only while that layout is chosen
+    /// (SessionsListWrapper.tsx hands it to ProjectHomeList).
+    public var projects: ProjectHomeData?
 
     public init(_ snapshot: HomeSnapshot, clock: Clock = Clock()) {
         let settings = AccountSettings(snapshot.settings)
@@ -199,6 +204,8 @@ public struct SessionList: Equatable, Sendable {
         self.hasArchived = !archived.isEmpty
         self.avatarStyle = settings.avatarStyle
         self.avatarMonochrome = settings.avatarMonochrome
+        self.grouping = settings.sessionListGrouping
+        self.projects = settings.sessionListGrouping == .project ? ProjectHomeData(snapshot, clock: clock) : nil
     }
 
     /// Newest activity first; ties in id order so the list never shuffles.
@@ -355,6 +362,7 @@ extension SessionRecord {
     /// message, not `updatedAt`, which moves on every background write.
     public var lastActivityAt: Int64 {
         if let at = metadata?["lastMeaningfulMessageAt"]?.numberValue { return Int64(at) }
+        if let at = lastMessageSentAt { return at }
         return createdAt
     }
 

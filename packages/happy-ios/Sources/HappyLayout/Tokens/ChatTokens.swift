@@ -17,14 +17,20 @@ public enum ChatFace: Hashable, Sendable {
     case plex(FontFace)
     /// React Native's default font: the system font at a weight.
     case system(ChatWeight)
+    /// `fontStyle: 'italic'` on React Native's default font.
+    case systemItalic
     /// `Platform.select({ ios: 'Menlo' })`.
     case menlo
+    /// Menlo at weight '600', which iOS draws in Menlo Bold.
+    case menloBold
+    /// Menlo with `fontStyle: 'italic'`.
+    case menloItalic
 
     public var isMonospaced: Bool {
         switch self {
         case .plex(let face): face == .mono || face == .monoItalic || face == .monoSemiBold
-        case .system: false
-        case .menlo: true
+        case .system, .systemItalic: false
+        case .menlo, .menloBold, .menloItalic: true
         }
     }
 }
@@ -47,17 +53,27 @@ public struct ChatTextStyle: Hashable, Sendable {
     public var lineHeight: CGFloat?
     public var letterSpacing: CGFloat
     public var uppercase: Bool
+    /// `maxFontSizeMultiplier`, as on `TextStyle`.
+    public var maxScale: CGFloat?
 
-    public init(_ face: ChatFace, size: CGFloat, lineHeight: CGFloat? = nil, letterSpacing: CGFloat = 0, uppercase: Bool = false) {
+    public init(_ face: ChatFace, size: CGFloat, lineHeight: CGFloat? = nil, letterSpacing: CGFloat = 0, uppercase: Bool = false, maxScale: CGFloat? = nil) {
         self.face = face
         self.size = size
         self.lineHeight = lineHeight
         self.letterSpacing = letterSpacing
         self.uppercase = uppercase
+        self.maxScale = maxScale
     }
 
     public init(_ style: TextStyle) {
-        self.init(.plex(style.face), size: style.size, lineHeight: style.lineHeight, letterSpacing: style.letterSpacing, uppercase: style.uppercase)
+        self.init(
+            .plex(style.face),
+            size: style.size,
+            lineHeight: style.lineHeight,
+            letterSpacing: style.letterSpacing,
+            uppercase: style.uppercase,
+            maxScale: style.maxScale
+        )
     }
 
     public func with(_ face: ChatFace) -> ChatTextStyle {
@@ -117,10 +133,59 @@ extension Palette {
     public static let diffSectionText = ColorToken("#6E7781", "#8B949E")
     public static let diffGutterBorder = ColorToken("#D8DEE4", "#21262D")
 
+    /// theme.colors.box.warning.text: ToolError's glyph for a refused call.
+    public static let boxWarningText = ColorToken("#FF9500", "#FFAB00")
+
+    // TodoView.tsx (fixed colours, the same in both themes)
+    public static let todoCompleted = ColorToken("#34C759")
+    public static let todoInProgress = ColorToken("#007AFF")
+    public static let todoPending = ColorToken("#666666")
+    public static let todoOther = ColorToken("#000000")
+
+    /// White on an accent fill (a ticked checkbox, the answer sheet's button).
+    public static let onAccent = ColorToken("#FFFFFF")
+    /// The answer sheet's required-question dot.
+    public static let requiredDot = ColorToken("#FF9500")
+    /// ToolFullView's section glyphs: #5856D6 (description, input),
+    /// #34C759 (output), #FF3B30 (error), #FF9500 (raw JSON);
+    /// MultiEditViewFull's edit number and replace-all badge are the purple
+    /// too, its separator #E5E5EA.
+    public static let fullViewPurple = ColorToken("#5856D6")
+    public static let fullViewGreen = ColorToken("#34C759")
+    public static let fullViewRed = ColorToken("#FF3B30")
+    public static let fullViewOrange = ColorToken("#FF9500")
+    public static let multiEditSeparator = ColorToken("#E5E5EA")
+    /// ChatHeaderView's subtitle in the glass capsule: rgba(24,23,28,0.72)
+    /// in light, rgba(255,255,255,0.78) in dark.
+    public static let headerGlassSubtitle = ColorToken(
+        light: RGBA(red: 24 / 255, green: 23 / 255, blue: 28 / 255, alpha: 0.72),
+        dark: RGBA(red: 1, green: 1, blue: 1, alpha: 0.78)
+    )
+
     /// theme.colors.button.secondary.tint: the goal bar's action glyphs.
     public static let buttonSecondaryTint = ColorToken("#666666", "#8E8E93")
     /// theme.colors.shadow: the scroll-to-bottom button.
     public static let shadow = ColorToken("#000000")
+    /// The CLI version warning's pill, the same in both themes: its fill,
+    /// its label and close glyph, and its warning glyph.
+    public static let cliWarningFill = ColorToken("#FFF3CD")
+    public static let cliWarningText = ColorToken("#856404")
+    public static let cliWarningIcon = ColorToken("#FF9500")
+    /// SessionView's floating back button on a phone held sideways:
+    /// rgba(255,255,255,0.9) in light, rgba(28,23,28,0.9) in dark, and a
+    /// black chevron in both (happy-app's own choice, kept).
+    public static let landscapeBackFill = ColorToken(
+        light: RGBA(red: 1, green: 1, blue: 1, alpha: 0.9),
+        dark: RGBA(red: 28 / 255, green: 23 / 255, blue: 28 / 255, alpha: 0.9)
+    )
+    public static let landscapeBackGlyph = ColorToken("#000000")
+    /// WorktreeTabStrip's open tab: a translucent chip, so it doesn't punch
+    /// a hole in the glass, rgba(0,0,0,0.07) in light and
+    /// rgba(255,255,255,0.14) in dark.
+    public static let worktreeTabSelected = ColorToken(
+        light: RGBA(red: 0, green: 0, blue: 0, alpha: 0.07),
+        dark: RGBA(red: 1, green: 1, blue: 1, alpha: 0.14)
+    )
 
     public static let chat: [ColorToken] = [
         userMessageText, agentEventText, surfacePressed, warning, boxWarningBackground, boxErrorBackground,
@@ -129,6 +194,10 @@ extension Palette {
         gitBranchText, gitAddedText, gitRemovedText, terminalPanel, terminalPromptGreen, terminalCommand,
         terminalStdout, terminalStderr, terminalError, terminalEmptyOutput, diffRowAdded, diffRowRemoved,
         diffMarkerAdded, diffMarkerRemoved, diffText, diffSectionText, diffGutterBorder, buttonSecondaryTint, shadow,
+        boxWarningText, todoCompleted, todoInProgress, todoPending, todoOther, onAccent, requiredDot,
+        headerGlassSubtitle, fullViewPurple, fullViewGreen, fullViewRed, fullViewOrange, multiEditSeparator,
+        cliWarningFill, cliWarningText, cliWarningIcon, landscapeBackFill, landscapeBackGlyph,
+        worktreeTabSelected,
     ]
 }
 
@@ -171,12 +240,27 @@ public enum ChatTextStyles {
     public static let toolDescription = ChatTextStyle(.system(.regular), size: 13)
     public static let toolElapsed = ChatTextStyle(.menlo, size: 13)
     public static let compactActivity = ChatTextStyle(.system(.regular), size: 15, lineHeight: 20)
+    // TodoView.tsx, TaskView.tsx (TaskView asks for 'monospace', which iOS
+    // doesn't have, so React Native draws the system font)
+    public static let todo = ChatTextStyle(.system(.regular), size: 14)
+    public static let taskItem = ChatTextStyle(.system(.medium), size: 14)
+    public static let taskMore = ChatTextStyle(.systemItalic, size: 14)
     // ToolSectionView.tsx, ToolError.tsx, CodeView.tsx
     public static let toolSectionTitle = ChatTextStyle(.system(.semibold), size: 13, uppercase: true)
     public static let toolError = ChatTextStyle(.system(.regular), size: 13)
     public static let codeView = ChatTextStyle(.menlo, size: 12, lineHeight: 18)
     // CommandView.tsx
     public static let terminal = ChatTextStyle(.menlo, size: 13, lineHeight: 18)
+    public static let terminalPrompt = ChatTextStyle(.menloBold, size: 14, lineHeight: 20)
+    public static let terminalCommand = ChatTextStyle(.menlo, size: 14, lineHeight: 20)
+    // CodexBashView.tsx ('monospace' is not an iOS font, so React Native
+    // draws the system font), GeminiExecuteView.tsx
+    public static let toolOperation = ChatTextStyle(.system(.medium), size: 14)
+    public static let toolOperationCommand = ChatTextStyle(.system(.regular), size: 12)
+    public static let executeCwd = ChatTextStyle(.system(.regular), size: 12)
+    public static let executeDescription = ChatTextStyle(.systemItalic, size: 13)
+    // FileView.tsx: the attachment's name under its picture.
+    public static let attachmentName = ChatTextStyle(.system(.medium), size: 13)
 
     // PermissionFooter.tsx
     public static let permissionButton = ChatTextStyle(.system(.medium), size: 14, lineHeight: 18)
@@ -198,21 +282,82 @@ public enum ChatTextStyles {
     public static let rigActivity = ChatTextStyle(.plex(.regular), size: 11)
     public static let chatFooterWarning = ChatTextStyle(.plex(.regular), size: 12)
 
-    // ChatHeaderView.tsx
+    // ChatHeaderView.tsx, in the glass capsule (mobileSubtitle: 14 high)
     public static let headerTitle = ChatTextStyle(.plex(.semiBold), size: 16, lineHeight: 20)
     public static let headerSubtitle = ChatTextStyle(.plex(.regular), size: 12, lineHeight: 14)
+    /// Without glass (a tablet) the subtitle keeps its own 16.
+    public static let headerPlainSubtitle = ChatTextStyle(.plex(.regular), size: 12, lineHeight: 16)
 
     // EmptyMessages.tsx
+    public static let emptyHost = ChatTextStyle(.plex(.semiBold), size: 18)
+    public static let emptyPath = ChatTextStyle(.plex(.regular), size: 14)
     public static let emptyTitle = ChatTextStyle(.plex(.regular), size: 20)
-    public static let emptySubtitle = ChatTextStyle(.plex(.regular), size: 15, lineHeight: 20)
+    public static let emptyCreated = ChatTextStyle(.plex(.regular), size: 16, lineHeight: 24)
 
-    // InlineQuestionForm.tsx
-    public static let questionHeader = ChatTextStyle(.plex(.semiBold), size: 12, lineHeight: 16, letterSpacing: 0.4, uppercase: true)
-    public static let questionText = ChatTextStyle(.plex(.semiBold), size: 15, lineHeight: 21)
-    public static let questionOption = ChatTextStyle(.plex(.regular), size: 15, lineHeight: 20)
-    public static let questionOptionDescription = ChatTextStyle(.plex(.regular), size: 13, lineHeight: 18)
+    // SessionView's CLI version warning (a plain <Text>: the system font)
+    public static let cliWarning = ChatTextStyle(.system(.semibold), size: 12)
+
+    // CodexPatchView's move destination: `fontFamily: 'monospace'`, which
+    // React Native on iOS doesn't know, so the system font
+    public static let patchMovePath = ChatTextStyle(.system(.regular), size: 12)
+
+    // PendingChatPlaceholder.tsx; its folder line is emptyPath's 14
+    public static let pendingQueued = ChatTextStyle(.plex(.regular), size: 15, lineHeight: 21)
+
+    // InlineQuestionForm.tsx (plain <Text>: the system font)
+    public static let inlineQuestionHeader = ChatTextStyle(.system(.semibold), size: 12, uppercase: true)
+    public static let inlineQuestionText = ChatTextStyle(.system(.medium), size: 15)
+    public static let inlineOptionLabel = ChatTextStyle(.system(.medium), size: 14)
+    public static let inlineOptionDescription = ChatTextStyle(.system(.regular), size: 13)
+    public static let inlineSubmit = ChatTextStyle(.system(.semibold), size: 14)
+    public static let inlineSubmittedHeader = ChatTextStyle(.system(.semibold), size: 13)
+    public static let inlineSubmittedValue = ChatTextStyle(.system(.regular), size: 13)
+
+    // AgentQuestionModal.tsx
+    public static let sheetAction = ChatTextStyle(.plex(.regular), size: 16)
+    public static let sheetTitle = ChatTextStyle(.plex(.semiBold), size: 16)
+    public static let sheetChip = ChatTextStyle(.plex(.semiBold), size: 12, uppercase: true)
+    public static let sheetQuestion = ChatTextStyle(.plex(.semiBold), size: 17)
+    public static let sheetHint = ChatTextStyle(.plex(.regular), size: 13)
+    public static let sheetOptionLabel = ChatTextStyle(.plex(.semiBold), size: 15)
+    public static let sheetOptionDescription = ChatTextStyle(.plex(.regular), size: 13)
+    public static let sheetCustomLabel = ChatTextStyle(.plex(.semiBold), size: 13)
+    /// A TextInput with no font family: the system font.
+    public static let sheetInput = ChatTextStyle(.system(.regular), size: 15)
+    public static let sheetError = ChatTextStyle(.plex(.regular), size: 14)
+    public static let sheetSubmit = ChatTextStyle(.plex(.semiBold), size: 16)
+
+    // The message screen: ToolFullView, MultiEditViewFull, CommandView's
+    // output and [messageId].tsx's text (plain <Text>s are the system font)
+    public static let fullSectionTitle = ChatTextStyle(.system(.semibold), size: 17)
+    public static let fullDescription = ChatTextStyle(.system(.regular), size: 14, lineHeight: 20)
+    public static let fullError = ChatTextStyle(.system(.regular), size: 14, lineHeight: 20)
+    public static let fullEmptyTitle = ChatTextStyle(.system(.semibold), size: 16)
+    public static let fullEmptySubtitle = ChatTextStyle(.system(.regular), size: 14)
+    public static let multiEditNumber = ChatTextStyle(.system(.semibold), size: 14)
+    public static let multiEditBadge = ChatTextStyle(.system(.semibold), size: 12)
+    public static let terminalEmptyOutput = ChatTextStyle(.menloItalic, size: 13, lineHeight: 18)
+    public static let detailMessage = ChatTextStyle(.plex(.regular), size: 16, lineHeight: 24)
+
+    // InactiveArchivedHint (plain <Text>s: the system font)
+    public static let inactiveHint = ChatTextStyle(.system(.regular), size: 13, lineHeight: 18)
+    public static let resumeButton = ChatTextStyle(.system(.semibold), size: 15)
+    public static let resumeCommand = ChatTextStyle(.menlo, size: 13, lineHeight: 18)
+
+    // LongPressCopyable's menu and the text selection screen
+    public static let copyMenuLabel = ChatTextStyle(.plex(.regular), size: 15, lineHeight: 20)
+    public static let textSelection = ChatTextStyle(.plex(.mono), size: 14, lineHeight: 20)
+    public static let textSelectionLoading = ChatTextStyle(.plex(.regular), size: 16)
 
     // The session deleted state (SessionView.tsx)
     public static let deletedTitle = ChatTextStyle(.system(.semibold), size: 20)
     public static let deletedBody = ChatTextStyle(.system(.regular), size: 15)
+}
+
+extension TextStyles {
+    /// PendingChatPlaceholder's shimmering "Starting a new chat…".
+    public static let pendingChatTitle = TextStyle(.semiBold, size: 18)
+    /// WorktreeTabStrip's tab name, semibold on the open tab.
+    public static let worktreeTab = TextStyle(.regular, size: 14, lineHeight: 18)
+    public static let worktreeTabSelected = TextStyle(.semiBold, size: 14, lineHeight: 18)
 }

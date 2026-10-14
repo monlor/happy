@@ -100,21 +100,28 @@ final class HeaderGlassView: UIView {
 }
 
 /// MobileHeaderScrim.tsx, home variant: a light blur and a dim wash, both
-/// at full strength at the top and feathered out over the bottom 36pt.
+/// at full strength at the screen's edge and feathered out over the last
+/// 36pt towards the content. The header's runs down from the top; the
+/// dock's (`edge="bottom"`) runs up from the foot.
 final class HeaderScrimView: UIView {
+    enum Edge {
+        case top
+        case bottom
+    }
+
     private let blur = PartialBlurView(fraction: HeaderScrim.edgeBlurFraction)
     private let blurMask = CAGradientLayer()
     private let tint = CAGradientLayer()
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    init(edge: Edge = .top) {
+        super.init(frame: .zero)
         isUserInteractionEnabled = false
         blur.layer.mask = blurMask
         addSubview(blur)
         layer.addSublayer(tint)
         for gradient in [blurMask, tint] {
-            gradient.startPoint = CGPoint(x: 0.5, y: 0)
-            gradient.endPoint = CGPoint(x: 0.5, y: 1)
+            gradient.startPoint = CGPoint(x: 0.5, y: edge == .top ? 0 : 1)
+            gradient.endPoint = CGPoint(x: 0.5, y: edge == .top ? 1 : 0)
         }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
             self.setNeedsLayout()
@@ -124,6 +131,13 @@ final class HeaderScrimView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    /// MobileHeaderScrim's `overlayOpacity`: scales the wash, never the
+    /// blur. The chat's header strengthens it once content is under it.
+    var overlayOpacity: Float {
+        get { tint.opacity }
+        set { tint.opacity = newValue }
     }
 
     override func layoutSubviews() {

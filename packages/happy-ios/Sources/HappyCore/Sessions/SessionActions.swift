@@ -84,7 +84,7 @@ public struct SessionActions: Sendable {
         guard let session = try store.session(id: sessionId) else { throw SessionActionError.unknownSession }
         if session.isBot { throw SessionActionError.botNeedsMachine }
         try await api.deleteSession(id: sessionId)
-        try store.deleteSession(id: sessionId)
+        try await sync.presence.deleteSession(sessionId)
     }
 
     public func markRead(sessionId: String) {
@@ -145,11 +145,14 @@ public struct SessionActions: Sendable {
     /// reason.
     public func abort(sessionId: String) async throws {
         guard let session = try store.session(id: sessionId) else { throw SessionActionError.unknownSession }
+        guard SessionCapabilities.permits(session.metadata, method: "abort") else { throw SessionOpsError.unavailable("Abort is not available for this session") }
         let params: JSONValue = session.isRig ? .object([:]) : .object(["reason": .string(Self.abortReason)])
         _ = try await call(sessionId: sessionId, method: "abort", params: params)
     }
 
-    static let abortReason = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+    static let abortReason = "The user doesn't want to proceed with this tool use. "
+        + "The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). "
+        + "STOP what you are doing and wait for the user to tell you how to proceed."
 
     /// `SessionPermissionRequest`; absent options are left out, as
     /// JSON.stringify leaves out undefined.

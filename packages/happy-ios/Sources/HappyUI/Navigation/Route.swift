@@ -14,7 +14,8 @@ enum Route: Hashable {
     case sessionFiles(id: String)
     case sessionFile(id: String, path: String)
     case sessionChanges(id: String)
-    case sessionMessage(id: String, messageId: String)
+    /// `file`: of a patch's files, the one to show alone.
+    case sessionMessage(id: String, messageId: String, file: String? = nil)
     case textSelection(text: String)
 
     // Starting work
@@ -45,15 +46,25 @@ enum Screens {
         case .server:
             return ServerConfigViewController(context: context)
         case .troubleshoot:
-            return TroubleshootViewController(session: session)
-        case .session:
+            return TroubleshootViewController(context: context, session: session)
+        case .session(let id):
+            return ChatViewController(context: context, session: session, sessionId: id)
+        case .sessionInfo(let id):
+            return SessionInfoViewController(context: context, session: session, sessionId: id)
+        case .sessionChanges(let id):
+            return SessionChangesViewController(context: context, session: session, sessionId: id)
+        case .sessionFile(let id, let path):
+            return SessionFileViewController(context: context, session: session, sessionId: id, path: path)
+        case .sessionMessage(let id, let messageId, let file):
+            return MessageDetailViewController(context: context, session: session, sessionId: id, messageId: messageId, file: file)
+        case .textSelection(let text):
+            return TextSelectionViewController(text: text)
+        case .sessionFiles:
             return PlaceholderViewController(title: "")
-        case .sessionInfo:
-            return PlaceholderViewController(title: "")
-        case .sessionFiles, .sessionFile, .sessionChanges, .sessionMessage, .textSelection:
-            return PlaceholderViewController(title: "")
-        case .newSession, .machine:
-            return PlaceholderViewController(title: "")
+        case .machine(let id):
+            return MachineViewController(context: context, session: session, machineId: id)
+        case .newSession(let machineId, let path, let prompt):
+            return NewSessionViewController(context: context, session: session, machineId: machineId, path: path, prompt: prompt)
         case .settingsAccount:
             return SettingsAccountViewController(context: context, session: session)
         case .settingsAppearance:
@@ -75,9 +86,19 @@ enum Screens {
 extension UIViewController {
     /// Pushes a route on this screen's navigation stack. Needs a signed-in
     /// account; does nothing while signed out.
+    ///
+    /// The tablet sidebar has no stack of its own: it pushes onto the one
+    /// beside it, as SidebarNavigator.tsx's single stack does, and not
+    /// again onto the chat already on top. The route is recorded so the
+    /// sidebar can keep that chat's row selected (`HappyUI/Tablet`).
     func push(_ route: Route, context: AppContext, animated: Bool = true) {
-        guard let session = context.account.session else { return }
-        navigationController?.pushViewController(Screens.make(route, context: context, session: session), animated: animated)
+        guard let session = context.account.session,
+              let stack = navigationController ?? tabletDetailNavigation,
+              navigationController != nil || !TabletRoutes.isShowing(route, in: stack)
+        else { return }
+        let controller = Screens.make(route, context: context, session: session)
+        TabletRoutes.record(route, for: controller)
+        stack.pushViewController(controller, animated: animated)
     }
 }
 

@@ -175,8 +175,12 @@ public struct ToolCardLayout: Equatable, Sendable {
 ///
 ///     2
 ///     8 [icon 20] 10 label ………………… 8 [1.2s] 10 [status]   min 28, 3 padding
+///     ┌ body, once opened: surfaceHigh, 12 in, 8 down ┐       2 below the row
 ///     [permission footer]
 ///     2
+///
+/// happy-app's compact row has no body; here a tapped row opens to the
+/// same body a card would show.
 public struct CompactToolRowLayout: Equatable, Sendable {
     public enum Metrics {
         public static let marginV: CGFloat = 2
@@ -186,18 +190,26 @@ public struct CompactToolRowLayout: Equatable, Sendable {
         public static let iconSize: CGFloat = 20
         public static let gap: CGFloat = 10
         public static let elapsedMarginLeft: CGFloat = 8
+        public static let bodyMarginTop: CGFloat = 2
+        public static let bodyRadius: CGFloat = 8
     }
 
     public var size: CGSize
-    /// The tap target (it opens the tool's detail).
+    /// The tap target (it opens and closes the body).
     public var header: CGRect
     public var icon: CGRect
     public var label: CGRect
     public var elapsed: CGRect?
     public var statusIcon: CGRect?
+    /// The opened body's box, and its content inside the card padding.
+    public var bodyBox: CGRect?
+    public var body: CGRect?
     public var footer: CGRect?
 
-    public init(width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, label: Measurable, elapsed: Measurable?, statusIcon: CGSize?, footer: Measurable?) {
+    public init(
+        width: CGFloat, maxContentWidth: CGFloat = .greatestFiniteMagnitude, label: Measurable, elapsed: Measurable?, statusIcon: CGSize?,
+        body: Measurable? = nil, footer: Measurable?
+    ) {
         typealias M = Metrics
         let (x, cardWidth) = ToolRowMetrics.cardFrame(rowWidth: width, maxContentWidth: maxContentWidth)
         var right = x + cardWidth - M.paddingH
@@ -226,6 +238,18 @@ public struct CompactToolRowLayout: Equatable, Sendable {
         self.elapsed = elapsedFrame.map { CGRect(x: $0.minX, y: centred($0.height), width: $0.width, height: $0.height) }
         self.statusIcon = statusFrame.map { CGRect(x: $0.minX, y: centred($0.height), width: $0.width, height: $0.height) }
         var y = top + headerHeight
+        if let body {
+            typealias Card = ToolCardLayout.Metrics
+            let contentWidth = max(0, cardWidth - 2 * Card.contentPaddingH)
+            let height = body.height(fitting: contentWidth)
+            y += M.bodyMarginTop
+            bodyBox = CGRect(x: x, y: y, width: cardWidth, height: Card.contentPaddingTop + height)
+            self.body = CGRect(x: x + Card.contentPaddingH, y: y + Card.contentPaddingTop, width: contentWidth, height: height)
+            y += Card.contentPaddingTop + height
+        } else {
+            bodyBox = nil
+            self.body = nil
+        }
         if let footer {
             let height = footer.height(fitting: cardWidth)
             self.footer = CGRect(x: x, y: y, width: cardWidth, height: height)
@@ -311,40 +335,9 @@ public struct ChatStackLayout: Equatable, Sendable {
     }
 }
 
-/// A diff in a tool view: fixed-height monospaced lines with a pinned
-/// marker gutter, scrolling sideways rather than wrapping.
-public struct ToolDiffLayout: Equatable, Sendable {
-    public enum Metrics {
-        public static let lineHeight: CGFloat = 18
-        public static let gutterWidth: CGFloat = 20
-        public static let textPaddingH: CGFloat = 8
-        public static let paddingV: CGFloat = 4
-    }
-
-    public var size: CGSize
-    public var gutter: CGRect
-    /// The horizontally scrolling text area.
-    public var scroll: CGRect
-    public var contentSize: CGSize
-    public var lines: [CGRect]
-
-    /// `lineWidth` is the widest line's unwrapped width.
-    public init(width: CGFloat, lineCount: Int, lineWidth: CGFloat) {
-        typealias M = Metrics
-        let width = max(0, width)
-        let count = max(0, lineCount)
-        let height = CGFloat(count) * M.lineHeight + 2 * M.paddingV
-        gutter = CGRect(x: 0, y: 0, width: min(width, M.gutterWidth), height: height)
-        let scrollWidth = max(0, width - M.gutterWidth)
-        scroll = CGRect(x: M.gutterWidth, y: 0, width: scrollWidth, height: height)
-        contentSize = CGSize(width: max(scrollWidth, lineWidth + 2 * M.textPaddingH), height: height)
-        lines = (0..<count).map { CGRect(x: 0, y: M.paddingV + CGFloat($0) * M.lineHeight, width: max(scrollWidth, lineWidth + 2 * M.textPaddingH), height: M.lineHeight) }
-        size = CGSize(width: width, height: height)
-    }
-}
-
 /// PermissionFooter: a column of outlined buttons, 7 apart, stretched
-/// across the card on a phone.
+/// across the card on a phone, in a list no taller than `maxListHeight`
+/// (`optionsScroll`) that scrolls past it.
 ///
 ///     4
 ///     6 ┌ 1 border, 7 ─ label (14/18, centred) ─ 7 ┐ 6   min 34
@@ -367,10 +360,21 @@ public struct PermissionFooterLayout: Equatable, Sendable {
     }
 
     public var size: CGSize
+    /// Where the buttons would be with the list scrolled to its top.
     public var buttons: [CGRect]
     public var labels: [CGRect]
+    /// The list's visible part, in the footer.
+    public var list: CGRect
+    /// The whole list, taller than `list` when it scrolls.
+    public var listContentHeight: CGFloat
+    public var scrolls: Bool { listContentHeight > list.height }
 
-    public init(width: CGFloat, labels input: [Measurable]) {
+    /// `optionsScroll`'s maxHeight for a window `height` tall.
+    public static func maxListHeight(windowHeight height: CGFloat) -> CGFloat {
+        min(Metrics.maxListHeight, (max(0, height) * 0.35).rounded())
+    }
+
+    public init(width: CGFloat, labels input: [Measurable], maxListHeight: CGFloat = .greatestFiniteMagnitude) {
         typealias M = Metrics
         let width = max(0, width)
         let buttonWidth = max(0, width - 2 * M.paddingH)
@@ -388,6 +392,106 @@ public struct PermissionFooterLayout: Equatable, Sendable {
         }
         self.buttons = buttons
         self.labels = labels
-        size = CGSize(width: width, height: y + M.paddingBottom)
+        listContentHeight = y - M.paddingTop
+        list = CGRect(x: M.paddingH, y: M.paddingTop, width: buttonWidth, height: min(listContentHeight, max(0, maxListHeight)))
+        size = CGSize(width: width, height: list.maxY + M.paddingBottom)
+    }
+}
+
+/// A line of text with a fixed-size glyph before or after it: ToolError's
+/// warning sign (top-aligned, 8 before the text), TaskView's status (centred,
+/// 8 after the text).
+public struct ChatAccessoryRowLayout: Equatable, Sendable {
+    public enum Alignment: Equatable, Sendable {
+        case top
+        case center
+    }
+
+    public var size: CGSize
+    public var leading: CGRect?
+    public var text: CGRect
+    public var trailing: CGRect?
+
+    public init(width: CGFloat, leading: CGSize? = nil, text: Measurable, trailing: CGSize? = nil, gap: CGFloat = 8, alignment: Alignment = .center) {
+        let width = max(0, width)
+        let textX = leading.map { $0.width + gap } ?? 0
+        let textRight = width - (trailing.map { $0.width + gap } ?? 0)
+        let textWidth = max(0, textRight - textX)
+        let textHeight = text.height(fitting: textWidth)
+        let height = max(textHeight, leading?.height ?? 0, trailing?.height ?? 0)
+        func y(_ itemHeight: CGFloat) -> CGFloat { alignment == .top ? 0 : (height - itemHeight) / 2 }
+        self.leading = leading.map { CGRect(x: 0, y: y($0.height), width: $0.width, height: $0.height) }
+        self.text = CGRect(x: textX, y: y(textHeight), width: textWidth, height: textHeight)
+        self.trailing = trailing.map { CGRect(x: width - $0.width, y: y($0.height), width: $0.width, height: $0.height) }
+        size = CGSize(width: width, height: height)
+    }
+}
+
+/// FileView, a picture a person attached: the picture at its own size, at
+/// most 280 wide and 360 tall (4:3 at 280 when the message doesn't give its
+/// size) and never wider than the row, rounded 8, its name 4 under it, 12
+/// and 8 inside. A picture that couldn't be loaded wears a 24 pt badge 4 in
+/// from its top-right corner.
+public struct FileViewLayout: Equatable, Sendable {
+    public enum Metrics {
+        public static let paddingH: CGFloat = 12
+        public static let paddingV: CGFloat = 8
+        public static let gap: CGFloat = 4
+        public static let radius: CGFloat = 8
+        public static let maxImageWidth: CGFloat = 280
+        public static let maxImageHeight: CGFloat = 360
+        public static let defaultAspect: CGFloat = 4 / 3
+        public static let badgeSize: CGFloat = 24
+        public static let badgeInset: CGFloat = 4
+        public static let badgeIconSize: CGFloat = 20
+        /// expo-image's `transition={150}`.
+        public static let fadeIn: TimeInterval = 0.15
+    }
+
+    public var size: CGSize
+    public var image: CGRect
+    public var name: CGRect
+
+    public init(width: CGFloat, imageWidth: Double?, imageHeight: Double?, name: Measurable) {
+        typealias M = Metrics
+        let available = max(0, width - 2 * M.paddingH)
+        var picture = Self.imageSize(width: imageWidth, height: imageHeight)
+        if picture.width > available, picture.width > 0 {
+            picture = CGSize(width: available, height: picture.height * available / picture.width)
+        }
+        image = CGRect(x: M.paddingH, y: M.paddingV, width: picture.width, height: picture.height)
+        let nameHeight = name.height(fitting: available)
+        self.name = CGRect(x: M.paddingH, y: image.maxY + M.gap, width: available, height: nameHeight)
+        size = CGSize(width: max(0, width), height: self.name.maxY + M.paddingV)
+    }
+
+    /// The picture's size before the row has a say.
+    public static func imageSize(width: Double?, height: Double?) -> CGSize {
+        typealias M = Metrics
+        let width = CGFloat(width ?? 0)
+        let height = CGFloat(height ?? 0)
+        let aspect = width > 0 && height > 0 ? width / height : M.defaultAspect
+        var displayWidth = min(width > 0 ? width : M.maxImageWidth, M.maxImageWidth)
+        var displayHeight = displayWidth / aspect
+        if displayHeight > M.maxImageHeight {
+            displayHeight = M.maxImageHeight
+            displayWidth = displayHeight * aspect
+        }
+        return CGSize(width: displayWidth, height: displayHeight)
+    }
+
+    /// How many pixels to decode a picture of `size` pixels to: no more
+    /// than the largest one FileView draws needs on a 3x screen.
+    public static func decodedSize(_ size: CGSize) -> CGSize {
+        typealias M = Metrics
+        guard size.width > 0, size.height > 0 else { return size }
+        let scale = min(1, 3 * M.maxImageWidth / size.width, 3 * M.maxImageHeight / size.height)
+        return CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+    }
+
+    /// The failed picture's badge, in the picture.
+    public static func badge(in picture: CGSize) -> CGRect {
+        typealias M = Metrics
+        return CGRect(x: picture.width - M.badgeInset - M.badgeSize, y: M.badgeInset, width: M.badgeSize, height: M.badgeSize)
     }
 }

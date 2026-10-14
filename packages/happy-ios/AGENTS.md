@@ -35,6 +35,49 @@ nothing here is wired to the release skill or to EAS.
    its techniques (async text layout, bubble animations, keyboard
    handling) and reimplement them; never copy its code, and don't depend
    on AsyncDisplayKit/Texture or its Display framework.
+8. **Sync never runs on the main thread. The main thread only applies a
+   minimal changeset that was computed elsewhere.**
+   - Everything else runs off the main thread: network, decryption,
+     decoding, merges and DB writes, the reducer, markdown and syntax
+     highlighting, row-model derivation, diffing, and measurement.
+   - In debug builds, sync, store and reducer entry points assert
+     `dispatchPrecondition(condition: .notOnQueue(.main))`. UI apply points
+     assert `.onQueue(.main)`.
+   - Heartbeats are presence, not data. `activity` ephemerals update an
+     in-memory presence actor per account. The UI hears about presence only
+     when something it renders changes: `active` or `thinking` flips, or the
+     shown text changes at its display granularity. Presence reaches SQLite
+     only on a flip, on background or terminate, and at most about once a
+     minute. Never write it once per heartbeat.
+   - Merges skip unchanged rows (`updateChanges`), so a no-op write commits
+     nothing and wakes no observer. A catch-up is batched, so many pages
+     make one observable commit per batch, not one per page.
+   - Observation is region-scoped. Fetching, deriving and `removeDuplicates`
+     all happen off the main thread. There is one shared observation per
+     account and region, not one per screen.
+   - UI updates are minimal:
+     - Row models are `Equatable` and diffed old against new.
+     - A changed row is reconfigured in place, never reloaded.
+     - Insert, delete or move only when membership or order changes.
+     - At most one apply per frame or batch.
+     - A field nothing renders never causes an apply.
+     - No full reload after the first load.
+   - Main-thread budgets:
+     - at most 1 ms per typical delta;
+     - at most 4 ms to apply a 1000-session catch-up;
+     - no single block longer than half a 120 Hz frame (4.2 ms).
+
+     Every main-thread apply sits inside an `os_signpost` interval. Debug
+     builds count main-thread milliseconds per sync batch.
+   - Linux tests guard all of this:
+     - benchmarks over fixed fixtures, asserting operation counts exactly
+       and wall time against a ceiling;
+     - changeset tests asserting exactly which rows a change touches. For
+       example, one session changed reconfigures exactly one row, a change
+       to an unrendered field touches none, a 500-record catch-up is one
+       apply, and a streamed token re-measures only the last bubble.
+
+     A change that adds work to a sync path keeps them green.
 
 ## Scope
 
@@ -104,7 +147,89 @@ nothing here is wired to the release skill or to EAS.
     outbox text, but does not yet count delivered messages that the daemon
     has not accepted (happy-app's reducer `pending`). `thinking` usually
     covers that interval; otherwise `queuedWhileBusy` can be false there.
-- **Tool outputs are hidden by default** in the chat.
+- **Tool outputs are hidden by default** in the chat. This deliberately
+  differs from happy-app: tool output is collapsed by default, tap to expand,
+  and pending decisions stay open. Every tool row shows its header only
+  (title, icon, status, timer, subtitle). Tapping the header opens its body
+  in place, for the screen's lifetime, never persisted. While a permission
+  is pending, or a question or plan awaits an answer, the input needed to
+  decide stays open, but never the output. The synced `compactToolCalls`
+  setting is untouched: it still picks a compact row or a card. Decided in
+  `ChatToolPresentation` (`ToolDisplayState`).
+- **The agent question sheet keeps "Send answer" above the keyboard.**
+  happy-app's AgentQuestionModal leaves its footer at the bottom of the
+  screen, under the keyboard. Here the footer rides the keyboard, so someone
+  typing their own answer can send it without dismissing the keyboard first.
+  Laid out in `QuestionSheetLayout`.
+- **A message's own screen always scrolls, and Write's diff keeps its
+  gutter there.** happy-app shows a text message in a plain View, so a long
+  one is cut off, and WriteView's full-width section pulls 12 past each
+  edge, which on a phone (no padding for edits) clips the line numbers.
+  Here text scrolls and Write's diff sits edge to edge like Edit's. Built
+  in `MessageDetailRenderer`.
+- **The CLI-outdated pill sits under the header on every device.** happy-app
+  places it 8 below the top of the content area. On a phone in portrait that
+  area runs under the floating header, so the pill ends up behind the header
+  and the status bar. Here it sits 8 under the navigation bar, where happy-app
+  puts it on a tablet. Laid out in `CliWarningPillLayout`.
+- **Push notifications follow happy-app's iPhone behaviour**
+  (`sync/pushRegistration.ts`, `app/_layout.tsx`). They are wired in
+  `Sources/HappyApp/PushNotifications.swift`, and the logic lives in
+  `Core/Push/`.
+  - **Registration.** The server sends through Expo, so the app registers
+    an Expo token. `ExpoDevicePushTokenSource` exchanges the APNs bytes
+    together with three other inputs:
+    - expo-notifications' installation id (`ExpoInstallationID`), read from
+      the RN build's own Keychain item and never replaced;
+    - the APNs environment from `embedded.mobileprovision`
+      (`ProvisioningProfile`);
+    - the bundle id.
+  - **When it syncs.** `PushTokenSync` ports `pushTokenSync`. It runs when
+    the active account's session starts (sign-in, restore, switch, or the
+    next account taking over after a sign-out) and on every
+    app-became-active. It asks for permission while iOS still can, so the
+    first sign-in prompts. Runs coalesce like `InvalidateSync`.
+  - **Several accounts.** Only the active account registers, and its
+    `LocalSettings` caches the token: each account change builds a new
+    `TokenPushRegistration` and sets `SettingsHooks.pushRegistration`.
+    Switching never unregisters, so every signed-in account keeps
+    notifying. Sign-out removes the token from that account's own server
+    with that account's own credentials, as `AuthContext.tsx` `logout`
+    does, but never from a server the user hasn't confirmed.
+  - **Presentation.** In the foreground a push only sets the badge and goes
+    in the list. When the app is inactive or in the background, it shows
+    in full.
+  - **Opening.** A tap (default action only, once per request id) reads
+    `sessionId`, or a `url` naming `/session/<id>`, from the payload's
+    `body`, then calls `AppCoordinator.openSession(fromNotification:)`:
+    - if another signed-in account's store holds the session
+      (`AccountController.accountHoldingSession`), the app switches to that
+      account first;
+    - if no store holds it, it opens in the active account;
+    - the stack becomes home, then the chat, unless that chat is already
+      on top.
+
+    A tap that launches the app waits for the stored account. One that
+    needs a switch also waits for the restored account's first sync, which
+    holds the account controller.
+  - **Deliberate differences from happy-app:**
+    - happy-app's backoff retries the server calls forever. Here each sync
+      makes one registration attempt, and the next session start or
+      foreground tries again.
+    - The sign-out unregister is one attempt capped at 5 seconds, where
+      happy-app holds logout until the server answers.
+    - Concurrent APNs requests share one callback, where expo rejects the
+      older request.
+    - Expo's background re-registration when APNs rotates the token is not
+      ported; the next foreground registers the new token.
+    - Opening an already visible chat does nothing, where happy-app pushes
+      a second copy.
+    - The background-send watchdog's local notifications don't exist (see
+      Offline first).
+  - **Signing.** All three variants have `aps-environment` "development"
+    and the `remote-notification` background mode, as the RN app's
+    expo-notifications plugin writes them. Distribution signing swaps in
+    the profile's "production".
 - **Onboarding follows happy-app step by step.** Signed in, home decides
   from the stored machines (`HomeState`, after happy-app's
   `shouldShowFirstRunInstall` and `resolveHomeEmptyState`):
@@ -295,7 +420,7 @@ the observed session projection. Equal visible snapshots are not re-emitted.
 | `HappyLayout` | all | Pure layout functions, design tokens, the wordmark's vector paths. |
 | `HappyIcons` | all | happy-app's icon fonts as generated vector outlines, looked up by RN name (`Icon.ionicons("chevron-forward")`). |
 | `HappyUI` | iOS (UIKit) | Views, screens and the coordinator. Wrapped in `#if canImport(UIKit)`. |
-| `HappyApp` | iOS | `@main` AppDelegate, SceneDelegate and the composition root. |
+| `HappyApp` | iOS | `@main` AppDelegate, SceneDelegate, the composition root and push notifications. |
 
 Products:
 
@@ -417,30 +542,42 @@ change a file another workstream owns, ask the coordinator.
 | Workstream | Owns |
 | --- | --- |
 | Icons | `Sources/HappyIcons`, `scripts/generate-icons.*`, `Sources/HappyUI/Theme/IconImages.swift`, `ItemIcon`'s icon source, swapping SF Symbols for happy-app's icons in onboarding and troubleshoot, light/dark theme application |
-| Home | `Screens/HomeScreens.swift`, `Screens/SessionListScreens.swift`, `Components/SessionListViews.swift`, home header and dock, new session screen, `Core/Home/` |
+| Home | `Screens/HomeScreens.swift`, `Screens/SessionListScreens.swift`, `Components/SessionListViews.swift`, home header and dock, new session screen, `Core/Home/` (including the new-session draft store and `SessionStarter`) |
 | Settings | `Screens/SettingsScreens.swift` and every settings screen, the account switcher UI, `Core/Settings/` |
 | Chat | `Sources/HappyUI/Chat/`, `Sources/HappyLayout/Chat/`, the session screen, `docs/telegram-notes.md` |
-| Composer | `Sources/HappyUI/Composer/`, `Sources/HappyLayout/Composer/` |
+| Composer | `Sources/HappyUI/Composer/`, `Sources/HappyLayout/Composer/`, `Sources/HappyCore/Composer/` (model, permission and effort options; `useComposerModes`). The AgentInput card is shared: Home embeds it in the dock. The phone's new session screen draws its own glass composer (`new/index.tsx` `mobileInputBox`), not the card |
 | Secondary | session info, files, changes, machine screens |
 | Accounts | `Core/Accounts/`, `AccountController`, `AccountSession` lifecycle, `CompositionRoot`, `Auth/` |
 | Sending | `Core/Chat/` sending and attachments, the outbox in `SyncEngine` and `LocalStore`, `HappyStore` schema |
 | Reducer | `Core/Chat/` reducer and `ChatFeed`, `HappyWire` session-protocol decoding |
 | Ops | `Core/Sessions/` RPC operations (`sync/ops.ts`) |
+| Push | `Sources/HappyApp/PushNotifications.swift`, `Core/Push/` routing, installation id, APNs source and token sync, the entitlements, `AppCoordinator.openSession(fromNotification:)` |
+| Sync perf | Presence (`Core/Presence/`), the merge rules' skip-if-unchanged and batching in `LocalStore`, the shared per-account observations (`Core/Observation/`), the thread preconditions in `SyncEngine`, `LocalStore` and `LocalChatFeed`, the sync benchmarks (`Tests/HappyCoreTests/SyncPerf*`) |
+| Apply perf | The off-main row derivation and changesets (`Core/Changes/`), the home list and chat apply paths (`SessionListViewController.apply`, `ChatViewController`'s session and snapshot handling, `ChatListView.apply`, `ChatRowMeasurer`), signposts and the main-thread counter (`HappyUI/Perf/`), the changeset tests |
+| Tablet | `Sources/HappyUI/Tablet/`, `Sources/HappyLayout/Tablet/`, `Sources/HappyCore/Tablet/`, the root container switch in `AppCoordinator`. Tablet branches inside other workstreams' screens go through their owners |
 
 Shared seams, changed only through the coordinator:
 
 - `Sources/HappyCore/Chat/ChatMessage.swift` and `ChatContracts.swift`:
   the reducer produces `ChatMessage`, the UI reads `ChatSnapshot` from a
   `ChatFeed` and sends through `ChatSending`;
-- `Sources/HappyUI/Composer/ChatComposer.swift`: the chat screen hosts
-  whatever `ComposerFactory.make` returns, feeds it `ComposerState` and
-  re-lays out on `onHeightChange`; the composer never handles the
-  keyboard;
+- `Sources/HappyUI/Chat/ChatComposer.swift`: the chat screen hosts
+  whatever `ChatComposerFactory.make` returns (a `ChatComposerView`),
+  feeds it `ChatComposerState` and re-lays out on
+  `composerDidInvalidateHeight`; the composer never handles the
+  keyboard. The Composer workstream swaps only the one line in
+  `ChatComposerFactory.make`;
 - `SessionActions` (permission, abort, questions, archive);
 - `AccountController.accounts` and `switchAccount(to:)`;
 - `Sources/HappyUI/Navigation/Route.swift`: screens open each other only
   through `push(_ route:context:)`. Each workstream replaces only its own
   placeholders in `Screens.make`;
+- the iPad shell: the window's root is `TabletShellViewController`, which
+  embeds `AppCoordinator`'s navigation controller as its detail and is
+  that controller's delegate, so nothing else sets `navigation.delegate`.
+  Tablet branches read `traitCollection.isTabletLayout` and `isZenMode`
+  (re-laid out through `registerForTraitChanges([TabletLayoutTrait.self])`);
+  their rules are in `HappyLayout/Tablet/TabletBranches.swift`;
 - `Schema.swift`: migrations are added by the Sending workstream or the
   coordinator. v3 can still change until the app first ships.
 
@@ -486,14 +623,13 @@ To keep parallel work from colliding:
   misreads it. `SecretKeyBackup.normalize` recognizes the 43-character raw
   form first.
 - Text sizes are fixed. Dynamic Type scaling, which RN applies by default,
-  is not wired yet.
-- Not verified anywhere yet: a run in the simulator or on a device,
+  is not wired yet. happy-app sets no `allowFontScaling={false}`; the only
+  cap is `maxFontSizeMultiplier={1.2}` on the onboarding titles
+  (`OnboardingContent.tsx`), so every other text scales uncapped.
+- Not verified anywhere yet: push delivery, presentation and taps,
+  a run in the simulator or on a device,
   `HappyUIKitTests` (built, never run), and a real in-place upgrade from an
   RN build.
 - Accounts import: the real-device MMKV path and decoding still need an
   in-place upgrade check. Encoding, size metadata, CRC and confirmation gates
   are verified on Linux with reproduced MMKV fixtures.
-- Not ported yet from the onboarding screens:
-  - the machine screen that Troubleshoot's computer rows open in
-    happy-app (the rows are inert here);
-  - copying terminal commands by selecting them.

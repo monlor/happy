@@ -29,12 +29,14 @@ public struct OutboxSender: ChatSending {
     public let store: LocalStore
     public let sync: SyncEngine
     public let filesDirectory: URL
+    public let spawnRequests: SpawnRequests
 
     /// Uses this account's store, active sync engine and private files directory.
-    public init(store: LocalStore, sync: SyncEngine, filesDirectory: URL) {
+    public init(store: LocalStore, sync: SyncEngine, filesDirectory: URL, spawnRequests: SpawnRequests = SpawnRequests()) {
         self.store = store
         self.sync = sync
         self.filesDirectory = filesDirectory
+        self.spawnRequests = spawnRequests
     }
 
     /// Checks support without copying, enqueuing or performing network work.
@@ -44,6 +46,18 @@ public struct OutboxSender: ChatSending {
             throw SendingError.unknownSession
         }
         return Self.attachmentPlan(message, session: session)
+    }
+
+    /// `attachmentPlan(_:sessionId:)` with the session read on a background
+    /// task, never on the caller's executor, so the main thread can await it.
+    public func attachmentPlan(for message: OutgoingMessage, sessionId: String) async throws -> AttachmentSendPlan {
+        let store = self.store
+        return try await Task.detached(priority: .userInitiated) {
+            guard let session = try store.session(id: sessionId) else {
+                throw SendingError.unknownSession
+            }
+            return Self.attachmentPlan(message, session: session)
+        }.value
     }
 
     /// Pure port of getImageAttachmentSendPlan and isAttachmentAllowedByPolicy.
@@ -89,7 +103,14 @@ public struct OutboxSender: ChatSending {
 
     /// Atomically accepts supported files and encoded text into the local outbox.
     public func send(_ message: OutgoingMessage, sessionId: String) async throws -> String {
-        try await sync.accept(message, sessionId: sessionId, filesDirectory: filesDirectory)
+        let draftStamp = try store.composerState(sessionId: sessionId).values["draftUpdatedAt"]
+        let id = try await sync.accept(message, sessionId: sessionId, filesDirectory: filesDirectory)
+        // sync.ts `releaseSpawnedSession`: a session written to is no longer
+        // an abandoned start.
+        await spawnRequests.release(sessionId: sessionId)
+        // Once accepted, a cache failure must not report a failed send and invite a duplicate.
+        try? sync.rigComposer.clearAfterSend(sessionId: sessionId, expectedStamp: draftStamp)
+        return id
     }
 
     /// Clears a failed item's attempts and schedules another delivery.
@@ -109,6 +130,10 @@ public struct OutboxSender: ChatSending {
 
     /// Saves unsent text; an empty string clears the stored draft.
     public func saveDraft(sessionId: String, text: String) throws {
+        if try store.session(id: sessionId)?.isRigV1 == true {
+            try sync.rigComposer.setText(sessionId: sessionId, text: text)
+            return
+        }
         try store.saveDraft(sessionId: sessionId, text: text, at: Int64(Date().timeIntervalSince1970 * 1000))
     }
     /// Reads the local permission, model, effort and service-tier selections.

@@ -11,10 +11,24 @@ public final class AppCoordinator {
     public let window: UIWindow
     public let context: AppContext
     private let navigation = UINavigationController()
+    // Tablet (HappyUI/Tablet): the window's root holds the stack, and the
+    // sidebar beside it on a tablet-wide window.
+    private lazy var shell = TabletShellViewController(context: context, detail: navigation)
     /// The session the root was built for; nil while signed out, unset
     /// before the first state arrives.
     private var shownSession: ObjectIdentifier??
     private var shownServerConfirmationID: AccountSummary.ID?
+    /// The session a tapped notification named, until a signed-in home can
+    /// open it.
+    private var notificationSessionID: String?
+    private var accountRestored = false
+    private var switchingForNotification = false
+    private var lookingUpNotification = false
+    /// Deciding the language of the screens about to be built; a newer
+    /// root replaces it.
+    private var languageWork: Task<Void, Never>?
+    private var rootGeneration = 0
+    private var languageObserver: NSObjectProtocol?
 
     public init(window: UIWindow, context: AppContext) {
         self.window = window
@@ -24,11 +38,17 @@ public final class AppCoordinator {
     public func start() {
         Self.applyAppearance(to: navigation.navigationBar)
         ThemeController.apply(from: context, to: window)
-        window.rootViewController = navigation
+        window.rootViewController = shell // Tablet: was `navigation`.
         window.tintColor = UIColor(Palette.headerTint)
         window.makeKeyAndVisible()
         context.account.onChange = { [weak self] state in
             self?.show(state)
+        }
+        // language.tsx reloads the app after a new language; here the
+        // screens are built again in it, from the root, as a reload leaves
+        // them.
+        languageObserver = NotificationCenter.default.addObserver(forName: .screensLanguageChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rebuildScreens() }
         }
         // A stored account flips to signed in before restore() starts
         // syncing, so home appears without a flash of Welcome; without one,
@@ -37,6 +57,82 @@ public final class AppCoordinator {
             guard let account = self?.context.account else { return }
             await account.restore()
             self?.show(account.state)
+            self?.accountRestored = true
+            self?.openNotificationSession()
+        }
+    }
+
+    /// Opens the session a tapped notification names (`app/_layout.tsx`
+    /// `handleNotificationResponse`, then `navigateToSession`). A session in
+    /// another signed-in account's store switches to that account first;
+    /// one in no store opens in the active account, as happy-app navigates
+    /// regardless. A tap that launched the app waits for the stored account.
+    public func openSession(fromNotification sessionId: String) {
+        notificationSessionID = sessionId
+        openNotificationSession()
+    }
+
+    private func openNotificationSession() {
+        guard let sessionId = notificationSessionID else { return }
+        let account = context.account
+        guard let active = account.session, navigation.viewControllers.first is HomeViewController else {
+            // Signed out once restored: there is nothing to open it in.
+            if accountRestored, account.session == nil { notificationSessionID = nil }
+            return
+        }
+        guard !lookingUpNotification else { return }
+        lookingUpNotification = true
+        Task { @MainActor [weak self] in
+            let owner: AccountSummary.ID?
+            do { owner = try await account.accountHoldingSession(sessionId) }
+            catch { owner = nil } // Keep the active-account fallback on lookup failure.
+            guard let self else { return }
+            self.lookingUpNotification = false
+            guard self.notificationSessionID == sessionId,
+                  account.session === active,
+                  self.navigation.viewControllers.first is HomeViewController else {
+                self.openNotificationSession()
+                return
+            }
+            if let owner, owner != active.keys.anonID {
+                // restore() holds the account controller through the first sync,
+                // so the switch waits for it. show() opens the session once the
+                // owner's home is the root.
+                guard self.accountRestored, !self.switchingForNotification else { return }
+                self.switchingForNotification = true
+                Task { @MainActor [weak self] in
+                    do {
+                        try await account.switchAccount(to: owner)
+                    } catch {
+                        if self?.notificationSessionID == sessionId {
+                            self?.notificationSessionID = nil
+                            self?.showNotificationSession(sessionId)
+                        }
+                    }
+                    self?.switchingForNotification = false
+                }
+                return
+            }
+            self.notificationSessionID = nil
+            self.showNotificationSession(sessionId)
+        }
+    }
+
+    /// Home, then the chat. Nothing changes when that chat is already on top.
+    private func showNotificationSession(_ sessionId: String) {
+        let open = { [weak self] in
+            guard let self, let session = self.context.account.session,
+                  let home = self.navigation.viewControllers.first as? HomeViewController else { return }
+            if let chat = self.navigation.topViewController as? ChatViewController, chat.sessionId == sessionId { return }
+            self.navigation.presentedViewController?.dismiss(animated: false)
+            let chat = Screens.make(.session(id: sessionId), context: self.context, session: session)
+            self.navigation.setViewControllers([home, chat], animated: true)
+        }
+        // A new root may still be animating in after an account switch.
+        if let transition = navigation.transitionCoordinator {
+            transition.animate(alongsideTransition: nil) { _ in open() }
+        } else {
+            open()
         }
     }
 
@@ -86,6 +182,57 @@ public final class AppCoordinator {
         let animated = shownSession != nil
         shownSession = .some(identity)
         shownServerConfirmationID = pending?.id
+        // The screens speak the account's language (text/index.ts at
+        // launch), decided and decoded off the main thread before they are
+        // built. A root asked for meanwhile replaces this one.
+        rootGeneration += 1
+        let generation = rootGeneration
+        languageWork?.cancel()
+        languageWork = Task { [weak self] in
+            let catalog = await Self.catalog(for: session)
+            guard let self, !Task.isCancelled, generation == self.rootGeneration else { return }
+            AppLocalization.use(catalog)
+            self.install(session: session, pending: pending, animated: animated)
+        }
+    }
+
+    /// The window's screens again, from the root, in the language now
+    /// chosen; nothing else changes.
+    private func rebuildScreens() {
+        guard let shownSession else { return }
+        let session = context.account.session
+        guard session.map(ObjectIdentifier.init) == shownSession else { return }
+        rootGeneration += 1
+        languageWork?.cancel()
+        install(session: session, pending: context.account.pendingServerConfirmation, animated: false)
+    }
+
+    /// The account's `preferredLanguage` and the device's languages, as
+    /// text/index.ts resolves them; the device's alone while signed out, or
+    /// when the account's settings don't answer within a second. Nil for
+    /// English, which the screens hold themselves.
+    private nonisolated static func catalog(for session: AccountSession?) async -> TranslationCatalog? {
+        var preferred: String?
+        if let settings = session?.settingsFeed {
+            preferred = await withTaskGroup(of: String??.self) { group in
+                group.addTask {
+                    for await snapshot in settings.snapshots() { return .some(AccountSettings(snapshot).preferredLanguage) }
+                    return nil
+                }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(1))
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first ?? nil
+            }
+        }
+        let language = AppLanguage.resolve(preferred: preferred, deviceLanguages: Locale.preferredLanguages)
+        return language == "en" ? nil : await TranslationCatalog.load(language)
+    }
+
+    private func install(session: AccountSession?, pending: AccountSummary?, animated: Bool) {
         let root: UIViewController
         if let pending {
             root = AccountServerConfirmationViewController(context: context, account: pending)
@@ -95,6 +242,21 @@ public final class AppCoordinator {
         }
         navigation.presentedViewController?.dismiss(animated: false)
         navigation.setViewControllers([root], animated: animated)
+        shell.rootDidChange() // Tablet: the sidebar follows the account.
+        openNotificationSession()
+    }
+
+    /// The title of happy-app's UIKit headers (react-native-screens 4.22.0
+    /// RNSScreenStackHeaderConfig.mm 41, 480-505): `headerTitleStyle`'s
+    /// IBMPlexSans-SemiBold at the default 17, made with `scaleMultiplier`
+    /// 1, so it never scales; a font and a colour, nothing more. Screens
+    /// with happy-app's own header (Header.tsx, OnboardingHeader) draw a
+    /// 16pt title view instead.
+    static var nativeTitleAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: Fonts.font(.semiBold, size: TextStyles.nativeHeaderTitle.size),
+            .foregroundColor: UIColor(Palette.headerTint),
+        ]
     }
 
     static func applyAppearance(to bar: UINavigationBar) {
@@ -102,7 +264,7 @@ public final class AppCoordinator {
         appearance.configureWithOpaqueBackground()
         appearance.backgroundColor = UIColor(Palette.groupedBackground)
         appearance.shadowColor = .clear
-        appearance.titleTextAttributes = TextStyles.headerTitle.attributes(color: UIColor(Palette.headerTint))
+        appearance.titleTextAttributes = Self.nativeTitleAttributes
         bar.standardAppearance = appearance
         bar.scrollEdgeAppearance = appearance
         bar.compactAppearance = appearance

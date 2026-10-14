@@ -14,14 +14,47 @@ public final class AccountSession: Sendable {
     /// without a store directory (in-memory, tests) get a temporary one.
     public let filesDirectory: URL
     public let sync: SyncEngine
+    /// Private render payload belongs to this account, including work that
+    /// screens finish after a switch. Screens cancel work; stop closes owners.
+    public let diffDocuments = DiffDocumentCache()
+    public let diffSyntax = DiffSyntaxService()
+    public let codeSyntax = CodeSyntaxService()
+    /// Retry keys and abandoned starts belong to this account session alone.
+    public let spawnRequests = SpawnRequests()
     /// Sends chat messages through the outbox.
     public let sender: OutboxSender
     /// The chat of any session, from this account's store.
     public let chatFeed: LocalChatFeed
+    public let chatHistory: ChatHistory
+    public let homeFeed: HomeFeed
+    public let settingsFeed: SettingsFeed
+    public let machinesFeed: MachinesFeed
+    public let troubleshootingFeed: TroubleshootingFeed
     public let realtime: SocketIOClient
     public let pairing: PairingService
     /// Archive, delete and mark read, for the session list.
     public let actions: SessionActions
+    /// The account's machine-scoped operations, sealed with each machine key.
+    public let machineActions: MachineActions
+    /// Checkout status shared by this account's sessions.
+    public let gitStatus: GitStatusSync
+    /// The composer's `@` file lists, this account's alone: another
+    /// account's session with the same id is another machine's tree.
+    public let composerFileIndex = ComposerFileIndex()
+    /// This account's Rig whole-draft synchronization.
+    public let rigComposer: RigComposerSync
+    /// Starts in flight stay within this account, including their unsent text.
+    public let pendingChats = PendingChats()
+    /// The session pictures the chat has decoded, this account's alone.
+    public let attachmentPictures = AttachmentPictures()
+    /// What each file looked like when last read (the store's
+    /// `sessionFileCache`), this account's alone. Disk reads stay under the
+    /// prepared account directory; a nil directory keeps it in memory.
+    public let fileCache: SessionFileCache
+    /// One session's record, computer, settings and composer, for the
+    /// session's own screens.
+    public let sessionDetails: SessionDetailFeed
+    public let machineDetails: MachineDetailFeed
     /// Socket status for the UI (connection dot in settings).
     public let statusUpdates: AsyncStream<RealtimeStatus>
 
@@ -56,20 +89,29 @@ public final class AccountSession: Sendable {
         }
     }
 
-    public init(credentials: Credentials, store: LocalStore, dependencies: Dependencies, filesDirectory: URL? = nil) throws {
+    public init(credentials: Credentials, store: LocalStore, dependencies: Dependencies,
+                filesDirectory: URL? = nil, fileCacheDirectory: URL? = nil) throws {
         guard let secret = credentials.secretData else { throw CryptoError.invalidInput("credentials secret") }
         self.credentials = credentials
         self.keys = try AccountKeys(secret: secret)
         self.store = store
         self.filesDirectory = filesDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("happy-files-\(keys.anonID)", isDirectory: true)
+        self.fileCache = SessionFileCache(directory: fileCacheDirectory)
         self.api = HappyAPI(serverURL: dependencies.serverURL, clientID: dependencies.clientID, transport: dependencies.transport)
             .authenticated(token: credentials.token)
         var syncOptions = SyncEngine.Options()
         syncOptions.deliveryActivity = dependencies.deliveryActivity
         self.sync = SyncEngine(api: api, store: store, keys: keys, options: syncOptions)
-        self.sender = OutboxSender(store: store, sync: sync, filesDirectory: self.filesDirectory)
+        self.sender = OutboxSender(store: store, sync: sync, filesDirectory: self.filesDirectory, spawnRequests: spawnRequests)
         self.chatFeed = LocalChatFeed(store: store)
+        self.chatHistory = ChatHistory(api: api, store: store, keys: keys)
+        self.homeFeed = HomeFeed(store: store)
+        self.settingsFeed = SettingsFeed(store: store)
+        self.machinesFeed = MachinesFeed(store: store)
+        self.sessionDetails = SessionDetailFeed(store: store)
+        self.machineDetails = MachineDetailFeed(store: store)
+        self.troubleshootingFeed = TroubleshootingFeed(store: store)
         self.pairing = PairingService(api: api, keys: keys)
 
         guard let socketURL = SocketIOURL.make(serverURL: dependencies.serverURL) else {
@@ -88,6 +130,9 @@ public final class AccountSession: Sendable {
         }
         (statusUpdates, statusContinuation) = AsyncStream.makeStream(of: RealtimeStatus.self, bufferingPolicy: .bufferingNewest(1))
         self.actions = SessionActions(api: api, store: store, sync: sync, rpc: realtime)
+        self.machineActions = MachineActions(api: api, store: store, sync: sync, rpc: realtime, metadataTransport: realtime)
+        self.gitStatus = GitStatusSync(actions: actions, store: store)
+        self.rigComposer = sync.rigComposer
     }
 
     /// Changes synced account settings (sync.ts `applySettings`).
@@ -125,9 +170,13 @@ public final class AccountSession: Sendable {
     /// Move sidecars before the database, which is the migration's commit
     /// marker. Retrying an interrupted migration completes the remaining moves.
     public static func prepareDirectory(directory: URL, id: String) throws {
+        try AccountStorageDirectory.prepare(directory)
         let manager = FileManager.default
         let target = accountDirectory(directory: directory, id: id)
         try manager.createDirectory(at: target.appendingPathComponent("files", isDirectory: true), withIntermediateDirectories: true)
+        // The viewer's optional cache must not prevent the primary store from
+        // opening. An unprepared directory keeps all reads in memory only.
+        try? SessionFileCache.prepare(directory: SessionFileCache.directory(inAccount: target))
         let old = directory.appendingPathComponent("happy-\(id).sqlite")
         let new = target.appendingPathComponent("store.sqlite")
         guard manager.fileExists(atPath: old.path), !manager.fileExists(atPath: new.path) else { return }
@@ -142,23 +191,43 @@ public final class AccountSession: Sendable {
 
     /// Shows local data immediately; sync and the socket catch up behind it.
     public func start() async {
+        await rigComposer.configure(transport: realtime)
         await sync.configureSending(filesDirectory: sender.filesDirectory)
         await sync.syncAll()
         let realtime = self.realtime
         let sync = self.sync
         let statusContinuation = self.statusContinuation
+        let gitStatus = self.gitStatus
+        let rigComposer = self.rigComposer
+        let fileCache = self.fileCache
         pump.set(Task {
             for await event in realtime.events {
-                await Self.route(event, sync: sync, status: statusContinuation)
+                await Self.route(event, sync: sync, status: statusContinuation, gitStatus: gitStatus, rigComposer: rigComposer, fileCache: fileCache)
             }
         })
         await realtime.connect()
     }
 
     public func stop() async {
+        diffDocuments.close()
+        diffSyntax.close()
+        codeSyntax.close()
+        await spawnRequests.close()
+        await chatHistory.stop()
+        homeFeed.stop()
+        settingsFeed.stop()
+        machinesFeed.stop()
+        sessionDetails.stop()
+        machineDetails.stop()
+        await fileCache.close()
+        await troubleshootingFeed.stop()
         let task = pump.cancel()
+        await gitStatus.stop()
+        await rigComposer.setConnected(false)
         await realtime.disconnect()
+        await rigComposer.stop()
         await sync.stop()
+        await store.stopSnapshotProducers()
         await task?.value
         statusContinuation.finish()
     }
@@ -167,18 +236,31 @@ public final class AccountSession: Sendable {
     /// suppress pushes while the user is looking at the app.
     public func sendAppState(_ state: String) async {
         await sync.setBackgrounded(state != "active")
+        if state == "active" { await rigComposer.flushAheadSessions() }
         try? await realtime.emit("app-state", .object(["state": .string(state)]))
     }
 
-    static func route(_ event: RealtimeEvent, sync: SyncEngine, status: AsyncStream<RealtimeStatus>.Continuation) async {
+    static func route(_ event: RealtimeEvent, sync: SyncEngine, status: AsyncStream<RealtimeStatus>.Continuation,
+                      gitStatus: GitStatusSync? = nil, rigComposer: RigComposerSync? = nil,
+                      fileCache: SessionFileCache? = nil) async {
         switch event {
         case .status(let value):
             status.yield(value)
+            await rigComposer?.setConnected(value == .connected)
         case .connected:
             await sync.syncAll()
+            await rigComposer?.setConnected(true)
         case .event("update", let payload?):
             if let update = try? payload.decode(as: UpdateContainer.self) {
                 await sync.handle(update)
+                switch update.body {
+                case .newMessage(let id, _): await gitStatus?.invalidate(sessionId: id)
+                case .updateSession(let body): await gitStatus?.invalidate(sessionId: body.id)
+                case .deleteSession(let id):
+                    await gitStatus?.clearForSession(sessionId: id)
+                    fileCache?.removeSession(sessionId: id)
+                default: break
+                }
             }
         case .event("ephemeral", let payload?):
             if let ephemeral = try? payload.decode(as: EphemeralEvent.self) {

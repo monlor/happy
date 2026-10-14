@@ -143,6 +143,62 @@ final class SendingOutboxTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(try store.pendingOutbox().isEmpty)
         await engine.stop()
     }
+
+    /// sync.ts `sendMessage`: a session written to is released from the
+    /// start that made it, so changing the new-session draft can't stop it.
+    func testAcceptedSendReleasesASpawnedSession() async throws {
+        let (store, engine, _, _) = try setup()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let requests = SpawnRequests()
+        let otherAccount = SpawnRequests()
+        let sender = OutboxSender(store: store, sync: engine, filesDirectory: directory, spawnRequests: requests)
+        await engine.setBackgrounded(true)
+        let released = await MainActor.run { () -> Counter in
+            let counter = Counter()
+            let id = requests.requestId(for: .init(machineId: "m", agent: "claude", place: "~", worktree: nil, modelKey: nil, permissionMode: nil, effort: nil))
+            requests.remember(id, sessionId: "s", abandon: {}, release: { _ = counter.next() })
+            let otherID = otherAccount.requestId(for: .init(machineId: "m", agent: "claude", place: "~", worktree: nil, modelKey: nil, permissionMode: nil, effort: nil))
+            otherAccount.remember(otherID, sessionId: "s", abandon: {}, release: { XCTFail("sending in one account must not release another account's same session ID") })
+            return counter
+        }
+        _ = try await sender.send(OutgoingMessage(text: "hello"), sessionId: "s")
+        XCTAssertEqual(released.next(), 2, "released once")
+        await MainActor.run {
+            let otherID = otherAccount.requestId(for: .init(machineId: "m", agent: "claude", place: "~", worktree: nil, modelKey: nil, permissionMode: nil, effort: nil))
+            XCTAssertEqual(otherAccount.spawnedSessionId(otherID), "s")
+            requests.complete()
+            otherAccount.complete()
+        }
+        await engine.stop()
+    }
+
+    func testAcceptedSendReleasesPendingChatChildThroughAccountRoot() async throws {
+        let (store, engine, _, _) = try setup()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let requests = SpawnRequests()
+        let sender = OutboxSender(store: store, sync: engine, filesDirectory: directory, spawnRequests: requests)
+        await engine.setBackgrounded(true)
+        let state = await MainActor.run { () -> (Counter, String) in
+            let counter = Counter()
+            let signature = SpawnRequests.Signature(machineId: "m", agent: "claude", place: "~", worktree: nil, modelKey: nil, permissionMode: nil, effort: nil)
+            let homeID = requests.requestId(for: signature)
+            requests.remember(homeID, sessionId: "home", abandon: {}, release: { XCTFail("sending to the strip released a different Home session") })
+            let child = requests.child(.pendingChats)
+            let childID = child.requestId(for: signature)
+            child.remember(childID, sessionId: "s", abandon: {}, release: { _ = counter.next() })
+            return (counter, homeID)
+        }
+        _ = try await sender.send(OutgoingMessage(text: "hello", source: .newSession), sessionId: "s")
+        XCTAssertEqual(state.0.next(), 2, "accepted first text releases the account's child once")
+        await MainActor.run {
+            XCTAssertEqual(requests.spawnedSessionId(state.1), "home")
+            requests.complete()
+            requests.close()
+        }
+        await engine.stop()
+    }
 }
 
 private final class Counter: @unchecked Sendable {

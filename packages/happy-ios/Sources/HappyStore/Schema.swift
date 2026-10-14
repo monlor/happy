@@ -162,6 +162,25 @@ enum Schema {
             }
         }
 
+        migrator.registerMigration("v4") { db in
+            // This device's accepted user sends, never a wire metadata field.
+            try db.alter(table: "session") { t in
+                t.add(column: "lastMessageSentAt", .integer)
+            }
+        }
+
+        migrator.registerMigration("v5") { db in
+            // A backward-downloaded tail is not the synchronized prefix.
+            try db.create(table: "chatHistory") { t in
+                t.primaryKey("sessionId", .text).references("session", onDelete: .cascade)
+                t.column("newestLoaded", .boolean).notNull()
+                t.column("oldestRawSeq", .integer)
+                t.column("newestRawSeq", .integer)
+                t.column("serverHasMore", .boolean).notNull()
+                t.column("checkedThroughSeq", .integer).notNull()
+            }
+        }
+
         return migrator
     }
 }
