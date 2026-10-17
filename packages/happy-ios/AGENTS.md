@@ -143,10 +143,6 @@ nothing here is wired to the release skill or to EAS.
     Retry is idempotent by localId, including after a lost acknowledgement.
   - Unsupported permission modes are refused before acceptance: `send` throws
     `UnsupportedPermissionModeError`, and nothing is enqueued or copied.
-  - Known delivery-meta difference: `hasPendingUserMessage` counts local
-    outbox text, but does not yet count delivered messages that the daemon
-    has not accepted (happy-app's reducer `pending`). `thinking` usually
-    covers that interval; otherwise `queuedWhileBusy` can be false there.
 - **Tool outputs are hidden by default** in the chat. This deliberately
   differs from happy-app: tool output is collapsed by default, tap to expand,
   and pending decisions stay open. Every tool row shows its header only
@@ -579,7 +575,8 @@ Shared seams, changed only through the coordinator:
   (re-laid out through `registerForTraitChanges([TabletLayoutTrait.self])`);
   their rules are in `HappyLayout/Tablet/TabletBranches.swift`;
 - `Schema.swift`: migrations are added by the Sending workstream or the
-  coordinator. v3 can still change until the app first ships.
+  coordinator. Migrations are append-only now that Preview has shipped;
+  never change a registered migration.
 
 To keep parallel work from colliding:
 

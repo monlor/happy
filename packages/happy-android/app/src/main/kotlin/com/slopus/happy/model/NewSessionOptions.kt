@@ -150,8 +150,13 @@ data class NewSessionOptions(
     val permission: PickerOption?,
     val efforts: List<PickerOption>,
     val effort: PickerOption?,
+    /** The computer's Happy Agent can make bots (`capabilities.bots`): the composer offers Session | Bot. */
+    val supportsBots: Boolean = false,
 ) {
     val hasHarness: Boolean get() = agents.isNotEmpty()
+
+    /** new/index.tsx `isOffline`: the daemon that would run this harness is known and offline. */
+    val agentMachineOffline: Boolean get() = resolveAgentMachine(choice, resolvedAgent)?.isOnline == false
 
     /** The permission chip's one word. */
     val permissionLabel: String? get() = permissionModeShortLabel(permission?.name)
@@ -320,5 +325,6 @@ fun resolveNewSessionOptions(
         permission = permission,
         efforts = efforts,
         effort = effort,
+        supportsBots = rigSelection?.supportsBots == true,
     )
 }

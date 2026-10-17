@@ -3,13 +3,29 @@ package com.slopus.happy.ui.home
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
+import com.slopus.happy.model.WorktreeToggle
+import com.slopus.happy.model.ProjectHomeRow
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isHeading
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
@@ -32,10 +48,12 @@ import com.slopus.happy.net.ConnectionStatus
 import com.slopus.happy.sync.SessionPresence
 import com.slopus.happy.ui.PHONE
 import com.slopus.happy.ui.PHONE_WIDTH
+import com.slopus.happy.ui.assertActionsLabelled
 import com.slopus.happy.ui.assertBox
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
 import com.slopus.happy.ui.components.HeaderTags
+import com.slopus.happy.ui.hasRole
 import com.slopus.happy.ui.node
 import com.slopus.happy.ui.setHappyContent
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -57,7 +75,7 @@ import java.time.ZoneOffset
 
 /**
  * The phone home screen against happy-app's layout:
- * - MainView's header: logo 19 in a 32 box; "Happy" 16/20 centred; the
+ * - MainView's header: logo 19 in a 32 box; "Sessions" (`tabs.sessions`) 16/20 centred; the
  *   status line (11/16, 6 dot) hangs 2 into the title's bottom while the
  *   socket isn't connected; the filter and settings buttons are 44 squares
  *   split by a 22-high hairline, the gear 16 from the edge.
@@ -121,8 +139,9 @@ class HomeLayoutTest {
         grouping: SessionListGrouping = SessionListGrouping.Flat,
         hidden: Boolean = true,
         machines: List<com.slopus.happy.model.Machine> = listOf(studio),
+        unread: Set<String> = emptySet(),
     ) = deriveHomeList(
-        HomeListInputs(HomeSnapshot(sessions, machines), grouping, hidden, emptySet(), emptySet(), emptySet()),
+        HomeListInputs(HomeSnapshot(sessions, machines), grouping, hidden, emptySet(), unread, emptySet()),
         ZoneOffset.UTC,
         LocalDate.of(2026, 10, 16),
     )
@@ -281,6 +300,70 @@ class HomeLayoutTest {
         val link = rule.node(HomeTags.LINK).bounds
         assertDp("link page from the top", 0, link.top)
         assertDp("link page full width", PHONE_WIDTH, link.right - link.left)
+    }
+
+    /**
+     * TalkBack over Home, as MainView, FlatSessionRow and SessionsList label
+     * it: "Sessions" is a header; Filter and Settings are named buttons; an
+     * unread row's top-right reads "new results" and not the stamp hidden
+     * under the dot; the archive toggle is a button, selected while the
+     * archive shows. Grouped by project, every row is a button.
+     */
+    @Test
+    fun homeReadsForTalkBack() {
+        show(state(listOf(cli("a"), cli("gone", noon, active = false)), hidden = false, unread = setOf("a")))
+        rule.onNode(hasText("Sessions") and isHeading(), useUnmergedTree = true).assertExists()
+        rule.onNode(hasContentDescription("Filter") and hasRole(Role.Button)).assertExists()
+        rule.onNode(hasContentDescription("Settings") and hasRole(Role.Button)).assertExists()
+        rule.onAllNodesWithTag(FlatRowTags.TOP_RIGHT, useUnmergedTree = true)[0].assert(hasContentDescription("new results"))
+        rule.onAllNodesWithTag(FlatRowTags.TIMESTAMP, useUnmergedTree = true)[0].assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.HideFromAccessibility))
+        rule.onAllNodesWithTag(FlatRowTags.TIMESTAMP, useUnmergedTree = true)[1].assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.HideFromAccessibility))
+        rule.node(HomeTags.ARCHIVE_TOGGLE).assert(hasRole(Role.Button)).assertIsSelected()
+        rule.assertActionsLabelled()
+    }
+
+    @Test
+    fun projectRowsReadAsButtons() {
+        val rig = machine("machine-1", machineMetadata { put("displayName", "Studio"); put("machineKind", "rig") })
+        val sessions = listOf(
+            session("own", metadata = rigMetadata(projectId = "p1", projectName = "happy"), lastMessageSentAt = noon),
+            session("wt", metadata = rigMetadata(projectId = "p1", projectName = "happy", workspaceId = "w1", workspaceName = "Gdansk"), lastMessageSentAt = noon),
+        )
+        show(state(sessions, grouping = SessionListGrouping.Project, machines = listOf(rig)))
+        rule.node(ProjectListTags.PROJECT).assert(hasRole(Role.Button))
+        rule.onNodeWithTag(ProjectListTags.WORKTREE).assert(hasRole(Role.Button) and hasText("Gdansk"))
+        rule.onNode(hasContentDescription("Create workspace in happy", substring = true) and hasRole(Role.Button)).assertExists()
+        rule.assertActionsLabelled()
+    }
+
+    /**
+     * ProjectHomeList.tsx's toggle: `hapticsLight()` on every flip, from a
+     * tap or from TalkBack's expand, before the project's worktrees change.
+     */
+    @Test
+    fun theWorktreeToggleTicksLightly() {
+        val ticks = mutableListOf<HapticFeedbackType>()
+        val toggled = mutableListOf<String>()
+        val haptics = object : HapticFeedback {
+            override fun performHapticFeedback(hapticFeedbackType: HapticFeedbackType) {
+                ticks += hapticFeedbackType
+            }
+        }
+        rule.setHappyContent {
+            CompositionLocalProvider(LocalHapticFeedback provides haptics) {
+                ProjectHomeRowContent(
+                    ProjectHomeRow.Toggle(WorktreeToggle("p1", worktreeCount = 5, hiddenCount = 2, expanded = false, unread = false, working = false, blocked = false)),
+                    HomeListCallbacks(
+                        onOpen = {}, onMenu = {}, onArchive = {}, onSetArchiveHidden = {}, onToggleProject = { toggled += it },
+                        onOpenMachine = {}, onCreateWorkspace = {}, onProjectMenu = { _, _ -> },
+                    ),
+                )
+            }
+        }
+        rule.node(ProjectListTags.TOGGLE).performClick()
+        rule.node(ProjectListTags.TOGGLE).performSemanticsAction(SemanticsActions.Expand)
+        assertEquals(listOf("p1", "p1"), toggled)
+        assertEquals(listOf(HapticFeedbackType.ContextClick, HapticFeedbackType.ContextClick), ticks)
     }
 
     @Test

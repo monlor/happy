@@ -3,6 +3,7 @@ package com.slopus.happy.ui.tablet
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -23,11 +24,13 @@ import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
 import com.slopus.happy.ui.chat.ChatScreenTags
 import com.slopus.happy.ui.components.HeaderTags
+import com.slopus.happy.ui.files.ChangesTags
 import com.slopus.happy.ui.home.FlatRowTags
 import com.slopus.happy.ui.home.HomeDockTags
 import com.slopus.happy.ui.home.NewSessionTags
 import com.slopus.happy.ui.home.HomeTags
 import com.slopus.happy.ui.node
+import com.slopus.happy.ui.session.SessionInfoTags
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -139,7 +142,33 @@ class TabletShellTest {
         rule.onAllNodesWithTag(ChatScreenTags.SCREEN, useUnmergedTree = true).assertCountEquals(0)
     }
 
-    // SidebarView.tsx: New session opens /new in the detail; the phone home's dock is not drawn on a tablet.
+    // SessionsList.tsx selectedSessionId: any `/session/<id>/…` screen keeps its row selected.
+    @Test
+    fun aSessionsSubScreensKeepItsRowSelected() {
+        session("a", 200)
+        signIn()
+        waitFor(FlatRowTags.ROW)
+        rule.node(FlatRowTags.ROW).performClick()
+        // The title is drawn before the session has loaded, and opens its info only after.
+        rule.waitUntilAtLeastOneExists(hasTestTag(ChatScreenTags.TITLE_BUTTON) and hasClickAction(), 5_000)
+        rule.node(ChatScreenTags.TITLE_BUTTON).performClick()
+        waitFor(SessionInfoTags.CHANGES)
+        rule.node(FlatRowTags.ROW).assertIsSelected()
+        rule.node(SessionInfoTags.CHANGES).performClick()
+        rule.waitUntil(5_000) {
+            listOf(ChangesTags.SPINNER, ChangesTags.MESSAGE, ChangesTags.NOTICES).any {
+                rule.onAllNodesWithTag(it, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+            }
+        }
+        rule.node(FlatRowTags.ROW).assertIsSelected()
+    }
+
+    /**
+     * SidebarView.tsx: New session opens /new in the detail; the phone home's
+     * dock is not drawn on a tablet. new/index.tsx draws its own back there,
+     * which nothing hides. `router.navigate('/new')` with /new on top stays
+     * one screen: a second tap adds no entry, so one Back leaves.
+     */
     @Test
     fun newSessionOpensInTheDetail() {
         session("a", 200)
@@ -149,6 +178,14 @@ class TabletShellTest {
         rule.node(TabletSidebarTags.NEW_SESSION).performClick()
         waitFor(NewSessionTags.SCREEN)
         assertDp("new session in the detail", 360, rule.node(NewSessionTags.SCREEN).bounds.left)
+        assertDp("its own back, 48 wide", 48, rule.node(NewSessionTags.BACK).bounds.let { it.right - it.left })
+
+        rule.node(TabletSidebarTags.NEW_SESSION).performClick()
+        rule.waitForIdle()
+        rule.onAllNodesWithTag(NewSessionTags.SCREEN, useUnmergedTree = true).assertCountEquals(1)
+        rule.node(NewSessionTags.BACK).performClick()
+        waitFor(HomeTags.TABLET_BLANK)
+        rule.onAllNodesWithTag(NewSessionTags.SCREEN, useUnmergedTree = true).assertCountEquals(0)
     }
 
     @Test

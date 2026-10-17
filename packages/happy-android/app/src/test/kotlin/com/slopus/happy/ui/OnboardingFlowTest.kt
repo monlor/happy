@@ -78,7 +78,8 @@ class OnboardingFlowTest {
         // The other phone approves.
         server.approveAccountRequest(decodeBase64(publicKey), AccountLink.sealSecret(server.secret, decodeBase64(publicKey)))
 
-        rule.waitUntilAtLeastOneExists(hasTestTag(HomeTags.FILTER), 10_000)
+        // The account has no computer, so home is the link page (the filter only shows while loading).
+        rule.waitUntilAtLeastOneExists(hasTestTag(HomeTags.LINK), 10_000)
         val signedIn = graph.auth.state.value as AuthState.SignedIn
         assertArrayEquals(server.secret, signedIn.credentials.secretBytes())
         assertEquals(server.token, signedIn.credentials.token)
@@ -86,10 +87,31 @@ class OnboardingFlowTest {
         assertEquals(0, server.authenticatedKeys.size)
     }
 
+    /**
+     * restore/index.tsx stays mounted under restore/manual: an approval made
+     * while "Use secret key" is open still signs in, with the request the
+     * code was showing, and no second request is registered.
+     */
+    @Test
+    fun anApprovalWhileTheSecretKeyScreenIsOpenStillSignsIn() {
+        rule.onNodeWithText("Restore existing account").performClick()
+        rule.waitUntilAtLeastOneExists(hasTestTag(RestoreTags.QR_CODE), 5_000)
+        val publicKey = synchronized(server) { server.accountRequests.keys.single() }
+
+        rule.onNode(hasTestTag(RestoreTags.USE_KEY), useUnmergedTree = true).performClick()
+        rule.waitUntilAtLeastOneExists(hasTestTag(RestoreTags.KEY_INPUT), 5_000)
+        server.approveAccountRequest(decodeBase64(publicKey), AccountLink.sealSecret(server.secret, decodeBase64(publicKey)))
+
+        rule.waitUntilAtLeastOneExists(hasTestTag(HomeTags.LINK), 10_000)
+        val signedIn = graph.auth.state.value as AuthState.SignedIn
+        assertArrayEquals(server.secret, signedIn.credentials.secretBytes())
+        assertEquals(setOf(publicKey), synchronized(server) { server.accountRequests.keys.toSet() })
+    }
+
     @Test
     fun aTerminalLinkOpensTheConfirmScreenAndAcceptConnectsIt() {
         rule.onNodeWithText("Create account").performClick()
-        rule.waitUntilAtLeastOneExists(hasTestTag(HomeTags.FILTER), 5_000)
+        rule.waitUntilAtLeastOneExists(hasTestTag(HomeTags.LINK), 5_000)
         val account = graph.auth.state.value as AuthState.SignedIn
 
         val terminal = Sodium.boxKeypair()

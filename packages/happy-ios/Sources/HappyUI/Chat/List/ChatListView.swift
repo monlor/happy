@@ -48,6 +48,9 @@ final class ChatListView: UIView, UICollectionViewDataSource, UICollectionViewDe
         collectionView.transform = ChatCollectionLayout.flip
         collectionView.backgroundColor = .clear
         collectionView.contentInsetAdjustmentBehavior = .never
+        // No scroll indicator, as Telegram's chat list draws none: nothing
+        // at the edge to press and drag (docs/telegram-notes.md).
+        collectionView.showsVerticalScrollIndicator = false
         collectionView.keyboardDismissMode = .interactive
         collectionView.alwaysBounceVertical = true
         collectionView.showsHorizontalScrollIndicator = false
@@ -117,15 +120,28 @@ final class ChatListView: UIView, UICollectionViewDataSource, UICollectionViewDe
 
     /// Insets at both ends: the newest edge clears the dock, the oldest the
     /// navigation bar. What the reader sees at the newest edge stays put,
-    /// so a rising keyboard carries the conversation up with the composer.
+    /// so a rising keyboard carries the conversation up with the composer;
+    /// under the reader's finger, as in an interactive dismiss, the
+    /// conversation stays with the finger
+    /// (`ChatScrollAnchor.visibleMinY(afterNewestInsetChange:…)`).
     func setEdgeInsets(newest: CGFloat, oldest: CGFloat) {
+        // On the pixels the header and the dock were snapped to, or the
+        // offset lands between them.
+        let scale = window?.screen.scale ?? traitCollection.displayScale
+        let newest = PixelGrid.round(newest, scale: scale)
+        let oldest = PixelGrid.round(oldest, scale: scale)
+        // Flipped: the collection view's top is the screen's bottom.
         let inset = UIEdgeInsets(top: newest, left: 0, bottom: oldest, right: 0)
         guard collectionView.contentInset != inset else { return }
-        let anchor = visibleMinY
+        let current = visibleMinY
+        let delta = newest - collectionView.contentInset.top
         collectionView.contentInset = inset
-        collectionView.verticalScrollIndicatorInsets = inset
-        let target = min(max(0, anchor), maxVisibleMinY(layout.model))
-        collectionView.contentOffset.y = target - newest
+        let target = ChatScrollAnchor.visibleMinY(
+            afterNewestInsetChange: delta, from: current, maxVisibleMinY: maxVisibleMinY(layout.model), tracking: collectionView.isTracking
+        )
+        if collectionView.contentOffset.y != target - newest {
+            collectionView.contentOffset.y = target - newest
+        }
     }
 
     func scrollToNewest(animated: Bool) {

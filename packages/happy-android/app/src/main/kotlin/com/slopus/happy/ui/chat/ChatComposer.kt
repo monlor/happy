@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -22,20 +23,32 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
 import com.slopus.happy.model.SessionState
+import com.slopus.happy.ui.autocomplete.ComposerCursor
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
 import com.slopus.happy.ui.components.Octicon
@@ -97,10 +110,10 @@ object SessionStatusColors {
 }
 
 /** What the composer's round button does (agentInputPrimaryAction.ts). */
-enum class PrimaryAction { Stop, Blocked, Send, Idle }
+enum class PrimaryAction { Stop, Blocked, Send, Voice, Idle }
 
 /**
- * `resolveAgentInputPrimaryAction` without voice: Stop wins on an empty
+ * `resolveAgentInputPrimaryAction`: Stop wins on an empty
  * composer while the agent can be stopped; a non-steerable busy agent
  * locks sending; otherwise text sends.
  */
@@ -110,10 +123,12 @@ fun resolvePrimaryAction(
     canAbort: Boolean,
     blocked: Boolean,
     disabled: Boolean = false,
+    canVoice: Boolean = false,
 ): PrimaryAction = when {
     showAbort && canAbort && !hasContent -> PrimaryAction.Stop
     blocked && hasContent -> PrimaryAction.Blocked
     !disabled && hasContent -> PrimaryAction.Send
+    !disabled && canVoice -> PrimaryAction.Voice
     else -> PrimaryAction.Idle
 }
 
@@ -132,7 +147,12 @@ fun resolvePrimaryAction(
  * button.primary.background (dark #F5F5F5) with Octicons stop 16 white
  * (dark black); locked surfaceHigh with a 1 divider border and
  * lock-closed 14 textSecondary. A spinner replaces the glyph while
- * stopping.
+ * stopping. Voice uses surfaceHighest and the bundled 24 voice glyph tinted text.
+ * A locked button still takes taps (to refuse them); an idle one
+ * doesn't. [panelShake] shakes the card and [primaryShake] the button
+ * (Shaker.tsx). With [showDetails] false (reading older messages under
+ * the floating dock) the status row and the [bottom] row fade out in
+ * place (AnimatedFade).
  */
 @Composable
 fun ChatComposer(
@@ -146,8 +166,32 @@ fun ChatComposer(
     middle: @Composable () -> Unit = {},
     /** Above the input inside the panel (the attachment strip). */
     top: @Composable () -> Unit = {},
+    /** Over the chat above the composer, taking no room (autocomplete suggestions). */
+    overlay: @Composable () -> Unit = {},
+    /** Shares the cursor with [overlay]: reported as it moves, placed after an insert; it sees hardware keys first. */
+    cursor: ComposerCursor? = null,
+    /** Hardware keys the [cursor] didn't take; true when used (the field then never sees it). */
+    onKey: (KeyEvent) -> Boolean = { false },
+    /** Shakes the card (a refused send). */
+    panelShake: ShakeState? = null,
+    /** Shakes the primary button (a failed stop). */
+    primaryShake: ShakeState? = null,
+    /** Under the card, inside the composer (the usage row: week quota and context gauge). */
+    bottom: @Composable () -> Unit = {},
+    /** `showStatusDetails`: false fades the status row and [bottom] out, keeping their room. */
+    showDetails: Boolean = true,
+    /** Where the card lands, for what floats just above it (the scroll-to-bottom button). */
+    onPanelPositioned: ((LayoutCoordinates) -> Unit)? = null,
 ) {
     val colors = HappyTheme.colors
+    var field by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
+    val placement = cursor?.placement
+    val value = when {
+        placement != null && placement.text == text -> TextFieldValue(text, placement.selection)
+        field.text == text -> field
+        else -> TextFieldValue(text, TextRange(text.length))
+    }
+    SideEffect { cursor?.selection = value.selection }
     val hairline = with(LocalDensity.current) { 1f.toDp() }
     val shell = RoundedCornerShape(ComposerSpec.shellRadius)
     val layout = LocalWindowLayout.current
@@ -159,7 +203,8 @@ fun ChatComposer(
             // `innerContainer`: held to layout.maxWidth, centred.
             .contentMaxWidth(layout),
     ) {
-        if (status != null) {
+        Box(Modifier.fillMaxWidth().height(0.dp).wrapContentHeight(Alignment.Bottom, unbounded = true)) { overlay() }
+        if (status != null) AnimatedFade(showDetails) {
             Row(
                 modifier = Modifier
                     .testTag(ComposerTags.STATUS_ROW)
@@ -176,6 +221,8 @@ fun ChatComposer(
         }
         Column(
             modifier = Modifier
+                .then(if (onPanelPositioned != null) Modifier.onGloballyPositioned(onPanelPositioned) else Modifier)
+                .shake(panelShake)
                 .testTag(ComposerTags.PANEL)
                 .fillMaxWidth()
                 .clip(shell)
@@ -194,11 +241,17 @@ fun ChatComposer(
                 contentAlignment = Alignment.CenterStart,
             ) {
                 BasicTextField(
-                    value = text,
-                    onValueChange = onTextChange,
+                    value = value,
+                    onValueChange = { next ->
+                        field = next
+                        cursor?.placement = null
+                        cursor?.selection = next.selection
+                        if (next.text != text) onTextChange(next.text)
+                    },
                     textStyle = ComposerSpec.input.copy(color = colors.input.text),
                     cursorBrush = SolidColor(colors.input.text),
                     modifier = Modifier
+                        .onPreviewKeyEvent { cursor?.onKey?.invoke(it) == true || onKey(it) }
                         .testTag(ComposerTags.INPUT)
                         .fillMaxWidth()
                         .heightIn(max = ComposerSpec.inputMaxHeight),
@@ -227,27 +280,34 @@ fun ChatComposer(
                 }
                 // With the row gap on each side: 2 + 8 between the middle and the button, as in RN.
                 Spacer(Modifier.width(ComposerSpec.primaryMarginLeft - ComposerSpec.actionRowGap))
-                PrimaryButton(primary, aborting, onPrimary)
+                PrimaryButton(primary, aborting, onPrimary, primaryShake)
             }
         }
+        AnimatedFade(showDetails) { bottom() }
     }
 }
 
 @Composable
-private fun PrimaryButton(action: PrimaryAction, aborting: Boolean, onClick: () -> Unit) {
+private fun PrimaryButton(action: PrimaryAction, aborting: Boolean, onClick: () -> Unit, shake: ShakeState?) {
     val colors = HappyTheme.colors
     val dark = colors.dark
     val background = when (action) {
         PrimaryAction.Stop -> if (dark) Color(0xFFF5F5F5) else colors.button.primaryBackground
         PrimaryAction.Blocked -> colors.surfaceHigh
-        PrimaryAction.Send -> colors.surfaceHighest
+        PrimaryAction.Send, PrimaryAction.Voice -> colors.surfaceHighest
         PrimaryAction.Idle -> if (dark) Color(0xFF3A3A3C) else Color(0xFFD1D1D6)
     }
-    val enabled = action == PrimaryAction.Send || action == PrimaryAction.Stop
+    // A locked send still takes the tap, to refuse it.
+    val enabled = action != PrimaryAction.Idle
     // Literal in happy-app (AgentInput.tsx accessibilityLabel).
-    val label = if (action == PrimaryAction.Stop) "Stop" else "Send"
+    val label = when (action) {
+        PrimaryAction.Stop -> "Stop"
+        PrimaryAction.Voice -> "Voice"
+        else -> "Send"
+    }
     Box(
         modifier = Modifier
+            .shake(shake)
             .testTag(ComposerTags.PRIMARY)
             .size(ComposerSpec.primarySize)
             .clip(CircleShape)
@@ -260,11 +320,17 @@ private fun PrimaryButton(action: PrimaryAction, aborting: Boolean, onClick: () 
         when {
             aborting -> CircularProgressIndicator(
                 Modifier.size(20.dp),
-                color = if (dark) Color.Black else colors.text,
+                color = if (action == PrimaryAction.Stop && dark) Color.Black else colors.text,
                 strokeWidth = 2.dp,
             )
             action == PrimaryAction.Stop -> Icon(Octicon.Stop, ComposerSpec.primaryIcon, if (dark) Color.Black else Color.White)
             action == PrimaryAction.Blocked -> Icon(Ionicon.LockClosed, ComposerSpec.lockIcon, colors.textSecondary)
+            action == PrimaryAction.Voice -> androidx.compose.foundation.Image(
+                painter = androidx.compose.ui.res.painterResource(com.slopus.happy.R.drawable.icon_voice_white),
+                contentDescription = null,
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(colors.text),
+                modifier = Modifier.size(24.dp),
+            )
             else -> Icon(
                 Octicon.ArrowUp,
                 ComposerSpec.primaryIcon,

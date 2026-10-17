@@ -1,5 +1,6 @@
 package com.slopus.happy.sync
 
+import com.slopus.happy.testing.cancelAndAwait
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.slopus.happy.data.HappyDatabase
@@ -51,7 +52,7 @@ class MessageSyncTest {
 
     @After
     fun tearDown() {
-        scope.cancel()
+        scope.cancelAndAwait()
         database.close()
         server.close()
     }
@@ -188,7 +189,8 @@ class MessageSyncTest {
         }
         // Observers may skip a page that landed while they were busy, never see a partial one.
         assertTrue("$sizes", sizes.all { it in setOf(0, 100, 200, 250) } && sizes == sizes.sorted())
-        val paging = sync.paging("s").first()
-        assertEquals(MessagePaging(isLoaded = true, hasMoreOlder = false, isLoadingOlder = false), paging)
+        // The last page is stored a moment before its load clears the loading flag: wait for that, not the first value.
+        val settled = MessagePaging(isLoaded = true, hasMoreOlder = false, isLoadingOlder = false)
+        assertEquals(settled, withTimeout(5_000) { sync.paging("s").first { it == settled } })
     }
 }

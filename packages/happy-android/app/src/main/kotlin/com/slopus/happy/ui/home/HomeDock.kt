@@ -1,97 +1,56 @@
 package com.slopus.happy.ui.home
 
-import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.EaseOutCubic
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Easing
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.union
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.max
-import androidx.compose.ui.unit.min
 import com.slopus.happy.R
-import com.slopus.happy.model.AgentType
+import com.slopus.happy.attachments.AttachmentPreview
 import com.slopus.happy.model.NewSessionLabels
 import com.slopus.happy.model.NewSessionOptions
 import com.slopus.happy.model.NewSessionPage
-import com.slopus.happy.model.StartButton
 import com.slopus.happy.model.StartPhase
-import com.slopus.happy.model.StartProgress
-import com.slopus.happy.model.resolveStartButton
-import com.slopus.happy.model.resolveStartProgress
+import com.slopus.happy.model.isValidBotName
 import com.slopus.happy.ui.chat.ChatTheme
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
-import com.slopus.happy.ui.components.Octicon
-import com.slopus.happy.ui.components.PickerSheetOption
-import com.slopus.happy.ui.components.PickerSheetPanel
-import com.slopus.happy.ui.components.PickerSheetSection
-import com.slopus.happy.ui.components.StatusDot
 import com.slopus.happy.ui.components.hairline
 import com.slopus.happy.ui.theme.HappyColors
 import com.slopus.happy.ui.theme.HappyTheme
 import com.slopus.happy.ui.theme.happyTextStyle
-import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 object HomeDockTags {
     const val DOCK = "homeDock"
@@ -102,6 +61,7 @@ object HomeDockTags {
     const val FOCUS = "homeDock.focus"
     const val BACKDROP = "homeDock.backdrop"
     const val ROWS = "homeDock.rows"
+    const val OFFLINE_HELP = "homeDock.offlineHelp"
     fun row(page: NewSessionPage) = "homeDock.row.${page.name}"
     const val COMPOSER = "homeDock.composer"
     const val INPUT = "homeDock.input"
@@ -110,6 +70,7 @@ object HomeDockTags {
     const val MODEL = "homeDock.model"
     const val EFFORT = "homeDock.effort"
     const val PRIMARY = "homeDock.primary"
+    const val ADD_IMAGE = "homeDock.addImage"
     const val PROGRESS = "homeDock.progress"
     const val PROGRESS_TEXT = "homeDock.progress.text"
     const val PROGRESS_HINT = "homeDock.progress.hint"
@@ -126,6 +87,16 @@ object HomeDockSpec {
     // The resting capsule (resolveMobileCollapsedComposerGeometry).
     val shellHeight = 56.dp
     val shellRadius = 28.dp
+
+    /** openFocusMode starts focusPresentation one 16 ms timer after the composer mounts. */
+    const val FOCUS_OPEN_DELAY_MS = 16L
+    const val FOCUS_OPEN_MS = 340
+    /** closeFocusMode. */
+    const val FOCUS_CLOSE_MS = 180
+    /** Easing.out(Easing.cubic), exactly; Compose's EaseOutCubic is a Bézier near it. */
+    val focusOpenEasing = Easing { 1 - (1 - it) * (1 - it) * (1 - it) }
+    /** Easing.in(Easing.cubic). */
+    val focusCloseEasing = Easing { it * it * it }
     val contentPadding = 7.dp
     val contentGap = 4.dp
     /** Puts the text at the tangent where the capsule's round end meets its straight edge. */
@@ -168,6 +139,9 @@ object HomeDockSpec {
     val primaryMarginStart = 8.dp
     val chipHeight = 40.dp
     val effortMinWidth = 64.dp
+    /** The add-image button (MOBILE_ICON_ACTION_GEOMETRY): a 42 circle around a 26 add glyph. */
+    val addSize = 42.dp
+    val addIcon = 26.dp
     val chip = happyTextStyle(fontSize = 14)
 
     // The Android picker panel's share of the window with the keyboard down.
@@ -175,6 +149,16 @@ object HomeDockSpec {
     val sheetMinHeight = 168.dp
     /** The composer and what sits around it, which the panel must leave room for. */
     val sheetReservedHeight = 320.dp
+
+    // new/index.tsx's offline help, under the machine row of the standalone screen.
+    val offlinePaddingHorizontal = 12.dp
+    val offlinePaddingVertical = 10.dp
+    val offlineGap = 8.dp
+    val offlineIcon = 14.dp
+    val offlineTitle = happyTextStyle(fontSize = 13, weight = FontWeight.SemiBold)
+    val offlineTitleGap = 4.dp
+    val offlineText = happyTextStyle(fontSize = 12, lineHeight = 18)
+    const val OFFLINE_ROWS_ALPHA = 0.4f
 }
 
 /** What the dock shows. [prompt] is the dock's own text; the draft takes it at Send. */
@@ -188,7 +172,15 @@ class HomeDockState(
     /** The scrim behind the resting capsule, only over a list. */
     val showScrim: Boolean = true,
     val canCancel: Boolean = true,
-)
+    /** The images going with the first message. */
+    val images: List<AttachmentPreview> = emptyList(),
+    /** False while making a bot: a bot takes no first message, so no images either. */
+    val canAttachImages: Boolean = true,
+    /** Session | Bot, while the computer's Happy Agent makes bots; null otherwise. */
+    val bot: HomeDockBot? = null,
+) {
+    val creatingBot: Boolean get() = bot?.creating == true
+}
 
 @Immutable
 class HomeDockActions(
@@ -202,16 +194,33 @@ class HomeDockActions(
     /** A picker is opening (the worktree one lists git worktrees again). */
     val onOpenPicker: (NewSessionPage) -> Unit,
     val onHarnessHelp: () -> Unit,
+    /** The add-image chooser (paste or pick). */
+    val onAddImage: () -> Unit = {},
+    val onRemoveImage: (id: String) -> Unit = {},
+    /** Session | Bot: true makes a bot. */
+    val onBotKindChange: (Boolean) -> Unit = {},
+    val onBotNameChange: (String) -> Unit = {},
+    val onBotFacePick: (Int) -> Unit = {},
+    val onBotFacesRoll: () -> Unit = {},
+    val onOpenUrl: (String) -> Unit = {},
 )
 
-private fun HomeDockState.canSubmit() = phase == null && prompt.isNotBlank()
+internal val HomeDockState.attachedImages get() = if (canAttachImages && !creatingBot) images else emptyList()
 
-private fun sendBackground(colors: HappyColors) = if (colors.dark) Color(0xFFF5F5F5) else colors.button.primaryBackground
+/** A bot needs a name the daemon accepts; a session, text or a picture. */
+internal fun HomeDockState.canSubmit() = phase == null &&
+    if (creatingBot) isValidBotName(bot!!.name) else prompt.isNotBlank() || attachedImages.isNotEmpty()
 
-private fun sendIconColor(colors: HappyColors) = if (colors.dark) Color(0xFF111111) else colors.button.primaryTint
+internal fun sendBackground(colors: HappyColors) = if (colors.dark) Color(0xFFF5F5F5) else colors.button.primaryBackground
+
+internal fun sendIconColor(colors: HappyColors) = if (colors.dark) Color(0xFF111111) else colors.button.primaryTint
+
+/** focusedComposerAnimationStyle's height: the resting dock's [resting] at 0, the composer's [full] at 1. */
+internal fun composerShellHeight(resting: Float, full: Int, progress: Float): Int =
+    (resting + (full - resting) * progress.coerceIn(0f, 1f)).roundToInt()
 
 /** How far along [progress] a piece of the reveal is, between [start] and [end]. */
-private fun reveal(progress: Float, start: Float, end: Float) = ((progress - start) / (end - start)).coerceIn(0f, 1f)
+internal fun reveal(progress: Float, start: Float, end: Float) = ((progress - start) / (end - start)).coerceIn(0f, 1f)
 
 /**
  * The resting home dock, over the bottom of the list. Spec: 16 either
@@ -295,475 +304,6 @@ fun HomeDock(state: HomeDockState, actions: HomeDockActions, modifier: Modifier 
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * The focused dock, over the whole screen (HomeDock.tsx focus mode,
- * Android branch). Spec: the screen dims to 88% (black in dark, white in
- * light); a tap there closes the composer, or the open picker first, and
- * while a session is starting is refused (a haptic, and the hint and Stop
- * flash) — Back reads the same way. At the bottom, over the keyboard:
- * the rows, 24 either side, 22 above the composer area, 1 apart — MACHINE,
- * PROJECT, WORKTREE (WORKSPACE for a Happy Agent project) and HARNESS
- * ("Help" with no harness on the computer), each at least 42 high, 6 in,
- * radius 12, a 21 glyph centred in a 24 box 12 before the 17pt value.
- * A row or a chip opens its picker in place of the rows: the panel is
- * max(168, min(half the window, the window less the status bar, 320 and
- * the keyboard)) high. Then the composer, 16 either side and 8 over the
- * nav bar or keyboard: radius 30, input.background, hairline glass
- * border, 10 in, 8 above and below; the input box at least 44, 8/4 in,
- * text 16/22 up to 120 ("Ask Claude Code", "Ask Codex", "Ask {name}");
- * the 42 action row: the permission word (40 high, 4/8 in, 14pt), then
- * pushed right the model (12/4 in, the one that gives way) · effort (at
- * least 64, 4/6 in); 10 on, the 42 primary button: Send, Stop (Octicons
- * stop) or a spinner, filled for Send and Stop. While starting, an 18
- * high line sits in the gap above the composer: a 6 pulsing connecting
- * dot, 6 on the step in 11pt, and "To interrupt press stop" at the end
- * while Stop is offered. Rows reveal one after another as it opens.
- * [standalone] is the new-session screen: nothing is dimmed, and only
- * Back leaves.
- */
-@Composable
-fun HomeDockFocus(state: HomeDockState, actions: HomeDockActions, modifier: Modifier = Modifier, standalone: Boolean = false) {
-    val colors = HappyTheme.colors
-    val options = state.options
-    val starting = state.phase != null
-    var page by remember { mutableStateOf<NewSessionPage?>(null) }
-    val progress = remember { Animatable(0f) }
-    LaunchedEffect(Unit) { progress.animateTo(1f, tween(340, easing = EaseOutCubic)) }
-    val refusal = remember { Animatable(0f) }
-    val haptics = LocalHapticFeedback.current
-    val scope = rememberCoroutineScope()
-    val refuse: () -> Unit = {
-        haptics.performHapticFeedback(HapticFeedbackType.Reject)
-        scope.launch {
-            refusal.snapTo(0f)
-            refusal.animateTo(1f, tween(90))
-            refusal.animateTo(0f, tween(130))
-            refusal.animateTo(1f, tween(90))
-            refusal.animateTo(0f, tween(340))
-        }
-    }
-    val close = { actions.onFocusChange(false) }
-    // resolveHomeDockPickerBackAction / resolveHomeDockBackdropPressAction (Android draws no native menus).
-    val back = {
-        when {
-            starting -> refuse()
-            page != null -> page = null
-            else -> close()
-        }
-    }
-    val backdropPress = {
-        when {
-            starting -> refuse()
-            page != null -> page = null
-            !standalone -> close()
-        }
-    }
-    val open = { next: NewSessionPage ->
-        if (starting) {
-            refuse()
-        } else {
-            actions.onOpenPicker(next)
-            page = next
-        }
-    }
-    BackHandler(onBack = back)
-
-    BoxWithConstraints(modifier = modifier.fillMaxSize().testTag(HomeDockTags.FOCUS)) {
-        val windowHeight = maxHeight
-        val density = LocalDensity.current
-        Box(
-            modifier = Modifier
-                .testTag(HomeDockTags.BACKDROP)
-                .fillMaxSize()
-                .graphicsLayer { alpha = reveal(progress.value, 0f, 0.35f) }
-                .then(
-                    if (standalone) {
-                        Modifier
-                    } else {
-                        Modifier.background(if (colors.dark) Color.Black.copy(alpha = 0.88f) else Color.White.copy(alpha = 0.88f))
-                    },
-                )
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = backdropPress),
-        )
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars)),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = HomeDockSpec.configPaddingHorizontal)
-                    .padding(bottom = HomeDockSpec.configPaddingBottom),
-                contentAlignment = Alignment.BottomCenter,
-            ) {
-                val current = page
-                if (current != null && options != null) {
-                    val statusTop = with(density) { WindowInsets.statusBars.getTop(this).toDp() }
-                    val ime = with(density) { WindowInsets.ime.getBottom(this).toDp() }
-                    val sheetMax = max(
-                        HomeDockSpec.sheetMinHeight,
-                        min(windowHeight * HomeDockSpec.SHEET_HEIGHT_FRACTION, windowHeight - statusTop - HomeDockSpec.sheetReservedHeight - ime),
-                    )
-                    PickerPanel(current, options, state.labels, { page = null }, actions, Modifier.heightIn(max = sheetMax))
-                    // The sheet is one surface, so its refusal is the whole sheet.
-                    if (starting) Box(Modifier.matchParentSize().clickable(interactionSource = null, indication = null, onClick = refuse))
-                } else if (options != null) {
-                    EnvironmentRows(options, progress.value, onOpen = open, onHelp = { if (starting) refuse() else actions.onHarnessHelp() })
-                }
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = HomeDockSpec.composerAreaPaddingHorizontal)
-                    .padding(bottom = HomeDockSpec.composerAreaPaddingBottom),
-            ) {
-                val button = resolveStartButton(state.canSubmit(), state.phase, state.canCancel)
-                FocusedComposer(state, actions, button, progress.value, refusal.value, refuse, open, onStop = {
-                    actions.onCancel()
-                    close()
-                })
-                val agentName = options?.agent?.name ?: AgentType.Claude.displayName
-                resolveStartProgress(state.phase, agentName, options?.picksWorkspaces == true)?.let { step ->
-                    ProgressLine(step, showHint = button == StartButton.Stop, refusal.value, Modifier.offset(y = -HomeDockSpec.progressRowHeight))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EnvironmentRows(options: NewSessionOptions, progress: Float, onOpen: (NewSessionPage) -> Unit, onHelp: () -> Unit) {
-    val rows = buildList {
-        add(Triple(NewSessionPage.Machine, Ionicon.DesktopOutline, options.machine?.name ?: stringResource(R.string.home_dock_select_machine)))
-        add(Triple(NewSessionPage.Project, Ionicon.FolderOutline, options.project?.name ?: "~"))
-        val worktreeFallback = stringResource(if (options.picksWorkspaces) R.string.home_dock_main else R.string.home_dock_no_worktree)
-        add(Triple(NewSessionPage.Worktree, Ionicon.GitBranchOutline, options.worktree?.name ?: worktreeFallback))
-        add(
-            if (options.hasHarness) {
-                Triple(NewSessionPage.Agent, Ionicon.HardwareChipOutline, options.agent.name)
-            } else {
-                Triple(NewSessionPage.Agent, Ionicon.HelpCircleOutline, stringResource(R.string.home_dock_harness_help))
-            },
-        )
-    }
-    val labels = mapOf(
-        NewSessionPage.Machine to stringResource(R.string.home_dock_row_machine),
-        NewSessionPage.Project to stringResource(R.string.home_dock_row_project),
-        NewSessionPage.Worktree to stringResource(if (options.picksWorkspaces) R.string.home_dock_row_workspace else R.string.home_dock_row_worktree),
-        NewSessionPage.Agent to stringResource(R.string.home_dock_row_harness),
-    )
-    val helpLabel = stringResource(R.string.home_dock_harness_help_label)
-    val colors = HappyTheme.colors
-    Column(modifier = Modifier.testTag(HomeDockTags.ROWS).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(HomeDockSpec.rowGap)) {
-        rows.forEachIndexed { index, (page, icon, value) ->
-            val start = 0.18f + index * 0.09f
-            val shown = reveal(progress, start, start + 0.28f)
-            val help = page == NewSessionPage.Agent && !options.hasHarness
-            val description = if (help) helpLabel else "${labels.getValue(page)}: $value"
-            Row(
-                modifier = Modifier
-                    .testTag(HomeDockTags.row(page))
-                    .fillMaxWidth()
-                    .graphicsLayer {
-                        alpha = shown
-                        translationY = 10.dp.toPx() * (1 - shown)
-                    }
-                    .defaultMinSize(minHeight = HomeDockSpec.rowMinHeight)
-                    .clip(RoundedCornerShape(HomeDockSpec.rowRadius))
-                    .clickable(role = Role.Button) { if (help) onHelp() else onOpen(page) }
-                    .semantics { contentDescription = description }
-                    .padding(horizontal = HomeDockSpec.rowPaddingHorizontal),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(HomeDockSpec.rowContentGap),
-            ) {
-                Box(Modifier.size(HomeDockSpec.rowIconBox), contentAlignment = Alignment.Center) {
-                    Icon(icon, HomeDockSpec.rowIcon, colors.text)
-                }
-                Text(value, style = HomeDockSpec.text, color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            }
-        }
-    }
-}
-
-@Composable
-private fun pageTitle(page: NewSessionPage, picksWorkspaces: Boolean): String = stringResource(
-    when (page) {
-        NewSessionPage.Machine -> R.string.home_dock_picker_machine
-        NewSessionPage.Project -> R.string.home_dock_picker_project
-        NewSessionPage.Worktree -> if (picksWorkspaces) R.string.home_dock_picker_workspace else R.string.home_dock_picker_worktree
-        NewSessionPage.Agent -> R.string.home_dock_picker_harness
-        NewSessionPage.Model -> R.string.agent_input_model_title
-        NewSessionPage.Permission -> R.string.agent_input_permission_mode_title
-        NewSessionPage.Effort -> R.string.agent_input_effort_title
-    },
-)
-
-/** The Android picker, drawn in place of the rows so the composer keeps its keyboard. */
-@Composable
-private fun PickerPanel(
-    page: NewSessionPage,
-    options: NewSessionOptions,
-    labels: NewSessionLabels,
-    onClose: () -> Unit,
-    actions: HomeDockActions,
-    modifier: Modifier,
-) {
-    val titles = NewSessionPage.entries.associateWith { pageTitle(it, options.picksWorkspaces) }
-    val title = titles.getValue(page)
-    val (sections, selectedKey) = remember(options, page, labels, titles) { options.sections(page, labels, titles::getValue) }
-    PickerSheetPanel(title = title, onClose = onClose, modifier = modifier) {
-        sections.forEachIndexed { index, section ->
-            // The panel already names the choice, so a group named the same is left bare.
-            PickerSheetSection(section.key, section.title?.takeIf { it != title }, separated = index > 0)
-            for (option in section.options) {
-                PickerSheetOption(
-                    key = option.key,
-                    label = option.name,
-                    // A second line that only repeats its group's heading says nothing new.
-                    description = option.description?.takeIf { it != section.title },
-                    selected = !option.action && option.key == selectedKey,
-                    disabled = option.disabled,
-                    action = option.action,
-                    onClick = {
-                        actions.onSelect(page, option.key)
-                        onClose()
-                    },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FocusedComposer(
-    state: HomeDockState,
-    actions: HomeDockActions,
-    button: StartButton,
-    progress: Float,
-    refusal: Float,
-    refuse: () -> Unit,
-    open: (NewSessionPage) -> Unit,
-    onStop: () -> Unit,
-) {
-    val colors = HappyTheme.colors
-    val options = state.options
-    val shape = RoundedCornerShape(HomeDockSpec.composerRadius)
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-    Column(
-        modifier = Modifier
-            .testTag(HomeDockTags.COMPOSER)
-            .fillMaxWidth()
-            .graphicsLayer {
-                alpha = 0.72f + 0.28f * reveal(progress, 0f, 0.12f)
-                scaleX = 0.96f + 0.04f * progress
-            }
-            .shadow(if (colors.dark) 4.dp else 2.dp, shape)
-            .clip(shape)
-            .background(colors.input.background)
-            .border(hairline(), ChatTheme.colors.glassBorder, shape)
-            .padding(horizontal = HomeDockSpec.composerInset, vertical = HomeDockSpec.composerPaddingVertical),
-    ) {
-        val inputShown = reveal(progress, 0.22f, 0.6f)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .graphicsLayer {
-                    alpha = inputShown
-                    translationY = 8.dp.toPx() * (1 - inputShown)
-                }
-                .defaultMinSize(minHeight = HomeDockSpec.inputMinHeight)
-                .padding(horizontal = HomeDockSpec.inputPaddingHorizontal, vertical = HomeDockSpec.inputPaddingVertical),
-            contentAlignment = Alignment.CenterStart,
-        ) {
-            val placeholder = stringResource(R.string.home_dock_ask, options?.agent?.name ?: AgentType.Claude.displayName)
-            BasicTextField(
-                value = state.prompt,
-                // Locked while starting without taking the keyboard down: the change is refused.
-                onValueChange = { if (state.phase != null) refuse() else actions.onPromptChange(it) },
-                textStyle = HomeDockSpec.input.copy(color = colors.input.text),
-                cursorBrush = SolidColor(colors.text),
-                modifier = Modifier
-                    .testTag(HomeDockTags.INPUT)
-                    .fillMaxWidth()
-                    .heightIn(max = HomeDockSpec.inputMaxHeight)
-                    .focusRequester(focus),
-                decorationBox = { field ->
-                    Box {
-                        if (state.prompt.isEmpty()) {
-                            Text(placeholder, style = HomeDockSpec.input, color = colors.textSecondary, maxLines = 1)
-                        }
-                        field()
-                    }
-                },
-            )
-        }
-        val actionsShown = reveal(progress, 0.46f, 0.82f)
-        Row(
-            modifier = Modifier
-                .testTag(HomeDockTags.ACTION_ROW)
-                .fillMaxWidth()
-                .height(HomeDockSpec.actionRowHeight)
-                .graphicsLayer {
-                    alpha = actionsShown
-                    translationY = 7.dp.toPx() * (1 - actionsShown)
-                },
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(HomeDockSpec.actionRowGap),
-        ) {
-            // Every chip lives in this one box; send is its sibling, so nothing inside reaches it.
-            Row(
-                modifier = Modifier.weight(1f).height(HomeDockSpec.actionRowHeight).clipToBounds(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(HomeDockSpec.actionRowGap),
-            ) {
-                val chip = { page: NewSessionPage -> { if (state.phase != null) refuse() else open(page) } }
-                val permission = options?.permissionLabel
-                if (permission != null) {
-                    Chip(permission, HomeDockTags.PERMISSION, pageTitle(NewSessionPage.Permission, false), chip(NewSessionPage.Permission), start = 4.dp, end = 8.dp)
-                }
-                // Model and effort sit against the send button, the model giving way first.
-                Row(
-                    modifier = Modifier.weight(1f).padding(start = HomeDockSpec.actionRowGap),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(HomeDockSpec.actionRowGap, Alignment.End),
-                ) {
-                    if (options != null) {
-                        Chip(
-                            options.modelChip,
-                            HomeDockTags.MODEL,
-                            pageTitle(NewSessionPage.Model, false),
-                            chip(NewSessionPage.Model).takeIf { options.models.any { it.options.isNotEmpty() } },
-                            start = 12.dp,
-                            end = 4.dp,
-                            modifier = Modifier.weight(1f, fill = false),
-                            alignment = Alignment.CenterEnd,
-                        )
-                    }
-                    val effort = options?.effort
-                    if (effort != null) {
-                        Text("·", style = HomeDockSpec.chip, color = colors.textSecondary)
-                        Chip(
-                            effort.name,
-                            HomeDockTags.EFFORT,
-                            pageTitle(NewSessionPage.Effort, false),
-                            chip(NewSessionPage.Effort),
-                            start = 4.dp,
-                            end = 6.dp,
-                            modifier = Modifier.widthIn(min = HomeDockSpec.effortMinWidth),
-                            alignment = Alignment.CenterStart,
-                        )
-                    }
-                }
-            }
-            PrimaryButton(button, refusal, onClick = if (button == StartButton.Stop) onStop else actions.onSubmit)
-        }
-    }
-}
-
-@Composable
-private fun Chip(
-    text: String,
-    tag: String,
-    description: String,
-    onClick: (() -> Unit)?,
-    start: Dp,
-    end: Dp,
-    modifier: Modifier = Modifier,
-    alignment: Alignment = Alignment.Center,
-) {
-    Box(
-        modifier = modifier
-            .testTag(tag)
-            .height(HomeDockSpec.chipHeight)
-            .clip(RoundedCornerShape(HomeDockSpec.chipHeight / 2))
-            .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
-            .semantics { contentDescription = description }
-            .padding(start = start, end = end),
-        contentAlignment = alignment,
-    ) {
-        Text(text, style = HomeDockSpec.chip, color = HappyTheme.colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
-private fun PrimaryButton(button: StartButton, refusal: Float, onClick: () -> Unit) {
-    val colors = HappyTheme.colors
-    val filled = button == StartButton.Send || button == StartButton.Stop
-    val label = stringResource(if (button == StartButton.Stop) R.string.home_dock_stop else R.string.home_dock_send)
-    Box(
-        modifier = Modifier
-            .padding(start = HomeDockSpec.primaryMarginStart)
-            .testTag(HomeDockTags.PRIMARY)
-            .size(HomeDockSpec.sendSize)
-            .graphicsLayer {
-                scaleX = 1 + refusal * 0.1f
-                scaleY = 1 + refusal * 0.1f
-            }
-            .clip(CircleShape)
-            .background(if (filled) sendBackground(colors) else colors.surfaceHighest)
-            .clickable(enabled = filled, role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = label },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (button == StartButton.Stop) {
-            // A lighter wash under the glyph: the button is already the darkest thing on screen.
-            Box(
-                Modifier
-                    .matchParentSize()
-                    .graphicsLayer { alpha = refusal * 0.55f }
-                    .background(if (colors.dark) Color(0xFF4A4A4E) else Color.White),
-            )
-        }
-        when (button) {
-            StartButton.Busy -> CircularProgressIndicator(Modifier.size(20.dp), color = colors.textSecondary, strokeWidth = 2.dp)
-            StartButton.Stop -> Icon(Octicon.Stop, HomeDockSpec.sendIcon, sendIconColor(colors))
-            else -> Icon(Ionicon.ArrowUp, HomeDockSpec.sendIcon, if (button == StartButton.Send) sendIconColor(colors) else colors.textSecondary)
-        }
-    }
-}
-
-@Composable
-private fun ProgressLine(step: StartProgress, showHint: Boolean, refusal: Float, modifier: Modifier) {
-    val colors = HappyTheme.colors
-    val text = when (step) {
-        is StartProgress.CreatingWorkspace -> stringResource(if (step.workspace) R.string.home_dock_creating_workspace else R.string.home_dock_creating_worktree)
-        is StartProgress.Starting -> stringResource(R.string.home_dock_starting, step.agentName)
-        StartProgress.Opening -> stringResource(R.string.home_dock_opening)
-    }
-    Row(
-        modifier = modifier
-            .testTag(HomeDockTags.PROGRESS)
-            .fillMaxWidth()
-            .height(HomeDockSpec.progressRowHeight)
-            .padding(horizontal = HomeDockSpec.progressPaddingHorizontal),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(HomeDockSpec.progressGap),
-    ) {
-        StatusDot(colors.status.connecting, pulsing = true, size = 6.dp)
-        Text(
-            text,
-            style = HomeDockSpec.progressText,
-            color = colors.textSecondary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false).testTag(HomeDockTags.PROGRESS_TEXT),
-        )
-        if (showHint) {
-            Spacer(Modifier.weight(1f))
-            Text(
-                stringResource(R.string.home_dock_interrupt_hint),
-                style = HomeDockSpec.progressText,
-                color = lerp(colors.textSecondary, colors.text, refusal),
-                maxLines = 1,
-                modifier = Modifier.testTag(HomeDockTags.PROGRESS_HINT),
-            )
         }
     }
 }

@@ -55,11 +55,24 @@ public struct ChatStorePage: Sendable {
 }
 
 extension LocalStore {
+    /// The sequence the chat's records start after (exclusive), or nil for
+    /// all of them: a newest page leaves disconnected older islands out.
+    static func chatWindowLowerBound(marker: ChatHistoryMarker?, seq: Int, syncedMessageSeq: Int) -> Int? {
+        guard let marker, marker.newestLoaded else { return nil }
+        if let oldest = marker.oldestRawSeq {
+            return syncedMessageSeq < oldest - 1 ? oldest - 1 : nil
+        }
+        // An empty newest page excludes older retained islands but still
+        // admits a later socket message immediately.
+        return syncedMessageSeq < seq ? marker.checkedThroughSeq : nil
+    }
+
     /// Reads appended plaintext records and the fields needed to render them.
     /// A rowid cursor catches lower-sequence records that arrive late.
     public func chatPage(sessionId: String, afterRowId: Int64 = 0) throws -> ChatStorePage {
-        try performRead { db in
-            let change = try Self.fetchChatChange(db, sessionId: sessionId)
+        let cached = latestHomeSnapshot?.sessions.first { $0.id == sessionId }
+        return try performRead { db in
+            let change = try Self.fetchChatChange(db, sessionId: sessionId, cachedSession: cached)
             return ChatStorePage(
                 change: change,
                 // Rowid follows insertion, unlike seq: a socket record with
@@ -78,7 +91,8 @@ extension LocalStore {
             let task = Task {
                 do {
                     let observation = ValueObservation.tracking { db in
-                        try Self.fetchChatChange(db, sessionId: sessionId)
+                        let cached = self.latestHomeSnapshot?.sessions.first { $0.id == sessionId }
+                        return try Self.fetchChatChange(db, sessionId: sessionId, cachedSession: cached)
                     }
                     for try await change in observation.removeDuplicates().values(in: writer) {
                         continuation.yield(change)
@@ -91,12 +105,16 @@ extension LocalStore {
     }
 
     static func fetchChatChange(_ db: Database, sessionId: String) throws -> ChatStoreChange {
+        try fetchChatChange(db, sessionId: sessionId, cachedSession: nil)
+    }
+
+    static func fetchChatChange(_ db: Database, sessionId: String, cachedSession: SessionRecord?) throws -> ChatStoreChange {
         ThreadRules.assertOffMain()
         let marker = try ChatHistoryMarker.fetchOne(db, key: sessionId)
         let session = try Row.fetchOne(
             db,
             sql:
-                "SELECT seq, syncedMessageSeq, agentStateVersion, agentState, metadata FROM session WHERE id = ?",
+                "SELECT seq, syncedMessageSeq, agentStateVersion, agentStateCipher, agentState, metadata FROM session WHERE id = ?",
             arguments: [sessionId]
         ).map { row -> ChatStoreSession in
             let metadata: JSONValue? = row["metadata"]
@@ -107,10 +125,15 @@ extension LocalStore {
                     "messageReceipts": metadata?["capabilities"]?["messageReceipts"] ?? .null
                 ]),
             ])
+            let version: Int = row["agentStateVersion"]
+            let cipher: String? = row["agentStateCipher"]
+            let agentState = Self.chatAgentState(sessionId: sessionId, version: version, cipher: cipher, cached: cachedSession) {
+                row["agentState"]
+            }
             return ChatStoreSession(
                 seq: row["seq"], syncedMessageSeq: row["syncedMessageSeq"],
                 newestHistoryLoaded: marker?.newestLoaded ?? false,
-                agentStateVersion: row["agentStateVersion"], agentState: row["agentState"],
+                agentStateVersion: version, agentState: agentState,
                 metadata: receiptMetadata
             )
         }
@@ -118,15 +141,8 @@ extension LocalStore {
             ChatHistoryCoverage(sessionId: sessionId, seq: $0.seq,
                                 syncedMessageSeq: $0.syncedMessageSeq, marker: marker)
         }
-        var lower: Int?
-        if let marker, marker.newestLoaded, let session {
-            if let oldest = marker.oldestRawSeq {
-                if session.syncedMessageSeq < oldest - 1 { lower = oldest - 1 }
-            } else if session.syncedMessageSeq < session.seq {
-                // An empty newest page excludes older retained islands but
-                // still admits a later socket message immediately.
-                lower = marker.checkedThroughSeq
-            }
+        let lower = session.flatMap {
+            chatWindowLowerBound(marker: marker, seq: $0.seq, syncedMessageSeq: $0.syncedMessageSeq)
         }
         let counts = try Row.fetchOne(
             db,
@@ -141,5 +157,20 @@ extension LocalStore {
             lowerSeqExclusive: lower, hasMoreOlder: coverage?.hasMore ?? false,
             olderBoundary: counts["oldest"]
         )
+    }
+
+    /// Home has already decoded the account's records. Reuse only a present
+    /// payload with the transaction's same session, version and ciphertext.
+    /// The cache comes from this store's own hub, never another account.
+    /// Membership, metadata and message boundaries still come from the DB.
+    static func chatAgentState(
+        sessionId: String, version: Int, cipher: String?, cached: SessionRecord?,
+        read: () -> JSONValue?
+    ) -> JSONValue? {
+        if let cached, cached.id == sessionId, cached.agentStateVersion == version,
+           cached.agentStateCipher == cipher, let state = cached.agentState {
+            return state
+        }
+        return read()
     }
 }

@@ -21,9 +21,9 @@ import UIKit
 // window wider than 700 points makes it the flat panel instead
 // (`desktop`, AgentInputDesktopControls.swift), keeping the text view.
 //
-// Under `FollowsTextSize` (the chat's composer sets it; Home's dock
-// doesn't) its text is drawn at the person's text size as React Native
-// scales it, and measured as drawn: the input, its placeholder and line, the
+// Under `FollowsTextSize` (the chat's composer and Home's dock set it)
+// its text is drawn at the person's text size as React Native scales it,
+// and measured as drawn: the input, its placeholder and line, the
 // chips and the "·". Icons, paddings, the 40 and 42 rows, the 44 minimum
 // and the 120 cap stay.
 
@@ -306,8 +306,36 @@ public final class AgentInputCardView: UIView {
     private let effortChip = ComposerChipButton(chip: .effort)
     private let primaryHost = PassthroughView()
     private let primaryButton = ComposerPrimaryButton()
-    private let desktopControls = AgentInputDesktopControlsView()
+    private var installedDesktopControls: AgentInputDesktopControlsView?
+    /// A phone's compact card never mounts the hidden desktop button tree.
+    /// Keep it after the first wide layout so resizing preserves its controls.
+    private var desktopControls: AgentInputDesktopControlsView {
+        if let installedDesktopControls { return installedDesktopControls }
+        let controls = AgentInputDesktopControlsView()
+        controls.onSelect = { [weak self] key, chip in
+            guard let self else { return }
+            self.delegate?.agentInputCard(self, didSelect: key, in: chip)
+        }
+        controls.onStop = { [weak self] in
+            guard let self else { return }
+            self.delegate?.agentInputCardDidPressStop(self)
+        }
+        controls.onImage = { [weak self] in
+            guard let self else { return }
+            self.delegate?.agentInputCardDidPressAdd(self)
+        }
+        controls.onSend = { [weak self] in
+            guard let self else { return }
+            self.delegate?.agentInputCardDidPressSend(self)
+        }
+        installedDesktopControls = controls
+        actionsGroup.addSubview(controls)
+        return controls
+    }
     private var primaryFlash: CGFloat = 0
+    /// The text, kept off the main thread from the storage's edits, so a
+    /// measurement or the draft gets it without a copy on main.
+    private let textMirror = ComposerTextMirror()
     /// The text's heights, measured off the main thread.
     private var textHeights = ComposerTextHeights()
     private var measuring: Task<Void, Never>?
@@ -327,8 +355,9 @@ public final class AgentInputCardView: UIView {
     private var textWaits = 0
 
     /// Whether the height change the delegate is hearing about should
-    /// animate: false for a text set with `animatesHeight: false`, whose
-    /// height may land a moment after it was set.
+    /// animate: only one the text made, and not a text set with
+    /// `animatesHeight: false`, whose height may land a moment after it
+    /// was set.
     public private(set) var animatesHeightChange = true
     /// The height the owner last laid the card out at, and at what width:
     /// what a change to the text is measured against.
@@ -384,6 +413,12 @@ public final class AgentInputCardView: UIView {
         textView.textContentType = nil
         textView.tintColor = UIColor(Palette.radioActive)
         textView.delegate = self
+        // Every character edit, typed, marked, corrected, pasted, undone or
+        // set, goes through the storage's processEditing.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(textStorageDidProcessEditing(_:)),
+            name: NSTextStorage.didProcessEditingNotification, object: textView.textStorage
+        )
         inputGroup.addSubview(textView)
         placeholderLabel.isAccessibilityElement = false
         placeholderLabel.isUserInteractionEnabled = false
@@ -411,24 +446,6 @@ public final class AgentInputCardView: UIView {
         primaryButton.addTarget(self, action: #selector(primaryTapped), for: .touchUpInside)
         primaryHost.addSubview(primaryButton)
         actionsGroup.addSubview(primaryHost)
-
-        desktopControls.onSelect = { [weak self] key, chip in
-            guard let self else { return }
-            self.delegate?.agentInputCard(self, didSelect: key, in: chip)
-        }
-        desktopControls.onStop = { [weak self] in
-            guard let self else { return }
-            self.delegate?.agentInputCardDidPressStop(self)
-        }
-        desktopControls.onImage = { [weak self] in
-            guard let self else { return }
-            self.delegate?.agentInputCardDidPressAdd(self)
-        }
-        desktopControls.onSend = { [weak self] in
-            guard let self else { return }
-            self.delegate?.agentInputCardDidPressSend(self)
-        }
-        actionsGroup.addSubview(desktopControls)
 
         // didSet doesn't run in the initializer.
         syncTextSize()
@@ -462,10 +479,10 @@ public final class AgentInputCardView: UIView {
     }
 
     /// The text size moved outside a measurement: redraw, and the owner
-    /// lays the card out again.
+    /// lays the card out again, unanimated: only what is typed animates.
     private func textSizeMayHaveChanged() {
         guard syncTextSize() else { return }
-        delegate?.agentInputCardDidInvalidateHeight(self)
+        reportHeightChange(animated: false)
         setNeedsLayout()
     }
 
@@ -511,6 +528,29 @@ public final class AgentInputCardView: UIView {
     /// The live text's UTF-16 as the text view stores it, not copied out
     /// as `text` is. Read it now: it changes with the text.
     public var textUnits: NSString { textView.textStorage.mutableString }
+
+    /// The live text as a snapshot, copied out off the main thread when it
+    /// is read (`ComposerTextSnapshot.text()`): the same one until the next
+    /// edit, so the measurement and the draft share it.
+    public var textSnapshot: ComposerTextSnapshot {
+        let units = textView.textStorage.mutableString
+        if textMirror.length != units.length {
+            // An edit the mirror never heard of: not known to happen (the
+            // UIKit tests count these); if it does, it costs this copy.
+            textMirrorResets += 1
+            textMirror.reset(units as String)
+        }
+        return textMirror.snapshot()
+    }
+
+    /// How often the mirror had to start again from the text (tests).
+    private(set) var textMirrorResets = 0
+
+    /// Moves with every edit to the text: compared in place of the text.
+    public var editCount: Int { textMirror.revision }
+
+    /// No text at all.
+    public var isEmpty: Bool { !textView.hasText }
 
     /// Something besides whitespace (`trim().length > 0`), looked for in
     /// the text view's storage rather than in a copy of the text.
@@ -732,16 +772,21 @@ public final class AgentInputCardView: UIView {
         textHeights.isMeasured(textStamp(cardWidth: width, desktop: configuration.desktop != nil), isEmpty: !textView.hasText)
     }
 
-    /// Measures the text as it is now off the main thread. Copying it out
-    /// is the one pass over it made here.
+    /// Measures the text as it is now off the main thread, where its
+    /// snapshot is copied out: nothing here passes over it.
     private func startMeasuring(_ stamp: ComposerTextHeights.Stamp) {
+        let snapshot = textSnapshot
         let job = ComposerTextMeasure(
             stamp: stamp,
-            text: text,
+            text: "",
             attributes: stamp.key.style.attributes(color: UIColor(Palette.inputText))
         )
         measuring = Task { [weak self] in
-            let height = await Task.detached(priority: .userInitiated) { job.run() }.value
+            let height = await Task.detached(priority: .userInitiated) {
+                var job = job
+                job.text = await snapshot.text()
+                return job.run()
+            }.value
             self?.measured(stamp, height: height)
         }
     }
@@ -1047,7 +1092,10 @@ public final class AgentInputCardView: UIView {
             || previous.effort != config.effort
             || previous.zenMode != config.zenMode
             || Self.panelShape(previous.desktop) != Self.panelShape(config.desktop) {
-            delegate?.agentInputCardDidInvalidateHeight(self)
+            // Chips that come with the session's record, a picture, the
+            // panel: the card takes its new height at once. Only what is
+            // typed animates.
+            reportHeightChange(animated: false)
             setNeedsLayout()
         }
     }
@@ -1066,7 +1114,7 @@ public final class AgentInputCardView: UIView {
         frosted.isHidden = isDesktop
         middle.isHidden = isDesktop
         primaryHost.isHidden = isDesktop
-        desktopControls.isHidden = !isDesktop
+        installedDesktopControls?.isHidden = !isDesktop
         surface.layer.cornerRadius = isDesktop ? AgentInputDesktopLayout.Metrics.panelRadius : metrics.shellRadius
         let padding = isDesktop
             ? (top: AgentInputDesktopLayout.Metrics.textPaddingTop, bottom: AgentInputDesktopLayout.Metrics.textPaddingBottom)
@@ -1092,6 +1140,12 @@ public final class AgentInputCardView: UIView {
 
     private func updatePlaceholder() {
         placeholderLabel.isHidden = textView.hasText
+    }
+
+    @objc private func textStorageDidProcessEditing(_ notification: Notification) {
+        let storage = textView.textStorage
+        guard storage.editedMask.contains(.editedCharacters) else { return }
+        textMirror.edited(range: storage.editedRange, changeInLength: storage.changeInLength, in: storage.mutableString)
     }
 
     fileprivate func textChanged() {

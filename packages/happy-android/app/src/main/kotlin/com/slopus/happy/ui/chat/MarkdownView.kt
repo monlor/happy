@@ -29,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.TextLinkStyles
@@ -234,7 +235,8 @@ private fun CodeBlock(content: String, language: String?) {
             copied = false
         }
     }
-    val highlighted = remember(content, language, chat) { highlight(content, language, chat) }
+    // A row scrolled away loses its `remember`; the cache spares the tokenizer when it comes back.
+    val highlighted = remember(content, language, chat) { HighlightCache.get(content, language, chat) }
     Box(
         modifier = Modifier
             .padding(vertical = MarkdownSpec.codeMarginVertical)
@@ -269,7 +271,7 @@ private fun CodeBlock(content: String, language: String?) {
                 .clip(RoundedCornerShape(4.dp))
                 .background(if (copied) colors.success else colors.surfaceHighest)
                 .border(1.dp, if (copied) colors.success else colors.divider, RoundedCornerShape(4.dp))
-                .clickable {
+                .clickable(role = Role.Button) {
                     copy(content)
                     copied = true
                 }
@@ -284,8 +286,39 @@ private fun CodeBlock(content: String, language: String?) {
     }
 }
 
+/**
+ * Highlighted code blocks by (code, language, palette), most recent first,
+ * so a block scrolling back into view isn't tokenized again. Bounded by
+ * count; blocks are capped by size elsewhere.
+ */
+internal object HighlightCache {
+    private const val MAX_ENTRIES = 64
+    private data class Key(val code: String, val language: String?, val colors: ChatColors)
+    private val entries = object : LinkedHashMap<Key, AnnotatedString>(MAX_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, AnnotatedString>?) = size > MAX_ENTRIES
+    }
+
+    /** How many blocks were tokenized; tests read it. */
+    @Volatile
+    var misses = 0
+        private set
+
+    @Synchronized
+    fun get(code: String, language: String?, colors: ChatColors): AnnotatedString =
+        entries.getOrPut(Key(code, language, colors)) {
+            misses++
+            highlight(code, language, colors)
+        }
+
+    @Synchronized
+    fun clear() {
+        entries.clear()
+        misses = 0
+    }
+}
+
 /** SimpleSyntaxHighlighter's colours by token type. */
-private fun highlight(code: String, language: String?, colors: ChatColors): AnnotatedString = buildAnnotatedString {
+internal fun highlight(code: String, language: String?, colors: ChatColors): AnnotatedString = buildAnnotatedString {
     for (token in tokenizeCode(code, language)) {
         val color = when (token.type) {
             SyntaxTokenType.Keyword, SyntaxTokenType.ControlFlow, SyntaxTokenType.Type, SyntaxTokenType.Modifier,
@@ -319,7 +352,7 @@ private fun OptionsBlock(items: List<String>, onOptionPress: ((String) -> Unit)?
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(MarkdownSpec.optionRadius))
                     .background(colors.surfaceHighest)
-                    .then(if (onOptionPress != null) Modifier.clickable { onOptionPress(item) } else Modifier)
+                    .then(if (onOptionPress != null) Modifier.clickable(role = Role.Button) { onOptionPress(item) } else Modifier)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 Text(text = item, style = MarkdownSpec.optionText, color = colors.text)

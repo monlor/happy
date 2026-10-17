@@ -138,6 +138,10 @@ public struct HomeDockFocusLayout: Equatable, Sendable {
         public static let iconSize: CGFloat = 21
         /// The native trigger's `Spacer(minLength: 8)` after the value.
         public static let valueTrailing: CGFloat = 8
+        /// `focusConfigTriggerValue`, the hidden RN copy of the value that
+        /// sizes the native trigger: 17 with no line height, so Plex's own
+        /// 1.3 em at the designed size.
+        public static let triggerLine: CGFloat = 22.1
         public static let composerPaddingHorizontal: CGFloat = 16
         /// Above the safe area, or above the keyboard.
         public static let composerPaddingBottom: CGFloat = 8
@@ -158,6 +162,9 @@ public struct HomeDockFocusLayout: Equatable, Sendable {
         public var composerHeight: CGFloat
         /// Each picker row's value, on one line.
         public var rows: [Measurable]
+        /// One line of `focusConfigTriggerValue` at the text size: what
+        /// holds a row up past its 42, whatever the menu draws in it.
+        public var triggerLine: CGFloat
         /// "Starting Claude Code…", while a start runs.
         public var progress: Measurable?
         /// "To interrupt press stop", while Stop can stop it.
@@ -171,6 +178,7 @@ public struct HomeDockFocusLayout: Equatable, Sendable {
             maxWidth: CGFloat = .greatestFiniteMagnitude,
             composerHeight: CGFloat,
             rows: [Measurable],
+            triggerLine: CGFloat = Metrics.triggerLine,
             progress: Measurable? = nil,
             hint: Measurable? = nil,
             faces: BotFacePickerLayout.Text? = nil
@@ -180,6 +188,7 @@ public struct HomeDockFocusLayout: Equatable, Sendable {
             self.maxWidth = maxWidth
             self.composerHeight = composerHeight
             self.rows = rows
+            self.triggerLine = triggerLine
             self.progress = progress
             self.hint = hint
             self.faces = faces
@@ -268,7 +277,9 @@ public struct HomeDockFocusLayout: Equatable, Sendable {
         let triggerWidth = max(0, rowX + rowWidth - M.rowPaddingHorizontal - triggerX)
         let valueLane = max(0, triggerWidth - M.valueTrailing)
         let values = input.rows.map { $0.size(fitting: valueLane) }
-        let heights = values.map { max(M.rowMinHeight, M.iconBox, $0.height) }
+        // RN's row is its 42, the icon's box or the trigger's sizing copy;
+        // the menu's own label (the system's body font) is centred in it.
+        let heights = values.map { _ in max(M.rowMinHeight, M.iconBox, input.triggerLine) }
         let picker = input.faces.map { BotFacePickerLayout(width: rowWidth - 2 * M.facesPaddingHorizontal, text: $0) }
         let facesHeight = picker.map { M.facesPaddingTop + $0.size.height + M.facesPaddingBottom }
         let lines = heights + (facesHeight.map { [$0] } ?? [])
@@ -358,7 +369,7 @@ public struct HomeDockHeaderLayout: Equatable, Sendable {
         segment = CGRect(x: left + (contentWidth - segmentWidth) / 2, y: top, width: segmentWidth, height: M.segmentHeight)
         var bottom = segment.maxY
         if let text = input.lede {
-            let ledeLane = min(M.ledeMaxWidth, contentWidth)
+            let ledeLane = Self.ledeWidth(width: input.width, maxWidth: input.maxWidth)
             let size = text.size(fitting: ledeLane)
             let width = min(size.width, ledeLane)
             let frame = CGRect(x: left + (contentWidth - width) / 2, y: segment.maxY + M.gap, width: width, height: size.height)
@@ -368,6 +379,14 @@ public struct HomeDockHeaderLayout: Equatable, Sendable {
             lede = nil
         }
         content = CGRect(x: left, y: top, width: contentWidth, height: bottom - top)
+    }
+
+    /// The lane the lede wraps in on a screen `width` wide: what to measure
+    /// it at ahead of the layout.
+    public static func ledeWidth(width: CGFloat, maxWidth: CGFloat = .greatestFiniteMagnitude) -> CGFloat {
+        typealias M = Metrics
+        let lane = max(0, width - 2 * M.paddingHorizontal)
+        return min(M.ledeMaxWidth, min(maxWidth, lane))
     }
 }
 
@@ -444,6 +463,73 @@ public struct HomeDockFocusMotion: Equatable, Sendable {
 
     // The card's text and action row rise in their own beats:
     // `AgentInputCardReveal`, at this same progress.
+}
+
+/// The resting dock fading in as it goes from hidden to shown. This goes
+/// past happy-app, whose MainView mounts HomeDock at once and whose
+/// HomeDock is `display: 'none'` while the composer is open; the port was
+/// asked for it.
+///
+/// It has two parts: the capsule's surface (its blur, frost, rim and
+/// shadow) and what is on it and around it (the prompt, the send button,
+/// the scrim).
+public struct HomeDockFade: Equatable, Sendable {
+    /// What the dock comes back from.
+    public enum Origin: Equatable, Sendable {
+        /// Home's content came in (its first state on launch, or a state
+        /// with a dock after Link Your Computer).
+        case appearing
+        /// The open composer closed: its shell has just shrunk back to the
+        /// capsule in `HomeDockFocusMotion.closeDuration`, an empty capsule
+        /// at `composerAlpha` 0.72, and gone.
+        case focus
+    }
+
+    /// The first show: from nothing, 220ms ease-out.
+    public static let appearDuration: Double = 0.22
+    /// Back from the composer, in the close's own 180ms, ease-out: the
+    /// surface from the closed shell's 0.72, so it doesn't dip, and the
+    /// prompt and the button from nothing, as the shell had none. It starts
+    /// once the close has ended, so the two never overlap.
+    public static let returnDuration: Double = HomeDockFocusMotion.closeDuration
+
+    /// The surface's presence when the fade starts.
+    public var surfaceFrom: CGFloat
+    /// The prompt's, the button's and the scrim's.
+    public var contentFrom: CGFloat
+    public var duration: Double
+
+    public init(surfaceFrom: CGFloat, contentFrom: CGFloat, duration: Double) {
+        self.surfaceFrom = surfaceFrom
+        self.contentFrom = contentFrom
+        self.duration = duration
+    }
+
+    /// The fade for the dock going from hidden to shown, or nil to show it
+    /// at once: off a window (nothing sees it, and a home that comes back
+    /// from a pushed screen with its dock showing never fades again) or
+    /// with Reduce Motion on.
+    public static func shown(from origin: Origin, onWindow: Bool, reduceMotion: Bool) -> HomeDockFade? {
+        guard onWindow, !reduceMotion else { return nil }
+        switch origin {
+        case .appearing:
+            return HomeDockFade(surfaceFrom: 0, contentFrom: 0, duration: appearDuration)
+        case .focus:
+            return HomeDockFade(surfaceFrom: HomeDockFocusMotion(progress: 0).composerAlpha, contentFrom: 0, duration: returnDuration)
+        }
+    }
+
+    /// How present each part is `elapsed` seconds in, each from where it
+    /// starts to 1 on the same curve.
+    public func presence(at elapsed: Double) -> (surface: CGFloat, content: CGFloat) {
+        guard duration > 0 else { return (1, 1) }
+        let eased = CGFloat(HomeDockFocusMotion.easeOut(elapsed / duration))
+        return (surfaceFrom + (1 - surfaceFrom) * eased, contentFrom + (1 - contentFrom) * eased)
+    }
+
+    public func isFinished(at elapsed: Double) -> Bool {
+        elapsed >= duration
+    }
 }
 
 /// A refused press while a session starts: two beats pointing at Stop

@@ -1,5 +1,6 @@
 package com.slopus.happy.ui.settings
 
+import android.content.ActivityNotFoundException
 import android.os.Build
 import android.provider.Settings
 import androidx.compose.ui.platform.LocalContext
@@ -19,6 +20,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraphBuilder
@@ -31,6 +33,7 @@ import com.slopus.happy.auth.AuthState
 import com.slopus.happy.model.Machine
 import com.slopus.happy.model.MachineChoice
 import com.slopus.happy.model.Profile
+import com.slopus.happy.payments.Paywall
 import com.slopus.happy.model.collectMachineChoices
 import kotlinx.coroutines.flow.MutableStateFlow
 import com.slopus.happy.model.settings.ConnectApi
@@ -49,6 +52,8 @@ import com.slopus.happy.ui.connect.rememberTerminalConnect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import com.slopus.happy.ui.voice.voiceRoutes
+import com.slopus.happy.ui.voice.VoiceSettingsRoute
 
 @Serializable data object AccountRoute
 @Serializable data object AppearanceRoute
@@ -59,6 +64,7 @@ import kotlinx.serialization.Serializable
 
 /** Settings and its screens. [SettingsRoute] is the entry point. */
 fun NavGraphBuilder.settingsRoutes(graph: AppGraph, nav: NavHostController) {
+    voiceRoutes(graph, nav)
     composable<SettingsRoute> { SettingsIndex(graph, nav) }
     composable<AccountRoute> { Account(graph, nav) }
     composable<AppearanceRoute> { Appearance(graph, nav) }
@@ -165,6 +171,19 @@ internal class Alerts {
     }
 }
 
+/** The Version row's detail: "versionName (versionCode)", see [SettingsScreen]. */
+fun versionDetail(versionName: String, versionCode: Int) = "$versionName ($versionCode)"
+
+/** openExternalUrl: a link nothing on the device can open is dropped, not a crash. */
+internal fun openExternalUrl(uriHandler: UriHandler, url: String) {
+    try {
+        uriHandler.openUri(url)
+    } catch (_: IllegalArgumentException) {
+        // AndroidUriHandler's "Can't open $uri" when no activity takes the link.
+    } catch (_: ActivityNotFoundException) {
+    }
+}
+
 /** Shows useHappyAction's error alert: "Error", the message or "Unknown error", OK. */
 @Composable
 internal fun errorAlert(alerts: Alerts): (String?) -> Unit {
@@ -174,6 +193,16 @@ internal fun errorAlert(alerts: Alerts): (String?) -> Unit {
     return { message -> alerts.show(Alert(title, message ?: unknown, listOf(AlertButton(ok)))) }
 }
 
+/** Support us reports unavailable billing through the same localized alert as other settings actions. */
+@Composable
+internal fun rememberSupportAction(paywall: Paywall, onError: (String?) -> Unit): HappyAction {
+    val unavailable = stringResource(R.string.settings_support_unavailable)
+    return rememberHappyAction(onError) {
+        val result = paywall.present("voluntary_support")
+        if (!result.success) onError(unavailable)
+    }
+}
+
 @Composable
 private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
     val uriHandler = LocalUriHandler.current
@@ -181,6 +210,8 @@ private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
     val api = rememberConnectApi(graph)
     val alerts = remember { Alerts() }
     val onError = errorAlert(alerts)
+    val purchases by graph.purchases.purchases.collectAsStateWithLifecycle()
+    val support = rememberSupportAction(graph.purchases, onError)
 
     val cancel = stringResource(R.string.common_cancel)
     val disconnect = stringResource(R.string.modals_disconnect)
@@ -189,7 +220,7 @@ private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
     val disconnectGitHubTitle = stringResource(R.string.modals_disconnect_github)
     val disconnectGitHubMessage = stringResource(R.string.modals_disconnect_github_confirm)
 
-    val connectGitHub = rememberHappyAction(onError) { uriHandler.openUri(api.gitHubOAuthUrl()) }
+    val connectGitHub = rememberHappyAction(onError) { openExternalUrl(uriHandler, api.gitHubOAuthUrl()) }
     val disconnectGitHub = rememberHappyAction(onError) {
         api.disconnectGitHub()
         graph.requestSync()
@@ -199,14 +230,22 @@ private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
         graph.requestSync()
     }
 
+    // Modal.confirm on Android: only a button closes it.
     fun confirm(title: String, message: String, action: HappyAction) = alerts.show(
-        Alert(title, message, listOf(AlertButton(cancel), AlertButton(disconnect, destructive = true, onClick = action::run))),
+        Alert(title, message, listOf(AlertButton(cancel), AlertButton(disconnect, destructive = true, onClick = action::run)), cancelable = false),
     )
     val connect = rememberTerminalConnect(graph)
     var enteringUrl by remember { mutableStateOf(false) }
 
+    val local by graph.localSettings.values.collectAsStateWithLifecycle()
+    val versionClicks = remember { MultiClick(required = 10) }
+    val developerMode = stringResource(R.string.modals_developer_mode)
+    val developerModeEnabled = stringResource(R.string.modals_developer_mode_enabled)
+    val developerModeDisabled = stringResource(R.string.modals_developer_mode_disabled)
+    val ok = stringResource(R.string.common_ok)
+
     SettingsScreen(
-        versionName = BuildConfig.VERSION_NAME,
+        versionName = versionDetail(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE),
         versionSubtitle = buildSubtitle(BuildConfig.BUILD_COMMIT_SHA, BuildConfig.BUILD_COMMIT_TIMESTAMP),
         profile = profile,
         onBack = { nav.popBackStack() },
@@ -228,8 +267,18 @@ private fun SettingsIndex(graph: AppGraph, nav: NavHostController) {
         onAccount = { nav.navigate(AccountRoute) },
         onAppearance = { nav.navigate(AppearanceRoute) },
         onAgents = { nav.navigate(AgentsRoute) },
+        onVoice = { nav.navigate(VoiceSettingsRoute) },
         onWhatsNew = { nav.navigate(ChangelogRoute) },
-        onOpenUrl = uriHandler::openUri,
+        isPro = BuildConfig.DEBUG || purchases.entitlements["pro"] == true,
+        onSupport = support::run,
+        onOpenUrl = { url -> openExternalUrl(uriHandler, url) },
+        onVersion = {
+            if (versionClicks.click()) {
+                val enabled = !local.devModeEnabled
+                graph.localSettings.change { it.copy(devModeEnabled = enabled) }
+                alerts.show(Alert(developerMode, if (enabled) developerModeEnabled else developerModeDisabled, listOf(AlertButton(ok))))
+            }
+        },
     )
     if (enteringUrl) EnterTerminalUrlPrompt(connect, onDismiss = { enteringUrl = false })
     alerts.Host()

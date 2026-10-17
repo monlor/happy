@@ -46,6 +46,8 @@ object SettingsTags {
     const val AVATAR = "settings.avatar"
     const val NAME = "settings.name"
     const val BIO = "settings.bio"
+    const val VERSION = "settings.version"
+    const val SUPPORT = "settings.support"
 }
 
 /** SettingsView.tsx, Android */
@@ -91,7 +93,7 @@ fun ItemIcon(icon: Ionicon, color: Color) {
 /** The profile avatar: the uploaded or GitHub picture when there is one, else generated from the account id. */
 @Composable
 fun ProfileAvatar(profile: Profile, size: Dp) {
-    Avatar(id = profile.id, size = size, imageUri = profile.avatarUrl)
+    Avatar(id = profile.id, size = size, imageUri = profile.avatarUrl, thumbhash = profile.avatar?.thumbhash)
 }
 
 /**
@@ -120,8 +122,8 @@ data class ConnectedAccounts(
 )
 
 /**
- * Settings (SettingsView.tsx, native rows). Voice, Usage, the developer
- * group and Support us are not part of this app.
+ * Settings (SettingsView.tsx, native rows), including Support us and Voice
+ * Assistant. The experimental Usage screen and developer group are excluded.
  *
  * Spec: the app card is inset 16 at the sides and 16 from the top, radius
  * 16, 0.5 divider border, surface colour, 24 vertical padding. With a
@@ -129,10 +131,15 @@ data class ConnectedAccounts(
  * semibold; 4 under it with a bio, else 8) and the bio (14, secondary,
  * centred, 16 side padding, 8 under it); without one, the 300x90 logotype
  * with 12 under it. Then standard [ItemGroup]s of [Item]s with 29 icons:
- * connect terminal (Scan QR, Enter URL; no chevrons), Connected Accounts
+ * connect terminal (Scan QR, Enter URL; no chevrons), Support us (29 red
+ * heart, no chevron; Pro gets the thanks subtitle and no action), Connected Accounts
  * (Claude Code, GitHub; no chevrons), Features (Account, Appearance,
- * Agents), About (What's New, GitHub, Report an Issue, Privacy Policy,
+ * Voice Assistant, Agents), About (What's New, GitHub, Report an Issue, Privacy Policy,
  * Terms of Service, Version with the commit as a two-line subtitle).
+ *
+ * The Version detail is "versionName (versionCode)": happy-app shows
+ * "version / runtime N", its OTA runtime, and a native build has none; the
+ * version code is what identifies this build instead.
  */
 @Composable
 fun SettingsScreen(
@@ -150,7 +157,12 @@ fun SettingsScreen(
     onClaude: () -> Unit = {},
     onGitHub: () -> Unit = {},
     onAgents: () -> Unit = {},
+    onVoice: () -> Unit = {},
     onWhatsNew: () -> Unit = {},
+    isPro: Boolean = false,
+    onSupport: () -> Unit = {},
+    /** A tap on Version; ten in a row toggle developer mode (useMultiClick). */
+    onVersion: () -> Unit = {},
     avatar: @Composable (Profile, Dp) -> Unit = { p, size -> ProfileAvatar(p, size) },
 ) {
     val colors = HappyTheme.colors
@@ -222,6 +234,17 @@ fun SettingsScreen(
                 )
             }
 
+            ItemGroup {
+                Item(
+                    title = stringResource(R.string.settings_support_us),
+                    subtitle = stringResource(if (isPro) R.string.settings_support_us_subtitle_pro else R.string.settings_support_us_subtitle),
+                    icon = { ItemIcon(Ionicon.Heart, SettingsSpec.red) },
+                    onClick = if (isPro) null else onSupport,
+                    showChevron = false,
+                    modifier = Modifier.testTag(SettingsTags.SUPPORT),
+                )
+            }
+
             ItemGroup(title = stringResource(R.string.settings_connected_accounts)) {
                 Item(
                     title = "Claude Code",
@@ -261,6 +284,12 @@ fun SettingsScreen(
                     subtitle = stringResource(R.string.settings_appearance_subtitle),
                     icon = { ItemIcon(Ionicon.ColorPaletteOutline, SettingsSpec.indigo) },
                     onClick = onAppearance,
+                )
+                Item(
+                    title = stringResource(R.string.settings_voice_assistant),
+                    subtitle = stringResource(R.string.settings_voice_assistant_subtitle),
+                    icon = { ItemIcon(Ionicon.MicOutline, Color(0xFF34C759)) },
+                    onClick = onVoice,
                 )
                 Item(
                     title = stringResource(R.string.settings_agents),
@@ -305,6 +334,8 @@ fun SettingsScreen(
                     detail = versionName,
                     icon = { ItemIcon(Ionicon.InformationCircleOutline, colors.textSecondary) },
                     showChevron = false,
+                    onClick = onVersion,
+                    modifier = Modifier.testTag(SettingsTags.VERSION),
                 )
             }
         }

@@ -1,12 +1,9 @@
 package com.slopus.happy.ui.chat
 
 import android.content.ClipData
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,11 +20,13 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -79,7 +78,6 @@ object MessageTags {
     const val AGENT = "message.agent"
     const val AGENT_COPY = "message.agent.copy"
     const val EVENT = "message.event"
-    const val UNSUPPORTED = "message.unsupported"
 }
 
 /** MessageView.tsx's stylesheet. */
@@ -127,6 +125,8 @@ class MessageCallbacks(
     /** Pressing an `<options>` choice sends it as the next message. */
     val onOptionPress: (String) -> Unit = {},
     val onToolPress: (ChatMessage.ToolCallMessage) -> Unit = {},
+    /** A patch tool's file card, by the patch's own file key; null leaves the cards inert. */
+    val onToolFilePress: ((ChatMessage.ToolCallMessage, String) -> Unit)? = null,
     /** Answers a tool's permission request; [mode] is the permission mode the composer switches to after. */
     val onPermission: PermissionHandler = { _, _ -> },
     /** A failed send, by its localId. */
@@ -137,9 +137,17 @@ class MessageCallbacks(
     val onCancelQuestion: suspend (communicationId: String, kind: String) -> Unit = { _, _ -> },
 )
 
+/**
+ * Called with a row's key every time that row composes (a tool's body
+ * reports "tool:" and its id too). Tests use it to pin that a changed
+ * message recomposes its own row and nothing else.
+ */
+val LocalChatRowObserver = staticCompositionLocalOf<((String) -> Unit)?> { null }
+
 /** One chat row, dispatched by kind (MessageView.tsx `RenderBlock`). */
 @Composable
 fun MessageView(row: ChatRow, bubble: BubblePalette, callbacks: MessageCallbacks, modifier: Modifier = Modifier) {
+    LocalChatRowObserver.current?.let { observe -> SideEffect { observe(row.key) } }
     // `messageContainer` / `messageContent`: each message centred and held to layout.maxWidth.
     val layout = LocalWindowLayout.current
     Box(modifier.fillMaxWidth()) {
@@ -149,7 +157,6 @@ fun MessageView(row: ChatRow, bubble: BubblePalette, callbacks: MessageCallbacks
             is ChatRow.AgentText -> AgentMessage(row, callbacks, content)
             is ChatRow.Event -> EventMessage(row.message.event, content)
             is ChatRow.Tool -> if (row.message.tool.name == "file") FileMessageView(row.message.tool.input, content) else ToolView(row.message, callbacks, content)
-            is ChatRow.Unsupported -> UnsupportedMessage(content)
         }
     }
 }
@@ -168,9 +175,9 @@ fun MessageView(row: ChatRow, bubble: BubblePalette, callbacks: MessageCallbacks
  * Goal: the goal in the bubble, then locate-outline 16 and "Sent as goal"
  * (14, agentEventText) 8 apart at 0.72. Command: its args in a bubble if
  * any, then a chip "/name" (mono 13, input text) with padding 10/2, radius
- * 10, a 1 divider border, at 0.65. Long press copies the text.
+ * 10, a 1 divider border, at 0.65. Long press opens the Copy menu
+ * ([LongPressCopyable]).
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun UserMessage(row: ChatRow.User, bubble: BubblePalette, callbacks: MessageCallbacks, modifier: Modifier = Modifier) {
     val message = row.message
@@ -178,7 +185,6 @@ fun UserMessage(row: ChatRow.User, bubble: BubblePalette, callbacks: MessageCall
     val chat = ChatTheme.colors
     val fromOther = message.isOtherParticipant
     val showPending = rememberPendingStatusVisible(message.pending, message.meta?.queuedWhileBusy == true, message.createdAt)
-    val copy = rememberCopyText()
     val copyText = when (val display = row.display) {
         is UserDisplay.Text -> display.text
         is UserDisplay.Goal -> display.goal
@@ -230,16 +236,11 @@ fun UserMessage(row: ChatRow.User, bubble: BubblePalette, callbacks: MessageCall
                     .padding(horizontal = MessageSpec.authorPaddingHorizontal),
             )
         }
-        Column(
+        LongPressCopyable(
+            text = copyText,
             modifier = Modifier
                 .testTag(MessageTags.USER_BODY)
-                .alpha(if (showPending) MessageSpec.PENDING_OPACITY else 1f)
-                .combinedClickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {},
-                    onLongClick = { copy(copyText) },
-                ),
+                .alpha(if (showPending) MessageSpec.PENDING_OPACITY else 1f),
             horizontalAlignment = alignment,
         ) {
             when (val display = row.display) {
@@ -320,7 +321,7 @@ private fun FailedAction(label: String, tag: String, onClick: () -> Unit) {
             .padding(top = MessageSpec.statusMarginTop, bottom = MessageSpec.statusMarginBottom)
             .testTag(tag)
             .heightIn(min = MessageSpec.statusHeight)
-            .clickable(onClick = onClick),
+            .clickable(role = Role.Button, onClick = onClick),
     )
 }
 
@@ -427,26 +428,3 @@ fun EventMessage(event: AgentEvent, modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * A record this build cannot show (a retired or unknown kind). happy-app
- * drops these; here a 14pt agentEventText line, centred with 8 side margins
- * and 8 above and below, says something is there.
- */
-@Composable
-fun UnsupportedMessage(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = MessageSpec.eventMarginHorizontal)
-            .testTag(MessageTags.UNSUPPORTED)
-            .padding(vertical = MessageSpec.eventPaddingVertical),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            stringResource(R.string.chat_message_unsupported),
-            style = MessageSpec.eventText,
-            color = ChatTheme.colors.agentEventText,
-            textAlign = TextAlign.Center,
-        )
-    }
-}

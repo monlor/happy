@@ -4,8 +4,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -21,9 +24,11 @@ import com.slopus.happy.chat.ToolState
 import com.slopus.happy.chat.tools.PermissionChoice
 import com.slopus.happy.ui.PHONE
 import com.slopus.happy.ui.PHONE_WIDTH
+import com.slopus.happy.ui.assertActionsLabelled
 import com.slopus.happy.ui.assertBox
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.hasRole
 import com.slopus.happy.ui.node
 import com.slopus.happy.ui.setHappyContent
 import kotlinx.serialization.json.Json
@@ -178,6 +183,31 @@ class ToolLayoutTest {
         rule.onAllNodesWithTag(ToolTags.HEADER, useUnmergedTree = true).assertCountEquals(0)
     }
 
+    // CodexPatchView.tsx: a file's header opens that file's diff, by the patch's own key; the chevron ends the header.
+    @Test
+    fun patchFilesOpenTheirDiff() {
+        val pressed = mutableListOf<Pair<String, String>>()
+        show(
+            tool("apply_patch", """{"changes":{"/repo/src/a.ts":{"type":"update","unified_diff":"@@ -1 +1 @@\n-a\n+b"},"/repo/b.ts":{"type":"add","content":"x"}}}"""),
+            callbacks = MessageCallbacks(onToolFilePress = { message, file -> pressed += message.id to file }),
+        )
+        rule.onAllNodesWithTag(ToolTags.FILE_CHEVRON, useUnmergedTree = true).assertCountEquals(2)
+        val header = rule.onAllNodesWithTag(ToolTags.FILE_HEADER, useUnmergedTree = true)[1]
+        val chevron = rule.onAllNodesWithTag(ToolTags.FILE_CHEVRON, useUnmergedTree = true)[1].bounds
+        assertDp("chevron 14", 14, chevron.right - chevron.left)
+        assertTrue("chevron at the header's end", chevron.right <= header.bounds.right && header.bounds.right - chevron.right <= 16.dp)
+        header.performClick()
+        assertEquals(listOf("t" to "/repo/b.ts"), pressed)
+    }
+
+    // Without a way to open them (no route), the file headers stay inert and show no chevron.
+    @Test
+    fun patchFilesAreInertWithoutARoute() {
+        show(tool("apply_patch", """{"changes":{"/repo/src/a.ts":{"type":"update","unified_diff":"@@ -1 +1 @@\n-a\n+b"}}}"""))
+        rule.onAllNodesWithTag(ToolTags.FILE_CHEVRON, useUnmergedTree = true).assertCountEquals(0)
+        rule.node(ToolTags.FILE_HEADER).assertHasNoClickAction()
+    }
+
     // PermissionFooter: padding 6 / 4 above / 8 below; buttons 7 apart, at least 34 high.
     @Test
     fun permissionFooterAnswers() {
@@ -195,6 +225,9 @@ class ToolLayoutTest {
         assertDp("7 apart", 7, all.top - yes.bottom)
         val deny = rule.node(PermissionTags.option(PermissionChoice.Deny)).bounds
         assertDp("8 below", 8, footer.bottom - deny.bottom)
+        // TalkBack: each choice is a button reading its text.
+        rule.onNode(hasText("Yes, allow all edits during this session") and hasRole(Role.Button)).assertExists()
+        rule.assertActionsLabelled()
         rule.onNodeWithText("Yes, allow all edits during this session").performClick()
         rule.waitForIdle()
         assertEquals(listOf(PermissionAnswer("r1", true, mode = "acceptEdits") to "acceptEdits"), answers)

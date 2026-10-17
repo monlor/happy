@@ -86,6 +86,7 @@ class SettingsLayoutTest {
     fun settingsRowsAndConnectedAccounts() {
         var claude = 0
         var gitHub = 0
+        var voice = 0
         rule.setHappyContent {
             SettingsScreen(
                 versionName = "0.1.0",
@@ -95,6 +96,7 @@ class SettingsLayoutTest {
                 accounts = ConnectedAccounts(claudeConnected = true, gitHubLogin = "ada"),
                 onClaude = { claude++ },
                 onGitHub = { gitHub++ },
+                onVoice = { voice++ },
             )
         }
         rule.onAllNodesWithTag(ItemGroupTags.HEADER, useUnmergedTree = true).assertCountEquals(3)
@@ -105,6 +107,8 @@ class SettingsLayoutTest {
         rule.onNodeWithText("Connected as @ada").performScrollTo().performClick()
         assertEquals(1, claude)
         assertEquals(1, gitHub)
+        rule.onNodeWithText("Voice Assistant").performScrollTo().performClick()
+        assertEquals(1, voice)
         rule.onNodeWithText("Commit 2026-10-16 03:12 UTC / abc1234").performScrollTo().assertIsDisplayed()
     }
 
@@ -122,4 +126,24 @@ class SettingsLayoutTest {
         assertEquals("Commit not-a-date", buildSubtitle(null, "not-a-date"))
         assertNull(buildSubtitle(null, ""))
     }
+
+    @Test
+    fun tenTapsOnVersionToggleDeveloperMode() {
+        var taps = 0
+        rule.setHappyContent { SettingsScreen(versionName = versionDetail("1.8.0", 412), onBack = {}, onAccount = {}, onAppearance = {}, onOpenUrl = {}, onVersion = { taps++ }) }
+        rule.onNodeWithText("1.8.0 (412)").performScrollTo().assertIsDisplayed()
+        rule.node(SettingsTags.VERSION).performClick()
+        assertEquals(1, taps)
+
+        // useMultiClick: ten within 2 s of each other; a pause starts over.
+        var now = 0L
+        val clicks = MultiClick(required = 10) { now }
+        repeat(9) { assertEquals(false, clicks.click()); now += 1_999 }
+        assertEquals(true, clicks.click())
+        repeat(5) { clicks.click(); now += 100 }
+        now += 2_001
+        repeat(9) { assertEquals(false, clicks.click()) }
+        assertEquals(true, clicks.click())
+    }
 }
+

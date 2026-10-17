@@ -8,7 +8,9 @@ import UIKit
 /// capsule holding the prompt and a send button, over a scrim that rises
 /// from the screen's foot. A tap on the capsule opens the composer; the
 /// button sends what was typed there. It fills home and takes touches only
-/// on the capsule; `HomeDockLayout` places everything.
+/// on the capsule; `HomeDockLayout` places everything. Its text follows
+/// the person's text size in a capsule that keeps its 56, cut at the
+/// capsule as `composerSurface`'s `overflow: 'hidden'` cuts it.
 final class HomeDockView: UIView {
     let scrim = HeaderScrimView(edge: .bottom)
     let entryButton = UIControl()
@@ -17,12 +19,37 @@ final class HomeDockView: UIView {
     private let surface = UIView()
     private let material = PartialBlurView(fraction: ComposerShadow.materialFraction)
     private let frosted = UIView()
+    /// The capsule's shape over the entry, which cuts a line taller than
+    /// the capsule; it takes no touches of its own.
+    private let entryClip = UIView()
     private let entryLabel = StyledLabel(style: TextStyles.homeDockEntry, color: Palette.textSecondary, lines: 1)
     private var composerFrame: CGRect = .zero
+
+    /// How present the capsule's surface is, 0 to 1, while the dock fades
+    /// in (`HomeDockFade`): the blur by strength, the shadow and the rim by
+    /// opacity, the frost by alpha.
+    private(set) var presence: CGFloat = 1 {
+        didSet { if presence != oldValue { applyPresence() } }
+    }
+    /// How present the prompt, the send button and the scrim are (the
+    /// scrim's blur by strength). Neither this view nor the capsule's shell
+    /// takes either: an ancestor below full alpha turns the blur inside off
+    /// (HomeDock.tsx:166).
+    private(set) var contentPresence: CGFloat = 1 {
+        didSet { if contentPresence != oldValue { applyPresence() } }
+    }
+    private var fade: (run: HomeDockFade, start: CFTimeInterval)?
+    private var fadeLink: CADisplayLink?
 
     /// What was typed in the composer; the placeholder while empty.
     var prompt = "" {
         didSet { if prompt != oldValue { applyPrompt() } }
+    }
+
+    /// The heights made off the main thread for the dock; the entry's line
+    /// comes from here once it is for the text size this view draws at.
+    var text: HomeDockText? {
+        didSet { if text != oldValue { setNeedsLayout() } }
     }
 
     /// The scrim shows only over a list that can scroll under it.
@@ -32,6 +59,9 @@ final class HomeDockView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        // HomeDock.tsx's prompt is a Text, which scales; the capsule keeps
+        // its 56.
+        traitOverrides.followsTextSize = true
         scrim.isHidden = true
         addSubview(scrim)
         shell.layer.shadowColor = UIColor(Palette.shadow).cgColor
@@ -48,7 +78,10 @@ final class HomeDockView: UIView {
         entryButton.addSubview(entryLabel)
         entryButton.isAccessibilityElement = true
         entryButton.accessibilityTraits = .button
-        addSubview(entryButton)
+        entryClip.clipsToBounds = true
+        entryClip.layer.cornerCurve = .continuous
+        entryClip.addSubview(entryButton)
+        addSubview(entryClip)
         addSubview(sendButton)
         applyPrompt()
         applyAppearance()
@@ -78,9 +111,68 @@ final class HomeDockView: UIView {
         let dark = traitCollection.userInterfaceStyle == .dark
         shell.layer.shadowOffset = CGSize(width: 0, height: dark ? ComposerShadow.darkOffsetY : ComposerShadow.lightOffsetY)
         shell.layer.shadowRadius = dark ? ComposerShadow.darkRadius : ComposerShadow.lightRadius
-        shell.layer.shadowOpacity = dark ? ComposerShadow.darkOpacity : ComposerShadow.lightOpacity
         surface.layer.borderWidth = hairline
-        surface.layer.borderColor = UIColor(Palette.glassBorder).resolvedColor(with: traitCollection).cgColor
+        applyPresence()
+    }
+
+    private func applyPresence() {
+        let dark = traitCollection.userInterfaceStyle == .dark
+        let border = UIColor(Palette.glassBorder).resolvedColor(with: traitCollection)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shell.layer.shadowOpacity = (dark ? ComposerShadow.darkOpacity : ComposerShadow.lightOpacity) * Float(presence)
+        surface.layer.borderColor = border.withAlphaComponent(border.cgColor.alpha * presence).cgColor
+        CATransaction.commit()
+        material.presence = presence
+        frosted.alpha = presence
+        scrim.presence = contentPresence
+        entryClip.alpha = contentPresence
+        sendButton.presence = contentPresence
+    }
+
+    /// Runs `fade`, or shows the dock in full at once when it is nil.
+    func fadeIn(_ fade: HomeDockFade?) {
+        guard let fade else { return finishFade() }
+        self.fade = (fade, CACurrentMediaTime())
+        apply(fade.presence(at: 0))
+        if fadeLink == nil {
+            let link = CADisplayLink(target: self, selector: #selector(fadeTick))
+            link.add(to: .main, forMode: .common)
+            fadeLink = link
+        }
+    }
+
+    /// Ends a fade where it would have ended: in full.
+    func finishFade() {
+        fadeLink?.invalidate()
+        fadeLink = nil
+        fade = nil
+        apply((1, 1))
+    }
+
+    private func apply(_ presence: (surface: CGFloat, content: CGFloat)) {
+        self.presence = presence.surface
+        contentPresence = presence.content
+    }
+
+    @objc private func fadeTick() {
+        guard let fade else { return finishFade() }
+        let elapsed = CACurrentMediaTime() - fade.start
+        apply(fade.run.presence(at: elapsed))
+        if fade.run.isFinished(at: elapsed) { finishFade() }
+    }
+
+    /// A dock that leaves the screen mid-fade is in full when it is back.
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil, fade != nil { finishFade() }
+    }
+
+    /// One line of the entry at its text size, from the heights made off
+    /// the main thread; the label measures itself only until they land.
+    private var entry: Measurable {
+        guard let text, text.key.text == TextEnvironment(traitCollection) else { return entryLabel.measurable }
+        return HomeDockText.line(entryLabel, text.entryLine)
     }
 
     override func layoutSubviews() {
@@ -89,7 +181,7 @@ final class HomeDockView: UIView {
             size: bounds.size,
             safeBottom: safeAreaInsets.bottom,
             hairline: hairline,
-            entry: entryLabel.measurable
+            entry: entry
         ))
         composerFrame = layout.composer
         scrim.setLayoutFrame(layout.scrim)
@@ -100,7 +192,9 @@ final class HomeDockView: UIView {
         surface.layer.cornerRadius = radius
         material.frame = surface.bounds
         frosted.frame = surface.bounds
-        entryButton.setLayoutFrame(layout.entry)
+        entryClip.setLayoutFrame(layout.composer)
+        entryClip.layer.cornerRadius = radius
+        entryButton.setLayoutFrame(layout.entry.offsetBy(dx: -layout.composer.minX, dy: -layout.composer.minY))
         entryLabel.setLayoutFrame(layout.entryText.offsetBy(dx: -layout.entry.minX, dy: -layout.entry.minY))
         sendButton.setLayoutFrame(layout.send)
     }
@@ -117,6 +211,11 @@ final class HomeDockSendButton: ComposerPressableButton {
 
     var appearance: Appearance = .idle {
         didSet { if appearance != oldValue { apply() } }
+    }
+
+    /// The dock's fade (`HomeDockView.contentPresence`), under the press's 0.7.
+    var presence: CGFloat = 1 {
+        didSet { if presence != oldValue { pressedAlphaChanged(isHighlighted && isEnabled) } }
     }
 
     private let iconView = IconView(.ionicons("arrow-up"), size: HomeDockLayout.Metrics.sendIconSize)
@@ -137,6 +236,10 @@ final class HomeDockSendButton: ComposerPressableButton {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not supported")
+    }
+
+    override func pressedAlphaChanged(_ pressed: Bool) {
+        alpha = (pressed ? 0.7 : 1) * presence
     }
 
     private func apply() {
@@ -196,6 +299,13 @@ final class HomeDockRowView: UIView {
         blocker.isHidden = true
         addSubview(blocker)
         applyValue()
+        // The link's value is the app's text, at the person's text size;
+        // the menu's is the system's body font, which follows on its own.
+        registerForTraitChanges(UIView.textSizeTraits) { (self: Self, _) in
+            guard self.isLink else { return }
+            self.applyValue()
+            self.setNeedsLayoutUpTheTree()
+        }
     }
 
     @available(*, unavailable)
@@ -212,7 +322,8 @@ final class HomeDockRowView: UIView {
 
     private func applyValue() {
         if isLink {
-            valueLabel.attributedText = TextStyles.homeDockRowValue.attributedString(value, color: UIColor(Palette.text), lineBreakMode: .byTruncatingTail)
+            let style = traitCollection.textEnvironment.map { TextStyles.homeDockRowValue.scaled($0.scale) } ?? TextStyles.homeDockRowValue
+            valueLabel.attributedText = style.attributedString(value, color: UIColor(Palette.text), lineBreakMode: .byTruncatingTail)
         } else {
             valueLabel.attributedText = nil
             valueLabel.font = UIFont.preferredFont(forTextStyle: .body)

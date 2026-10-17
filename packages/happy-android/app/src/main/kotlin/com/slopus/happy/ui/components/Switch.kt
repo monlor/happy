@@ -17,6 +17,9 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.ui.theme.HappyTheme
 
@@ -38,6 +41,8 @@ object SwitchSpec {
  * active track in `switch.track.active`, the inactive one in
  * `switch.track.inactive`, and the thumb in `switch.thumb.active` either
  * way (happy-app sets one thumb colour). Disabled is drawn at 50%.
+ * [label] is what TalkBack reads with the state: RN's platform switch reads
+ * none, so a row passes its title rather than leave the switch unnamed.
  */
 @Composable
 fun HappySwitch(
@@ -45,6 +50,7 @@ fun HappySwitch(
     onCheckedChange: ((Boolean) -> Unit)?,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    label: String? = null,
 ) {
     val colors = HappyTheme.colors.switch
     val track by animateColorAsState(if (checked) colors.trackActive else colors.trackInactive, label = "track")
@@ -61,6 +67,7 @@ fun HappySwitch(
                     Modifier
                 },
             )
+            .then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier)
             .testTag(SwitchTags.SWITCH),
         contentAlignment = Alignment.Center,
     ) {
@@ -71,7 +78,8 @@ fun HappySwitch(
         )
         Box(
             Modifier
-                .offset(x = thumbOffset)
+                // Read at placement, so the slide neither recomposes nor remeasures.
+                .offset { IntOffset(thumbOffset.roundToPx(), 0) }
                 .size(SwitchSpec.thumb)
                 .shadow(2.dp, CircleShape)
                 .background(colors.thumbActive, CircleShape)

@@ -1,5 +1,9 @@
 package com.slopus.happy.ui.home
 
+import com.slopus.happy.model.BotDraft
+import com.slopus.happy.model.rollBotFaceSeeds
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import com.slopus.happy.model.AgentType
 import com.slopus.happy.model.NewSessionDraft
 import com.slopus.happy.model.NewSessionLabels
@@ -7,8 +11,10 @@ import com.slopus.happy.model.NewSessionOptions
 import com.slopus.happy.model.NewSessionPage
 import com.slopus.happy.model.Settings
 import com.slopus.happy.model.WorktreeListing
+import com.slopus.happy.model.WorktreePaths
 import com.slopus.happy.model.WorktreeSelection
 import com.slopus.happy.model.WorktreeTarget
+import com.slopus.happy.model.formatPathRelativeToHome
 import com.slopus.happy.model.resolveNewSessionOptions
 import com.slopus.happy.model.selectingAgent
 import com.slopus.happy.model.selectingProject
@@ -133,6 +139,46 @@ class NewSessionServices(
         }
     }
 
+    /**
+     * ProjectGroup's "+" (the tablet sidebar grouped by project): the draft
+     * points at that exact checkout, a worktree by its own path, the rest by
+     * the repo's path from home. The machine goes first, as it clears the place.
+     */
+    fun prepareCheckout(machineId: String?, path: String?, homeDir: String?) {
+        val sessionPath = path.orEmpty()
+        val worktree = WorktreePaths.isWorktree(sessionPath)
+        val repoPath = if (worktree) WorktreePaths.repoPath(sessionPath) else sessionPath
+        drafts.change { draft ->
+            var next = if (machineId != null) draft.withMachine(machineId) else draft
+            if (repoPath.isNotEmpty()) next = next.withPath(formatPathRelativeToHome(repoPath, homeDir))
+            next.selectingWorktree(if (worktree) sessionPath else WorktreeSelection.NONE)
+        }
+    }
+
+    /** Logout (clearPersistence): the draft, its bot fields included, starts over. */
+    fun resetDraft() {
+        drafts.reset()
+        botState.value = BotDraft(seeds = rollBotFaceSeeds())
+    }
+
     /** The dock's text becomes the draft's at Send (MainView handleHomePromptSubmit). */
     fun setInput(text: String) = drafts.change { it.copy(input = text) }
+
+    private val botState = MutableStateFlow(BotDraft(seeds = rollBotFaceSeeds()))
+
+    /** useNewSessionDraft's bot fields, in memory: a restarted app offers a session. */
+    val bot: StateFlow<BotDraft> = botState.asStateFlow()
+
+    fun setCreatesBot(creating: Boolean) = botState.update { it.copy(creating = creating) }
+
+    fun setBotName(name: String) = botState.update { it.copy(name = name) }
+
+    fun pickBotFace(slot: Int) = botState.update { if (slot in it.seeds.indices) it.copy(slot = slot) else it }
+
+    fun rollBotFaces() = botState.update { it.copy(seeds = rollBotFaceSeeds()) }
+
+    /** A bot was made from [made]: the next starts from a clean name and fresh faces, and offers a session. */
+    fun botCreated(made: BotDraft) = botState.update { current ->
+        BotDraft(name = if (current.name == made.name) "" else current.name, seeds = rollBotFaceSeeds())
+    }
 }

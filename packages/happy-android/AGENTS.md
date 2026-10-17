@@ -12,15 +12,17 @@ architectures comparable (local store, delta sync, crypto layer).
   `sources/auth`) are the source of truth. Do not port legacy protocol paths:
   sessions and machines without a `dataEncryptionKey` are skipped, not
   decrypted with the account secret.
-- **No voice mode** for now.
+- **Voice** uses Happy's server-controlled allowance and RevenueCat paywalls,
+  with ElevenLabs over WebRTC. The pinned SDK source patch in
+  `vendor/elevenlabs` fixes audio focus, teardown and call-local mute.
 - **Offline first.** Everything the account has lives on the phone; the
   server is only asked for what changed since the last sync.
 - **Tool outputs are hidden by default** once the chat UI exists.
-- Built so far: crypto, account auth, the server setting, an empty home
-  screen, Settings (Account, Appearance), the local store with delta sync
-  and live updates, and onboarding and connect (restore by QR, Link Your
-  Computer, troubleshoot, terminal connect by QR, link and deep link), and
-  push notifications. Not built: chat and session UI.
+- The port includes auth, offline/live sync, home and session management,
+  chat/composer/tools, attachments, diffs/files, onboarding/connect, settings,
+  push, tablet layouts, purchases and voice. Experimental and social surfaces
+  remain excluded. Store validation needs the existing signing identity,
+  EAS build number and RevenueCat Google SDK key.
 
 ## Rules
 
@@ -113,6 +115,19 @@ cd tools/translations && npm run generate
 have goes in `res/values/strings_android.xml` (English only); add it to
 happy-app's catalogs instead where you can.
 
+Where happy-app calls `t()`, use the catalog key; never re-type its English.
+Where happy-app writes English inline instead (most of HomeDock, the machine
+screen, info.tsx's activity rows, the agents and push-diagnostics settings,
+useStartSessionFromDraft's errors), the port stays English too: on screens, in
+`strings_<area>.xml` (`strings_home.xml`, `strings_tablet.xml`,
+`strings_push.xml`, `strings_android.xml`) or inline with a note naming the
+happy-app file. Text built outside composition stays a Kotlin literal, word for
+word as happy-app has it: tool titles (`chat/tools`), slash-command
+descriptions (`autocomplete`), reducer events, spawn, worktree and changes
+errors, and the push diagnostics in `model/settings/Push.kt`. So do brand and
+product names ("Claude Code", "OpenAI Codex", "Happy Engineering"). When
+happy-app moves one of these into its catalogs, switch to the key.
+
 How a catalog entry becomes a resource:
 
 - **Name**: the key path, camelCase to snake_case, dots to `_`
@@ -169,7 +184,8 @@ against ours in both directions.
 the same applicationId and is signed with the same certificate as the Play
 build.** A different certificate cannot install over it at all, and a
 reinstall loses the Keystore key. Release and preview builds must be signed
-with the existing EAS/Play signing key; no signing config is checked in.
+with the existing EAS/Play signing key; no signing config is checked in
+(see "Versions and signing").
 
 The custom server URL is not carried over: happy-app keeps it in MMKV
 (`server-config`), which this app does not read.
@@ -200,6 +216,30 @@ outbox); `messageChanges(id)` and `outboxChanges(id)` are its per-chat views.
 Records are stored decrypted (the sandbox and file-based encryption protect
 them at rest, as MMKV does for happy-app); their data keys are stored wrapped.
 
+**How big it gets, and logout.** happy-app keeps no messages on disk at all:
+they live in memory for the run (its decrypt cache holds 1000) and are
+fetched again on the next start. Here they stay in SQLite so a chat opens
+offline and at once, and nothing prunes them: a session's rows go when the
+session is deleted (`ON DELETE CASCADE`), and only chats that were opened
+are stored, each from its newest page back as far as the reader scrolled
+plus the five-page background budget. That is the bound, recorded rather
+than enforced; a chat's rows are one contiguous run of seqs, so trimming
+the middle would break paging. Migrations keep everything from schema 1 on
+(`DatabaseMigrationTest`, one test per hop). Logout (`AppGraph.logout`):
+the `beforeLogout` hooks first, while signed in (the push unregister); then
+the database, local settings, the What's New marker, the new-session draft
+(stored and in memory, `afterLogoutWipe`), picked-image copies and the
+image loader's caches; then the credentials. The server choice stays
+(`LogoutWipeTest`).
+
+**Large sessions** (`perf/LargeDataTest`, `perf/ChatDisplayTimingTest`).
+The reducer, ChatFeed and HomeListModel derive off the collecting thread
+and stay linear. What still runs in ChatList's composition per snapshot was
+measured at 5040 rows (JVM, median after warm-up): `groupChatRowsForDisplay`
+1.3–2.6 ms, `chatListItems` 0.5–0.8 ms, `WorkGroupExpansion.observed`
+0.2 ms. Below the 8 ms line, so it stays on the main thread; the guard fails
+only at 50 ms, a quadratic rather than noise.
+
 **Live updates** (`net/SocketIoClient`, `sync/LiveUpdates`). The
 `/v1/updates` socket (apiSocket.ts) with `clientType: user-scoped`, the
 token, `happyClient` and `appState` read at every connect; `app-state` is
@@ -221,10 +261,16 @@ from the update itself), `update-session` (metadata/agentState with their
 versions, three-state `projectId`; control hand-off refetches messages),
 `delete-session`, `new-machine` (carries its data key), `update-machine`,
 `delete-machine`, `update-account` (profile fields, settings with version;
-pending local settings stay on top), `delete-project` (resync). Projects,
-artifacts, friends, feed and KV updates are ignored until those features
-exist. Anything that cannot be applied alone (unknown session or machine)
-asks for the delta sync instead of guessing.
+pending local settings stay on top), `new-project`/`update-project` (the
+project catalog refetches, `ProjectServices`), `delete-project` (the catalog
+and a resync). Artifacts, friends (`relationship-updated`) and feed updates
+are ignored until those features exist; KV updates are ignored because KV is
+unused by happy-app (nothing imports apiKv.ts). Not copied on purpose:
+`update-session`'s account `seq` (here a session's `seq` is its message
+counter, which history sync relies on), and the `session-event` ephemeral
+(happy-app's browser-tab unread counter). Anything that cannot be applied alone (unknown session
+or machine, a `new-session` body that does not decode) asks for the delta
+sync instead of guessing.
 
 **Presence** (`sync/Presence`, `account.presence`). `activity` and
 `machine-activity` ephemerals and `usage` live in memory only, never in
@@ -241,7 +287,12 @@ the newest page (`before_seq`), catches up forward, then prefetches up to
 five older pages per session per sign-in. `loadOlder(sessionId)` loads one
 page on demand and returns whether the run moved back;
 `paging(sessionId)` gives `isLoaded`, `hasMoreOlder`, `isLoadingOlder`. A
-backward page that does not move the cursor ends history.
+backward page that does not move the cursor ends history. `preload(sessionId)`
+is Home's press-down (`HomeListCallbacks.onPressDown`, sync.ts
+`preloadSession`): the newest page only, one session at a time (another
+touch drops it), skipped for a chat that is open or already stored, never
+retried, and no visit, read or older history. A plan-mode switch in that page
+waits for the chat to open (`StoredSource.PRELOAD`/`OPENED`).
 
 **Sending** (`sync/MessageSender`, `account.sender`). `send(sessionId, text,
 meta)` builds the user record exactly as sync.ts `sendMessage` does (sentFrom
@@ -286,6 +337,23 @@ debounced 250 ms, picks and clears at once, one write in flight, adopt a
 remote draft stamped the same or later, restore from disk and flush on
 reconnect. `setText`, `clearDraft`, `mirrors` / `mirror(id)`.
 
+### Recreation and process death
+
+The manifest handles orientation, screen size and uiMode, so rotation,
+folding and a dark/light switch don't recreate the activity. A font scale
+or locale change does, and so does the system after process death.
+`StateRestorationTest` covers both: the same graph for a recreation, a new
+graph over the same database and keys for process death.
+
+- Kept through both: the open screen (the nav back stack is saved), the
+  chat's composer draft (the session composer's mirror is in the
+  database), the chat list's scroll position, the home dock's text and
+  focus (`rememberSaveable`), and an open composer or dock picker.
+- Kept through a recreation only: Restore's QR request (a ViewModel).
+- Lost, as in happy-app: pending chats (memory only), open alerts and
+  confirmations, an in-flight Resume or Stop spinner, Restore's QR request
+  after process death.
+
 ## Settings
 
 `AppGraph.settings` (`SettingsRepository`) is the account's settings as
@@ -308,6 +376,10 @@ banner needs.
 
 ## Build and test
 
+Run agent Android builds, unit tests and device checks on Kirill's Mac Mini
+over SSH, syncing the sources first. The commands below run there; CI keeps
+its configured Linux runner.
+
 ```
 cd packages/happy-android
 ./gradlew assembleDebug            # app/build/outputs/apk/debug/app-debug.apk
@@ -318,6 +390,29 @@ cd packages/happy-android
 Build types map to happy-app's variants and application ids: `debug` →
 `com.slopus.happy.dev`, `preview` → `com.slopus.happy.preview`, `release` →
 `com.ex3ndr.happy`.
+
+### Versions and signing
+
+- `versionName` is happy-app's `version`, read from `app.config.js` at
+  configuration time, so the two apps never drift. `HAPPY_VERSION_NAME` or
+  `-Phappy.versionName` overrides it.
+- `versionCode` is EAS's remote, auto-incremented build number
+  (`eas.json` `appVersionSource: remote`). There is no counter in the repo:
+  a store build passes the next number as `HAPPY_VERSION_CODE` or
+  `-Phappy.versionCode`, above the last RN upload. Local builds get 1.
+- Signing comes from the environment (`HAPPY_RELEASE_KEYSTORE`,
+  `_KEYSTORE_PASSWORD`, `_KEY_ALIAS`, `_KEY_PASSWORD`, and the same with
+  `HAPPY_PREVIEW_`) or a gitignored `keystore.properties`
+  (`keystore.properties.example` lists the keys). Without them `release`
+  builds unsigned and `preview` debug-signed, so `assembleRelease` works
+  anywhere, CI included.
+- A signed release or preview build without an explicit versionCode fails in
+  `pre<Variant>Build`, before R8, rather than at the Play console.
+- Shipping goes through the `release` skill like every other release.
+- CI: `.github/workflows/happy-android.yml` runs `assembleDebug
+  assembleRelease testDebugUnitTest :crypto:test` on changes under
+  `packages/happy-android/` (and happy-app's `app.config.js`, which sets the
+  version). It has no signing secrets.
 
 The JDK toolchain (21) is provisioned by the foojay resolver if the machine
 only has a JRE. In the agent sandbox Gradle needs network and local sockets:
@@ -382,13 +477,24 @@ decodes the drawn pixels back to the link.
 ### Deep links
 
 `happy://` links route as expo-router routes them for happy-app (the host
-is the first path segment): `happy://terminal?<key>` opens the confirm
-screen (terminal/index.tsx), `/terminal/connect` explains that the web link
-needs a browser, `/session/<id>` goes to `onOpenSession`. The release build
-adds app.config.js's production intent filter for
+is the first path segment), and so do `https://app.happy.engineering/<path>`
+links. Every app path maps to its Compose route (`parseDeepLink` in
+`ui/connect/DeepLinks.kt`): `terminal?<key>` opens the confirm screen,
+`/terminal/connect` explains that the web link needs a browser,
+`/session/<id>` goes to `onOpenSession`, and `/session/<id>/info|changes|
+file?path=<btoa>|message/<mid>`, `/machine/<id>`, `/new`, `/settings/*`,
+`/server`, `/restore[/manual]`, `/troubleshoot`, `/changelog` and
+`/onboarding/settings` open their screens. Paths with no Android screen
+(excluded features, `session/recent`, the files browser) open Home. The
+release build adds app.config.js's production intent filter for
 `https://app.happy.engineering` (`src/release/AndroidManifest.xml`), with
-`autoVerify`; verification needs the release key's fingerprint in that
-site's `assetlinks.json`. Links while signed out are dropped.
+`autoVerify`. The site's `assetlinks.json` (happy-app's
+`public/.well-known/assetlinks.json`) already lists `com.ex3ndr.happy` with
+one fingerprint, presumably Play's app-signing key that the React Native app
+verifies with, so a Play-distributed build should verify as it does; a build
+signed with only the upload key won't. Signed out, only the screens that need
+no account (server, restore, troubleshoot, changelog, onboarding settings)
+open; other links are dropped rather than pushed onto empty signed-in screens.
 
 ## Push
 
@@ -420,6 +526,14 @@ What happy-app does with expo-notifications, without Expo:
   from notificationRouting.ts's rules (a `/session/<id>` url, else
   `sessionId`); `DeepLinks.offer` turns it into `DeepLink.Session`, which
   `DeepLinkEffect` hands to `onOpenSession` (the chat's).
+- **Background sends** (sync.ts's watchdog notifications,
+  `push/BackgroundSendNotifications.kt`): MessageSender's watchdog fails
+  rows unsent 30 s into the background; this observer of the store's
+  outbox and `AppGraph.isForeground` schedules "Message not sent" with an
+  inexact AlarmManager alarm (`BackgroundSendReceiver`) when the app leaves
+  with unsent rows, cancels it on return or once they are sent, and posts
+  "Message failed" when rows fail with `MessageSender.BACKGROUND_FAILURE`.
+  Both go on the `default` channel and open the app.
 - **Settings › Account's push rows** use `rememberPushRegistration(graph)`,
   Settings' `PushRegistration` over the same registrar and permission
   (pushRegistration.ts's getPushPermissionInfo,
@@ -441,6 +555,48 @@ only if:
   different Firebase project needs its key uploaded to Expo);
 - the device has Play services (otherwise unsupported, as FCM has no
   token there).
+
+## Purchases
+
+`AppGraph.purchases` owns RevenueCat's optional account lifecycle. The public
+Google SDK key is supplied by `EXPO_PUBLIC_REVENUE_CAT_GOOGLE` or
+`-Phappy.revenueCatGoogleKey`; an empty key leaves purchases unavailable.
+`purchases.purchases` is the flat `StateFlow<Purchases>` from purchases.ts,
+cached per server/account and wiped on logout. Configure with the token's
+server-issued subject as appUserID. Startup/foreground and successful paywalls
+sync purchases and fetch customer info. SDK operations serialize with paywalls;
+account generations reject stale results after logout, account or server changes.
+
+`suspend purchases.presentPaywall(flow)` (also `Paywall.present`) uses the
+current offering and the `flow` custom variable, never an offering named after
+the flow. `PaywallHost` at app scope renders RevenueCat's native Compose dialog
+and dismisses on account changes. Purchased and Restored return
+`PaywallOutcome(success = true, purchased = true)` after refresh; closing returns
+success with purchased false. `hasPro()` reads the real entitlement for voice;
+Settings' Support us row additionally treats debug builds as Pro, as RN does.
+The row is inert for Pro and otherwise presents `voluntary_support`.
+
+## Voice
+
+`AppGraph.voice` owns one `VoiceEngine`. It requests microphone permission
+before allocating a server conversation, applies server denial/paywall rules,
+and connects the ElevenLabs transport. `AppGraph.purchases` provides real Pro
+state and paywalls; debug-only Support us behavior does not grant voice Pro.
+Usage and credentials re-authenticate with the account secret when voice uses
+a different server. Voice language codes come from `VoiceLanguages`.
+
+`StoreVoiceContext` forwards normalized messages, permission prompts, ready
+events and focused-session context. Histories load lazily with a 50-row cap;
+events arriving during SDK connection are buffered. Client tools validate
+their parameters and use the existing sender/permission RPCs for the bound
+account. Logout, failed start and stop invalidate callbacks and close the call.
+
+`vendor/elevenlabs/UPSTREAM.md` records the pinned MIT source archive and the
+audio lifecycle patch. LiveKit owns audio focus and device routing; call mute
+never changes global microphone mute. Room cleanup completes logically before
+stop returns, and LiveKit's audio thread releases OS focus asynchronously.
+Verify focus, recording and communication mode on a device after changes.
+`testDebugUnitTest` includes the SDK's lifecycle tests as well as app tests.
 
 ## Attachments and images
 
@@ -480,3 +636,30 @@ hand-rolled loader would re-implement caching and downsampling. The
 loader uses its own OkHttp client without Happy headers (these URLs are
 third-party). Tests swap it through `LocalImageLoader` with coil-test's
 `FakeImageLoaderEngine`.
+
+### Mermaid
+
+`ui/components/MermaidView.kt` renders ```` ```mermaid ```` blocks the way
+happy-app's native MermaidRenderer does: a WebView loading mermaid@11 from
+jsdelivr, its height posted back through a `ReactNativeWebView` JS
+interface (200 until reported, capped at 600). Where there is no WebView
+(Robolectric, devices without a provider) `LocalMermaidWebView` is false and
+MarkdownView's code block shows instead; layout tests see the code block
+unless they provide `true`.
+
+## Autocomplete
+
+`@` file mentions and `/` commands in the chat composer. Logic is in
+`autocomplete/` (plain Kotlin, unit-tested against happy-app's own test
+cases): `findActiveWord`/`applySuggestion`, `searchCommands` (session
+metadata's slash commands and skills, minus `IGNORED_COMMANDS`), and
+`FileSearchCache` (`rg --files --follow` over Sync's session ripgrep RPC,
+kept 5 minutes). Ranking is `Fuse.kt`, a port of the Fuse.js 7.1 subset
+happy-app uses; `FuseTest` holds scores produced by fuse.js itself, so
+regenerate them from fuse.js if the options change rather than editing
+them by hand. The UI is `ui/autocomplete/`: ChatRoute provides
+`LocalSuggestionSource`, ChatScreen passes `ComposerSuggestions` into
+ChatComposer's `overlay` slot and the shared `ComposerCursor` into its
+`cursor` parameter (the composer reports the selection, places the cursor
+after an insert, and offers hardware keys to `cursor.onKey` first: arrows,
+Enter/Tab and Escape drive the list while it shows).

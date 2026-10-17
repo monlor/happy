@@ -27,6 +27,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
@@ -217,7 +220,8 @@ private fun DropdownOption(label: String, selected: Boolean, onClick: () -> Unit
         modifier = Modifier
             .fillMaxWidth()
             .background(if (selected) colors.glass.backgroundSubtle else Color.Transparent)
-            .clickable(onClick = onClick)
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .semantics { this.selected = selected }
             .defaultMinSize(minHeight = AppearanceSpec.optionMinHeight)
             .testTag(AppearanceTags.OPTION)
             .padding(horizontal = AppearanceSpec.optionPaddingHorizontal),
@@ -236,7 +240,7 @@ private fun SwitchItem(title: String, subtitle: String, icon: Ionicon, iconColor
         title = title,
         subtitle = subtitle,
         icon = { ItemIcon(icon, iconColor) },
-        rightElement = { HappySwitch(checked = checked, onCheckedChange = onChange) },
+        rightElement = { HappySwitch(checked = checked, onCheckedChange = onChange, label = title) },
     )
 }
 
@@ -251,6 +255,13 @@ private fun SwitchItem(title: String, subtitle: String, icon: Ionicon, iconColor
  * icons in the header and the list). Rows are standard [Item]s with 29 icons
  * and [HappySwitch]es; a dropdown opens under its row, 6 padding above and
  * below its options, and opening one closes the other.
+ *
+ * Not ported: a theme change doesn't set the platform's night mode
+ * (happy-app's Appearance.setColorScheme). Compose and the system bars
+ * follow the setting; only platform-drawn chrome such as the text selection
+ * toolbar keeps the system's. Doing it needs UiModeManager (API 31+) plus
+ * recreating the activity for its window theme, which MainActivity avoids
+ * by handling uiMode itself.
  */
 @Composable
 fun AppearanceScreen(

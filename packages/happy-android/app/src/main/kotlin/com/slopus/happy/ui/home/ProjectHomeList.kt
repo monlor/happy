@@ -26,8 +26,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.collapse
+import androidx.compose.ui.semantics.expand
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -44,9 +49,10 @@ import com.slopus.happy.model.VisibleGitChanges
 import com.slopus.happy.model.WorkspaceOrigin
 import com.slopus.happy.model.WorktreeToggle
 import com.slopus.happy.model.compactCount
+import com.slopus.happy.model.projectGitChanges
 import com.slopus.happy.model.resolveFlatRowPresentation
-import com.slopus.happy.model.visibleGitChanges
 import com.slopus.happy.model.workspaceOrigin
+import com.slopus.happy.ui.chat.light
 import com.slopus.happy.ui.components.Avatar
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
@@ -138,7 +144,7 @@ private fun MachineHeaderRow(machineId: String?, machineName: String, callbacks:
         modifier = Modifier
             .fillMaxWidth()
             .testTag(ProjectListTags.MACHINE)
-            .then(if (machineId != null) Modifier.clickable { callbacks.onOpenMachine(machineId) } else Modifier)
+            .then(if (machineId != null) Modifier.clickable(role = Role.Button) { callbacks.onOpenMachine(machineId) } else Modifier)
             .padding(start = ProjectListSpec.rowPaddingX, end = ProjectListSpec.rowPaddingX, top = 14.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -189,7 +195,7 @@ private fun AttentionDot(blocked: Boolean, unread: Boolean) {
 
 @Composable
 private fun ProjectGitChanges(session: SessionRowData?) {
-    val changes: VisibleGitChanges = session?.let(::visibleGitChanges) ?: return
+    val changes: VisibleGitChanges = session?.let(::projectGitChanges) ?: return
     val colors = HappyTheme.colors
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
         if (changes.approximate) Text("≈", style = ProjectListSpec.gitApproximate, color = colors.textSecondary)
@@ -217,8 +223,10 @@ private fun ProjectCardRow(project: ProjectHomeEntry, callbacks: HomeListCallbac
             .fillMaxWidth()
             .height(ProjectListSpec.projectRow)
             .testTag(ProjectListTags.PROJECT)
+            .sessionPressDown(session?.id, callbacks)
             .combinedClickable(
                 enabled = session != null || origin != null,
+                role = Role.Button,
                 onClick = { session?.let { callbacks.onOpen(it.id) } },
                 onLongClick = origin?.let { { callbacks.onProjectMenu(project.name, it) } },
             )
@@ -227,7 +235,7 @@ private fun ProjectCardRow(project: ProjectHomeEntry, callbacks: HomeListCallbac
     ) {
         AvatarLane {
             project.avatarSession?.let {
-                Avatar(id = it.avatarId, size = ProjectListSpec.avatar, imageUri = it.projectAvatarUri)
+                Avatar(id = it.avatarId, size = ProjectListSpec.avatar, imageUri = it.projectAvatarUri, thumbhash = it.projectAvatarThumbhash)
             }
             if (project.worktreeCount > 0) {
                 Box(
@@ -253,7 +261,7 @@ private fun ProjectCardRow(project: ProjectHomeEntry, callbacks: HomeListCallbac
                     modifier = Modifier
                         .size(ProjectListSpec.addButtonWidth, ProjectListSpec.addButtonHeight)
                         .testTag(ProjectListTags.PROJECT_ADD)
-                        .clickable { callbacks.onCreateWorkspace(origin) },
+                        .clickable(role = Role.Button) { callbacks.onCreateWorkspace(origin) },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(Ionicon.Add, size = 18.dp, color = colors.textSecondary, contentDescription = stringResource(R.string.home_create_workspace_in, project.name))
@@ -295,7 +303,8 @@ private fun WorktreeRow(worktree: ProjectWorktree, last: Boolean, callbacks: Hom
             .fillMaxWidth()
             .height(ProjectListSpec.worktreeRow)
             .testTag(ProjectListTags.WORKTREE)
-            .clickable { callbacks.onOpen(worktree.session.id) }
+            .sessionPressDown(worktree.session.id, callbacks)
+            .clickable(role = Role.Button) { callbacks.onOpen(worktree.session.id) }
             .padding(horizontal = ProjectListSpec.rowPaddingX),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -318,12 +327,23 @@ private fun WorktreeToggleRow(toggle: WorktreeToggle, callbacks: HomeListCallbac
     val colors = HappyTheme.colors
     val label = if (toggle.expanded) stringResource(R.string.sidebar_show_fewer_workspaces)
     else stringResource(R.string.sidebar_show_all_workspaces, toggle.worktreeCount)
+    val haptics = LocalHapticFeedback.current
+    // ProjectHomeList.tsx's toggle: a light tick, then the list changes.
+    val flip = {
+        haptics.light()
+        callbacks.onToggleProject(toggle.projectId)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(ProjectListSpec.worktreeRow)
             .testTag(ProjectListTags.TOGGLE)
-            .clickable { callbacks.onToggleProject(toggle.projectId) }
+            .clickable(role = Role.Button, onClick = flip)
+            .semantics {
+                // accessibilityState={{ expanded }}
+                if (toggle.expanded) collapse { flip(); true }
+                else expand { flip(); true }
+            }
             .padding(horizontal = ProjectListSpec.rowPaddingX),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -351,11 +371,12 @@ private fun ChatRow(session: SessionRowData, bot: Boolean, archived: Boolean, ca
             .height(ProjectListSpec.botRow)
             .alpha(if (archived) ProjectListSpec.ARCHIVED_ALPHA else 1f)
             .testTag(ProjectListTags.CHAT)
-            .clickable { callbacks.onOpen(session.id) }
+            .sessionPressDown(session.id, callbacks)
+            .clickable(role = Role.Button) { callbacks.onOpen(session.id) }
             .padding(horizontal = ProjectListSpec.rowPaddingX),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AvatarLane { Avatar(id = session.avatarId, size = ProjectListSpec.avatar, bot = bot, imageUri = session.avatarUri) }
+        AvatarLane { Avatar(id = session.avatarId, size = ProjectListSpec.avatar, bot = bot, imageUri = session.avatarUri, thumbhash = session.avatarThumbhash) }
         RowName(session.name ?: stringResource(R.string.session_new_chat), presentation.shimmerTitle, ProjectListSpec.projectName)
         Box(modifier = Modifier.padding(start = ProjectListSpec.trailingGap)) {
             if (dot != null) {
