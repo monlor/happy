@@ -19,9 +19,8 @@ private struct NoSockets: WebSocketConnector {
     }
 }
 
-/// A chat draws its header, avatar and tabs from the account's newest home
-/// snapshot as it is made (`ChatServices.seed`), before any observation
-/// answers, and the store's own answer, the same, changes nothing.
+/// A chat projects the newest home snapshot off main during navigation.
+/// Its observations start from that seed and an equal answer changes nothing.
 @MainActor
 final class HostedChatSeedTests: XCTestCase {
     private func signedIn() async throws -> (AccountController, AccountSession) {
@@ -54,13 +53,19 @@ final class HostedChatSeedTests: XCTestCase {
         return condition()
     }
 
-    func testAChatHasItsHeaderAndTabsAsItIsMade() async throws {
+    func testAChatPushesItsShellThenBuildsTheHeaderAndTabs() async throws {
         let (controller, _) = try await signedIn()
         let context = AppContext(account: controller, variant: .development, version: "test")
         let chat = ChatViewController(context: context, session: try XCTUnwrap(controller.session), sessionId: "seeded-tab-4")
         chat.loadViewIfNeeded()
-
-        // Nothing awaited yet: all of it is the seed.
+        XCTAssertEqual(chat.navigationItem.title, "Scroll indicator")
+        XCTAssertNil(Self.subview(AgentInputCardView.self, in: chat.view))
+        let scene = try await hostedActiveScene()
+        let original = scene.keyWindow
+        let window = hostedKeyWindow(in: scene, root: UINavigationController(rootViewController: chat))
+        defer { window.isHidden = true; original?.makeKey() }
+        let installed = try await until { chat.contentInstalled && chat.navigationItem.title == "chat-nav" }
+        XCTAssertTrue(installed)
         XCTAssertEqual(chat.navigationItem.title, "chat-nav", "the header names the checkout")
         let avatar = chat.navigationItem.rightBarButtonItems?.compactMap { $0.customView as? ChatHeaderAvatarControl }.first
         XCTAssertEqual(avatar?.isHidden, false, "the avatar")
@@ -68,8 +73,7 @@ final class HostedChatSeedTests: XCTestCase {
         let strip = try XCTUnwrap(Self.subview(ChatWorktreeTabStrip.self, in: chat.view))
         XCTAssertFalse(strip.isHidden, "the strip")
 
-        // The store's own answer, in within a few frames, agrees and
-        // changes nothing.
+        // The store's own answer agrees with the background seed.
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(chat.sessionUpdates, 0, "the store's record changed the screen")
         XCTAssertEqual(chat.navigationItem.title, "chat-nav")

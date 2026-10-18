@@ -24,10 +24,83 @@ private struct NoSockets: WebSocketConnector {
 /// sessions (`SeededAccount`): pushed from a list, its worktree strip
 /// switching chats in place. Hosted, so the screens are in a window of a
 /// real scene, under a real navigation bar, and every frame of a
-/// transition is sampled: a chat is readied before it is shown
-/// (`ChatOpening`), so nothing in it moves after its first frame.
+/// transition is sampled. Navigation starts with a shell; once deferred
+/// content is ready, its geometry remains stable.
 @MainActor
 final class HostedChatNavigationTests: XCTestCase {
+    func testPushInstallsOnlyTheShellBeforeReturning() async throws {
+        let (controller, _) = try await signedIn()
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let (_, navigation, root) = try await hosted()
+        root.push(.session(id: "seeded-tab-4"), context: context)
+        let chat = try XCTUnwrap(navigation.topViewController as? ChatViewController,
+                                 "navigation must start synchronously, before any readiness callback")
+        XCTAssertFalse(chat.contentInstalled)
+        XCTAssertEqual(chat.navigationItem.title, "Scroll indicator")
+        XCTAssertNil(Self.subview(ChatListView.self, in: chat.view))
+        XCTAssertNil(Self.subview(AgentInputCardView.self, in: chat.view))
+        let ready = try await until { chat.contentInstalled && chat.openingReport != nil }
+        XCTAssertTrue(ready)
+        XCTAssertNotNil(Self.subview(AgentInputCardView.self, in: chat.view))
+        XCTAssertEqual(chat.navigationItem.title, "chat-nav")
+        print("CHATCONSTRUCTION milliseconds \(chat.constructionStageSeconds.map { $0 * 1000 })")
+        await controller.signOut()
+    }
+
+    func testPopBeforeTheFirstFrameCancelsContentConstruction() async throws {
+        let (controller, _) = try await signedIn()
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let (_, navigation, root) = try await hosted()
+        root.push(.session(id: "seeded-tab-4"), context: context, animated: false)
+        let chat = try XCTUnwrap(navigation.topViewController as? ChatViewController)
+        navigation.popViewController(animated: false)
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(chat.contentInstalled)
+        XCTAssertNil(Self.subview(AgentInputCardView.self, in: chat.view))
+        XCTAssertNil(chat.openingReport)
+        await controller.signOut()
+    }
+
+    func testAccountChangeCancelsContentForTheOldAccount() async throws {
+        let (controller, _) = try await signedIn()
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let (_, navigation, root) = try await hosted()
+        root.push(.session(id: "seeded-tab-4"), context: context, animated: false)
+        let chat = try XCTUnwrap(navigation.topViewController as? ChatViewController)
+        await controller.signOut()
+        let completedStages = chat.constructionStageSeconds.count
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(chat.constructionStageSeconds.count, completedStages,
+                       "no additional views may be constructed for a signed-out account")
+    }
+
+    func testUpdatesDuringConstructionAndAfterReadinessReachTheHeader() async throws {
+        let (controller, account) = try await signedIn()
+        let store = account.store
+        try await Task.detached {
+            try store.addPendingSettings(["sessionListGrouping": .string("flat")])
+        }.value
+        let flat = try await until {
+            account.homeFeed.latest.map { AccountSettings($0.settings).sessionListGrouping == .flat } == true
+        }
+        XCTAssertTrue(flat)
+        let record = try XCTUnwrap(account.homeFeed.latest?.sessions.first { $0.id == "seeded-tab-4" })
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let (_, navigation, root) = try await hosted()
+        root.push(.session(id: record.id), context: context)
+        let chat = try XCTUnwrap(navigation.topViewController as? ChatViewController)
+        for (version, title) in [(2, "Changed while opening"), (3, "Changed after opening")] {
+            var metadata = record.metadata?.objectValue ?? [:]
+            metadata["summary"] = .object(["text": .string(title), "updatedAt": .number(Double(version))])
+            let payload = VersionedPayload(version: version, cipher: "updated", value: JSONValue.object(metadata))
+            _ = try await Task.detached {
+                try store.applySessionUpdate(id: record.id, metadata: payload, agentState: nil, projectId: nil)
+            }.value
+            let updated = try await until { chat.navigationItem.title == title && chat.openingReport != nil }
+            XCTAssertTrue(updated, "the newest session must survive deferred construction and remain observed")
+        }
+        await controller.signOut()
+    }
     private func signedIn() async throws -> (AccountController, AccountSession) {
         let controller = AccountController(
             serverConfig: ServerConfig(storage: InMemoryKeyValueStore()),
@@ -100,13 +173,15 @@ final class HostedChatNavigationTests: XCTestCase {
 
     // MARK: A push
 
-    func testAPushedChatDoesNotMoveAfterItsFirstFrame() async throws {
+    func testAPushedChatDoesNotMoveAfterItsContentIsReady() async throws {
         let (controller, _) = try await signedIn()
         let context = AppContext(account: controller, variant: .development, version: "test")
         let (_, navigation, root) = try await hosted()
         let sampler = ChatFrameSampler(navigation: navigation)
         let chat = try await shown(after: { root.push(.session(id: "seeded-tab-4"), context: context) }, in: navigation)
         try await settled(chat, in: navigation)
+        let sampled = try await until { sampler.frames.filter { $0.chat === chat && $0.inWindow && $0.ready }.count >= 12 }
+        XCTAssertTrue(sampled, "sample the ready chat across enough display frames")
         sampler.stop()
         let report = try XCTUnwrap(chat.openingReport)
         print(String(format: "OPENING push ready after %.1f ms, missing %@", report.elapsed * 1000, report.missing.description))
@@ -134,6 +209,8 @@ final class HostedChatNavigationTests: XCTestCase {
         let strip = try XCTUnwrap(Self.subview(ChatWorktreeTabStrip.self, in: first.view))
         let switched = try await shown(after: { strip.onSelect?("seeded-tab-3") }, in: navigation)
         try await settled(switched, in: navigation)
+        let sampled = try await until { sampler.frames.filter { $0.chat === switched && $0.inWindow && $0.ready }.count >= 12 }
+        XCTAssertTrue(sampled, "sample the ready tab across enough display frames")
         sampler.stop()
         let report = try XCTUnwrap(switched.openingReport)
         print(String(format: "OPENING switch ready after %.1f ms, missing %@", report.elapsed * 1000, report.missing.description))
@@ -192,8 +269,8 @@ final class HostedChatNavigationTests: XCTestCase {
         XCTAssertTrue(Set(report.missing).isSubset(of: ChatOpening.mayComeLate), "only the rows may be late: \(report.missing)")
         let shown = sampler.frames.drop { !$0.inWindow }
         print("OPENING late rows: insets \(shown.first.map { "\($0.insets)" } ?? "-") → \(shown.last.map { "\($0.insets)" } ?? "-"), rows \(shown.first?.rows ?? 0) → \(shown.last?.rows ?? 0)")
-        XCTAssertGreaterThanOrEqual(report.elapsed, ChatOpening.cap)
-        XCTAssertLessThan(report.elapsed, ChatOpening.cap + 0.05, "shown at the cap")
+        // Readiness is diagnostic; it no longer delays navigation.
+        XCTAssertNotNil(chat.parent)
         Self.assertStill(sampler.frames, report: report, "late rows")
         Self.assertSeeded(chat, report, "late rows")
         await controller.signOut()
@@ -308,7 +385,7 @@ final class HostedChatNavigationTests: XCTestCase {
     /// Every frame from the chat's first in the window: nothing in it moves
     /// or animates. Past the cap only the rows may land late.
     private static func assertStill(_ frames: [ChatFrame], report: ChatOpening.Report, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
-        let shown = frames.drop { !$0.inWindow }
+        let shown = frames.drop { !$0.inWindow || !$0.ready }
         guard let first = shown.first else {
             XCTFail("\(label): the chat was never in the window", file: file, line: line)
             return
@@ -347,6 +424,7 @@ struct ChatFrame {
     weak var chat: ChatViewController?
     var time: CFTimeInterval
     var inWindow: Bool
+    var ready: Bool
     /// The title capsule's frame in the bar.
     var title: CGRect
     var avatar: Bool
@@ -408,6 +486,7 @@ final class ChatFrameSampler: NSObject {
             chat: chat,
             time: link.timestamp,
             inWindow: root.window != nil,
+            ready: chat.openingReport != nil,
             title: title.flatMap { $0.window == nil ? nil : $0.convert($0.bounds, to: navigation.navigationBar) } ?? .zero,
             avatar: avatar.map { !$0.isHidden && $0.window != nil } ?? false,
             strip: frame(strip),

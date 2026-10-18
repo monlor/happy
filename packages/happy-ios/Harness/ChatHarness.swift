@@ -49,6 +49,10 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
     private var controller: AccountController?
     private var probe: ChatScrollProbe?
     private var whatsNew: WhatsNewProbe?
+    #if DEBUG || HAPPY_FIXTURES
+    private var homeRenderer: HomeRendererHarness?
+    private var realArchive: RealArchiveHarness?
+    #endif
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
@@ -58,6 +62,16 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.makeKeyAndVisible()
         self.window = window
         let arguments = ProcessInfo.processInfo.arguments
+        #if DEBUG || HAPPY_FIXTURES
+        if arguments.contains("-real-archive") {
+            realArchive = RealArchiveHarness(window: window)
+            return
+        }
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "home" {
+            homeRenderer = HomeRendererHarness(window: window, arguments: arguments)
+            return
+        }
+        #endif
         if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "whatsnew" {
             whatsNew = WhatsNewProbe(window: window, arguments: arguments)
             return
@@ -124,7 +138,7 @@ final class HarnessWindow: UIWindow {
 
 /// The probe's element: its value is worked out when it is read, so nothing
 /// runs between reads and the app can go idle for XCUITest.
-private final class ProbeElement: UIView {
+final class ProbeElement: UIView {
     var read: (() -> String)?
 
     override var accessibilityValue: String? {

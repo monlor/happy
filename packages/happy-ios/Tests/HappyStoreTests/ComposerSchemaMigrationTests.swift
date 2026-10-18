@@ -11,6 +11,7 @@ final class ComposerSchemaMigrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("store.sqlite")
         let before: [String: [Row]]
+        let originalColumns: [String: [String]]
         do {
             let writer = try DatabaseQueue(path: url.path)
             try await writer.write { db in try db.execute(sql: Self.originalV3) }
@@ -18,6 +19,9 @@ final class ComposerSchemaMigrationTests: XCTestCase {
             try Schema.migrator.migrate(writer, upTo: "v5")
             try await writer.write { db in try db.execute(sql: Self.cachedData) }
             before = try Self.contents(writer)
+            originalColumns = try await writer.read { db in
+                try Dictionary(uniqueKeysWithValues: Self.preservedTables.map { ($0, try db.columns(in: $0).map(\.name)) })
+            }
             try await writer.read { db in
                 XCTAssertFalse(try db.tableExists("composerState"))
                 XCTAssertFalse(try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM grdb_migrations WHERE identifier = 'v6')") ?? true)
@@ -32,7 +36,10 @@ final class ComposerSchemaMigrationTests: XCTestCase {
 
         do {
             let store = try LocalStore.open(at: url)
-            XCTAssertEqual(try Self.contents(store.writer), before)
+            XCTAssertEqual(try Self.contents(store.writer, columns: originalColumns), before)
+            XCTAssertNil(try store.session(id: "session")?.avatar)
+            XCTAssertNil(try store.session(id: "session")?.avatarVersion)
+            XCTAssertNil(try store.projects().first?.avatar)
             let repaired = try await store.writer.read { db in
                 try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM grdb_migrations WHERE identifier = 'v6')") ?? false
             }
@@ -57,7 +64,7 @@ final class ComposerSchemaMigrationTests: XCTestCase {
             try store.saveComposerState(ComposerStateRecord(sessionId: "session", values: .object(["model": .string("kept-model")])))
         }
         let reopened = try LocalStore.open(at: url)
-        XCTAssertEqual(try Self.contents(reopened.writer), before)
+        XCTAssertEqual(try Self.contents(reopened.writer, columns: originalColumns), before)
         XCTAssertEqual(try reopened.sessionDetail(sessionId: "session").composer, .object(["model": .string("kept-model")]))
     }
 
@@ -83,15 +90,37 @@ final class ComposerSchemaMigrationTests: XCTestCase {
         }
     }
 
+    func testAvatarBackfillPreservesOfflineDataAndOnlyInvalidatesFullListingMarker() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("avatar-backfill-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("store.sqlite")
+        do {
+            let writer = try DatabaseQueue(path: url.path)
+            try Schema.migrator.migrate(writer, upTo: "v6")
+            try await writer.write { db in
+                try db.execute(sql: Self.cachedData)
+                try db.execute(sql: "INSERT INTO syncState VALUES ('sessions.lastFullSync', 999)")
+            }
+        }
+        let store = try LocalStore.open(at: url)
+        XCTAssertNil(try store.cursor(.sessionsLastFullSync))
+        XCTAssertEqual(try store.cursor(.sessionsChangedSince), 1234)
+        XCTAssertEqual(try store.session(id: "session")?.metadata?["machineId"]?.stringValue, "machine")
+        XCTAssertEqual(try store.messages(sessionId: "session").count, 1)
+        XCTAssertEqual(try store.sessionDetail(sessionId: "session").composer, .object([:]))
+    }
+
     private static let preservedTables = [
         "session", "machine", "message", "outbox", "attachment", "draft", "project",
         "accountSettings", "pendingSettings", "accountProfile", "syncState", "chatHistory",
     ]
 
-    private static func contents(_ writer: any DatabaseWriter) throws -> [String: [Row]] {
+    private static func contents(_ writer: any DatabaseWriter, columns: [String: [String]] = [:]) throws -> [String: [Row]] {
         try writer.read { db in
             try Dictionary(uniqueKeysWithValues: preservedTables.map { table in
-                (table, try Row.fetchAll(db, sql: "SELECT * FROM \(table) ORDER BY rowid"))
+                let projection = columns[table]?.map { "\"\($0)\"" }.joined(separator: ", ") ?? "*"
+                return (table, try Row.fetchAll(db, sql: "SELECT \(projection) FROM \(table) ORDER BY rowid"))
             })
         }
     }
