@@ -252,10 +252,38 @@ final class HomeHeaderView: UIView {
     let filterButton = HeaderIconButton(.ionicons("filter"), size: 22, label: Strings.Home.filterTitle)
     let actionDivider = UIView()
     let settingsButton = HeaderIconButton(.ionicons("settings-outline"), size: 22, label: Strings.Settings.title)
+    /// Stem Cells' search, in the pill's first slot.
+    let searchButton = HeaderIconButton(.ionicons("search-outline"), size: 22, label: Strings.StemCells.search)
+    /// Stem Cells: the pill is search then filter, and the logo is the way
+    /// to settings, so there is no gear.
+    var stemCellsActions = false {
+        didSet {
+            guard stemCellsActions != oldValue else { return }
+            searchButton.isHidden = !stemCellsActions
+            settingsButton.isHidden = stemCellsActions
+            setNeedsLayout()
+        }
+    }
     let titleLabel = StyledLabel(style: TextStyles.headerTitle, color: Palette.headerTint, lines: 1, alignment: .center)
     let statusDot = StatusDotView()
     let statusLabel = StyledLabel(style: TextStyles.homeHeaderStatus, color: Palette.textSecondary, lines: 1, alignment: .center)
     var showsAccountAvatar = false { didSet { setNeedsLayout() } }
+    /// Drawn over the scrim and under the controls, as big as the header
+    /// and free to hang below it: the stories, which close into the title
+    /// and open under the header. It takes the touches its own
+    /// `point(inside:with:)` takes.
+    var accessory: UIView? {
+        didSet {
+            guard accessory !== oldValue else { return }
+            oldValue?.removeFromSuperview()
+            if let accessory { insertSubview(accessory, aboveSubview: scrim) }
+            setNeedsLayout()
+        }
+    }
+    /// Where the title starts while the accessory places it; nil centres it.
+    var titleX: CGFloat? { didSet { if titleX != oldValue { setNeedsLayout() } } }
+    /// How much deeper the scrim reaches, under the accessory's open row.
+    var backdropExtension: CGFloat = 0 { didSet { if backdropExtension != oldValue { setNeedsLayout() } } }
 
     var status: RealtimeStatus = HomeConnectionStatus.initial {
         didSet { if status != oldValue { applyStatus() } }
@@ -270,9 +298,10 @@ final class HomeHeaderView: UIView {
         logoControl.isUserInteractionEnabled = false
         logoControl.addSubview(logo)
         actionDivider.backgroundColor = UIColor(Palette.divider)
-        for view in [filterButton, actionDivider, settingsButton] {
+        for view in [searchButton, filterButton, actionDivider, settingsButton] {
             actions.addSubview(view)
         }
+        searchButton.isHidden = true
         titleLabel.string = Strings.Home.sessionsTitle
         titleLabel.accessibilityTraits = .header
         for view in [scrim, logoControl, actions, titleLabel, statusDot, statusLabel] {
@@ -286,9 +315,12 @@ final class HomeHeaderView: UIView {
         fatalError("init(coder:) is not supported")
     }
 
-    /// Only the controls take touches; the rest lets the list scroll.
+    /// Only the controls and what the accessory takes; the rest lets the
+    /// list scroll.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        logoControl.frame.contains(point) || actions.frame.contains(point)
+        if logoControl.frame.contains(point) || actions.frame.contains(point) { return true }
+        guard let accessory, !accessory.isHidden else { return false }
+        return accessory.point(inside: convert(point, to: accessory), with: event)
     }
 
     private var showsStatus: Bool {
@@ -321,6 +353,8 @@ final class HomeHeaderView: UIView {
             status: showsStatus ? statusLabel.measurable : nil
         )
         input.showsAccountAvatar = showsAccountAvatar
+        input.titleX = titleX
+        input.backdropExtension = backdropExtension
         return HomeHeaderLayout(input)
     }
 
@@ -332,15 +366,21 @@ final class HomeHeaderView: UIView {
         super.layoutSubviews()
         let layout = layout(width: bounds.width)
         scrim.setLayoutFrame(layout.backdrop)
+        accessory?.frame = bounds
         logoControl.setLayoutFrame(layout.logoControl)
         logo.setLayoutFrame(layout.logo.offsetBy(dx: -layout.logoControl.minX, dy: -layout.logoControl.minY))
         logo.clipsToBounds = showsAccountAvatar
         logo.layer.cornerRadius = showsAccountAvatar ? layout.logo.width / 2 : 0
         actions.setLayoutFrame(layout.actions)
         let origin = layout.actions.origin
-        filterButton.setLayoutFrame(layout.filterButton.offsetBy(dx: -origin.x, dy: -origin.y))
+        // The pill's two slots: filter and settings, or in Stem Cells search
+        // and filter, so the filter sits at the far right.
+        let first = layout.filterButton.offsetBy(dx: -origin.x, dy: -origin.y)
+        let second = layout.settingsButton.offsetBy(dx: -origin.x, dy: -origin.y)
+        searchButton.setLayoutFrame(first)
+        filterButton.setLayoutFrame(stemCellsActions ? second : first)
         actionDivider.setLayoutFrame(layout.actionDivider.offsetBy(dx: -origin.x, dy: -origin.y))
-        settingsButton.setLayoutFrame(layout.settingsButton.offsetBy(dx: -origin.x, dy: -origin.y))
+        settingsButton.setLayoutFrame(second)
         titleLabel.setLayoutFrame(layout.title)
         if let frame = layout.statusDot { statusDot.setLayoutFrame(frame) }
         if let frame = layout.status { statusLabel.setLayoutFrame(frame) }

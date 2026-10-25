@@ -52,6 +52,18 @@ final class HomeDockView: UIView {
         didSet { if text != oldValue { setNeedsLayout() } }
     }
 
+    /// Drawn in the capsule just before send at the size it fits (Stem
+    /// Cells' model control); the entry gives up its room.
+    var accessory: UIView? {
+        didSet {
+            guard accessory !== oldValue else { return }
+            oldValue?.removeFromSuperview()
+            if let accessory { addSubview(accessory) }
+            applyPresence()
+            setNeedsLayout()
+        }
+    }
+
     /// The scrim shows only over a list that can scroll under it.
     var showsScrim = false {
         didSet { scrim.isHidden = !showsScrim }
@@ -95,6 +107,12 @@ final class HomeDockView: UIView {
         fatalError("init(coder:) is not supported")
     }
 
+    /// The capsule, in this view.
+    var fieldFrame: CGRect {
+        layoutIfNeeded()
+        return composerFrame
+    }
+
     /// Only the capsule takes touches; the list scrolls everywhere else.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         composerFrame.contains(point)
@@ -128,6 +146,7 @@ final class HomeDockView: UIView {
         scrim.presence = contentPresence
         entryClip.alpha = contentPresence
         sendButton.presence = contentPresence
+        accessory?.alpha = contentPresence
     }
 
     /// Runs `fade`, or shows the dock in full at once when it is nil.
@@ -181,7 +200,8 @@ final class HomeDockView: UIView {
             size: bounds.size,
             safeBottom: safeAreaInsets.bottom,
             hairline: hairline,
-            entry: entry
+            entry: entry,
+            accessory: accessory.map { $0.isHidden ? .zero : $0.sizeThatFits(bounds.size) } ?? .zero
         ))
         composerFrame = layout.composer
         scrim.setLayoutFrame(layout.scrim)
@@ -197,6 +217,7 @@ final class HomeDockView: UIView {
         entryButton.setLayoutFrame(layout.entry.offsetBy(dx: -layout.composer.minX, dy: -layout.composer.minY))
         entryLabel.setLayoutFrame(layout.entryText.offsetBy(dx: -layout.entry.minX, dy: -layout.entry.minY))
         sendButton.setLayoutFrame(layout.send)
+        accessory?.setLayoutFrame(layout.accessory)
     }
 }
 
