@@ -7,7 +7,6 @@ import HappyCore
 extension Strings {
     public enum StemCells {
         /// The home filter's third choice.
-        public static let filterTitle = "Stem Cells"
 
         // Rows (HappyAgentSpacesSidebar.tsx, AppHappyAgentView.tsx).
         public static let search = "Search"
@@ -18,29 +17,39 @@ extension Strings {
         public static let prioritizing = "Prioritizing"
 
         // Menus.
-        public static let open = "Open"
-        public static let openBot = "Open bot"
         public static let renameTask = "Rename task"
         public static let renameBot = "Rename bot"
         public static let renameSection = "Rename section"
         /// The conversation's name in its bar, for VoiceOver.
         public static let renameHint = "Renames it"
+        public static let back = "Back"
+        /// A file picked for a message, which carries text and pictures alone.
+        public static func filesNotSent(_ names: [String]) -> String {
+            names.count == 1 ? "\(names[0]) wasn't attached" : "\(names.count) files weren't attached"
+        }
+        public static let filesNotSentDetail = "A message to an agent carries text and pictures only for now."
         public static let closeNewWork = "Close new work"
         public static let leaveTask = "Leave task"
         public static let archiveTask = "Archive task"
         public static let archiveBot = "Archive bot"
         public static let archiveSubtask = "Archive subtask"
         public static let deleteSection = "Delete section"
-        public static let tidyNow = "Tidy sidebar now"
-        public static let showSubtasks = "Show subtasks"
-        public static let hideSubtasks = "Hide subtasks"
-        public static let fold = "Collapse"
-        public static let unfold = "Expand"
-        public static let rename = "Rename"
-        // A row pulled open: short names for its two actions.
-        public static let swipeClose = "Close"
-        public static let swipeLeave = "Leave"
-        public static let swipeArchive = "Archive"
+        public static let reorder = "Reorder"
+
+        // A message from another agent (happy-desktop's AgentMessageActivity).
+        public static let agentMessage = "Message"
+        public static func agentMessageFrom(_ name: String) -> String { "from \(name)" }
+        /// An agent this one spawned that has no title yet (`projectSubagents`).
+        public static let subagent = "Subagent"
+        public static let untitledAgent = "Untitled agent"
+        public static let agentMessageOpenHint = "Shows the message"
+        public static let agentMessageCloseHint = "Hides the message"
+        /// A section's "+", for VoiceOver.
+        public static func newWorkIn(_ section: String) -> String { "New work in \(section)" }
+        /// Said once a row is lifted from its menu.
+        public static let reorderHint = "Lifted. Drag to move it, or tap to put it back."
+        /// The blurred screen behind a held row's menu, for VoiceOver.
+        public static let closeMenu = "Close menu"
         public static let cancel = "Cancel"
         public static let save = "Save"
 
@@ -205,7 +214,7 @@ extension Strings {
         public static let done = "Done"
         public static let searchSettings = "Search settings"
         public static let showQR = "QR code"
-        public static let addProfile = "Add a computer or account"
+        public static let addProfile = "Add computer"
         public static let more = "More"
         public static let status = "Status"
         public static let account = "Account"
@@ -233,6 +242,38 @@ extension Strings {
 
         // The composer's pickers (desktop's ComposerModelControl, flattened).
         public static let model = "Model"
+        /// The four permission modes a message runs with (API.md's `permissionMode`).
+        public static let permission = "Permission"
+        public static func permissionName(_ mode: String) -> String {
+            switch mode {
+            case "read_only": "Read only"
+            case "workspace_write": "Workspace write"
+            case "auto": "Auto"
+            case "full_access": "Full access"
+            default: mode
+            }
+        }
+        public static func permissionDetail(_ mode: String) -> String? {
+            switch mode {
+            case "read_only": "Reads files; changes nothing."
+            case "workspace_write": "Changes files in its workspace only."
+            case "auto": "Anything past its workspace is reviewed first."
+            case "full_access": "Acts on the whole computer without asking."
+            default: nil
+            }
+        }
+
+        // The composer's "+" sheet, as Claude's "Add to session".
+        public static let addToMessage = "Add to message"
+        public static let photos = "Photos"
+        public static let camera = "Camera"
+        public static let cameraUnavailable = "No camera on this device"
+        public static let pasteFromClipboard = "Paste from clipboard"
+        public static let addFiles = "Add files"
+        public static func addPhotos(_ count: Int) -> String { "Add \(count)" }
+        public static func photo(picked: Int?) -> String { picked.map { "Photo, picked \($0)" } ?? "Photo" }
+        /// The clipboard held nothing a message can carry.
+        public static let nothingToPaste = "Nothing to paste"
         public static let provider = "Provider"
         public static let effort = "Effort"
         public static let modelsNotConfigured = "Models not configured"

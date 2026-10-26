@@ -14,6 +14,13 @@ extension Strings {
         public static func collapsed(_ names: [String]) -> String {
             names.isEmpty ? "Stories" : "Stories: \(names.joined(separator: ", "))"
         }
+        /// The one-time tooltip under them (ChatList.StoryFeedTooltipUsers),
+        /// naming up to three: "Ana", "Ana and Steve", "Ana, Steve, and Bo".
+        public static func tooltip(_ names: [String]) -> String {
+            let list = ListFormatter()
+            list.locale = Locale(identifier: "en_US")
+            return "Tap above to view stories from \(list.string(from: names) ?? names.joined(separator: ", "))"
+        }
 
         // Settings.
         public static let setting = "Stories"
@@ -21,6 +28,8 @@ extension Strings {
 
         // The viewer.
         public static let close = "Close"
+        /// What ends a folded caption (Telegram's Story.CaptionShowMore).
+        public static let captionShowMore = "Show more"
         public static let photoUnavailable = "This photo is no longer available"
         public static let videoUnavailable = "This video is no longer available"
         public static let open = "Open"
@@ -35,6 +44,10 @@ extension Strings {
         public static let noViewers = "No views yet"
         public static func views(_ count: Int) -> String { count == 1 ? "1 view" : "\(count) views" }
         public static let react = "React"
+        /// A recording's sound (Telegram's Story.TooltipVideoHasNoSound).
+        public static let mute = "Mute"
+        public static let unmute = "Unmute"
+        public static let videoHasNoSound = "This video has no sound"
         public static let heart = "❤️"
         public static let reactions = ["❤️", "👍", "🔥", "🎉", "😂", "😮", "😢", "👏"]
         public static func ago(_ milliseconds: Int64) -> String {
@@ -42,6 +55,21 @@ extension Strings {
             if minutes < 1 { return "just now" }
             if minutes < 60 { return "\(minutes)m ago" }
             return "\(minutes / 60)h ago"
+        }
+        /// When something happened, both in epoch milliseconds: how long
+        /// ago within a day, then "yesterday at" its time as Telegram's
+        /// list says, then the date.
+        public static func when(_ milliseconds: Int64, now: Int64, calendar: Calendar = .current) -> String {
+            if now - milliseconds < 86_400_000 { return ago(now - milliseconds) }
+            let date = Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1000)
+            var style = Date.FormatStyle.dateTime
+            style.timeZone = calendar.timeZone
+            style.locale = Locale(identifier: "en_US")
+            if let yesterday = calendar.date(byAdding: .day, value: -1, to: Date(timeIntervalSince1970: TimeInterval(now) / 1000)),
+               calendar.isDate(date, inSameDayAs: yesterday) {
+                return "yesterday at \(date.formatted(style.hour().minute()))"
+            }
+            return date.formatted(style.month(.abbreviated).day())
         }
 
         // The inline story.

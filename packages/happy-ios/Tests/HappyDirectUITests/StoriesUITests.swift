@@ -29,6 +29,8 @@ final class StoriesUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
         print("StoriesUITests skips quiescence: \(Self.skipsQuiescence)")
+        // Direct connection is an experiment, off on a fresh install.
+        app.launchEnvironment["STEM_DIRECT"] = "1"
         app.launch()
     }
 
@@ -153,7 +155,7 @@ final class StoriesUITests: XCTestCase {
         element("story-close").tap()
         pause(1.5)
 
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.tapBack()
         let mine = element("story-circle:self")
         XCTAssertTrue(mine.waitForExistence(timeout: 8))
         pause(1)
@@ -205,6 +207,15 @@ final class StoriesUITests: XCTestCase {
         XCTAssertEqual(first.value as? String, "2")
         pause(0.8)
         capture("editor-library-picked")
+        // The count shows just the picks, in the order picked, until Back.
+        element("library-selected").tap()
+        XCTAssertTrue(app.staticTexts["2 Selected"].waitForExistence(timeout: 3), "the count didn't show the picks")
+        XCTAssertEqual(first.value as? String, "1")
+        XCTAssertFalse(element("library-cell:2").exists)
+        pause(0.6)
+        capture("editor-library-selected")
+        element("library-cancel").tap()
+        XCTAssertTrue(element("library-cell:2").waitForExistence(timeout: 3), "Back didn't show everything")
         element("library-add").tap()
         XCTAssertTrue(element("story-editor-frame:2").waitForExistence(timeout: 20), "the photos didn't become frames")
         pause(2)
@@ -237,7 +248,7 @@ final class StoriesUITests: XCTestCase {
         pause(2)
         capture("editor-posted")
 
-        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.tapBack()
         let mine = element("story-circle:self")
         XCTAssertTrue(mine.waitForExistence(timeout: 8), "no My Story at home")
         pause(1)
@@ -268,7 +279,8 @@ final class StoriesUITests: XCTestCase {
         XCTAssertTrue(element("story-viewers-list").waitForExistence(timeout: 5), "no viewers list")
         pause(1.5)
         capture("viewer-views")
-        app.buttons["Done"].tap()
+        // A tap above the sheet closes it.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).tap()
         pause(1)
 
         // Delete the story shown; the viewer moves on or closes.
@@ -333,7 +345,7 @@ final class StoriesUITests: XCTestCase {
         toggle.tap()
         pause(1.5)
         capture("settings-stories-off")
-        app.swipeDown(velocity: .fast)
+        app.tapBack()
         pause(2)
         XCTAssertFalse(element("story-circle:self").exists, "the row stayed with Stories off")
         capture("home-stories-off")
@@ -341,11 +353,59 @@ final class StoriesUITests: XCTestCase {
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         toggle.tap()
         pause(1.5)
-        app.swipeDown(velocity: .fast)
+        app.tapBack()
         XCTAssertTrue(element("story-circle:self").waitForExistence(timeout: 8), "the stories never came back")
         pause(1)
         openStories(element("story-circle:self"))
         pause(1.5)
         capture("home-stories-back")
+    }
+
+    /// Put away and kept away: home starts with the stories open until the
+    /// person puts them away with a short flick up; then they stay away,
+    /// across launches and a story posted meanwhile, until a launch after a
+    /// story posted since. Standalone, the row is the person's own stories
+    /// alone, which as in Telegram leave no avatars by the title.
+    func testSwipeAway() {
+        home()
+        step("post-sample", wait: 5)
+        let mine = element("story-circle:self")
+        XCTAssertTrue(mine.waitForExistence(timeout: 10), "no stories")
+
+        // Never put away: open at launch.
+        app.terminate()
+        step("forget-put-away", wait: 2)
+        relaunch()
+        XCTAssertTrue(mine.isHittable, "never put away, the stories started closed")
+        capture("swipe-launch-open")
+
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6)).press(forDuration: 0.02, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.54)), withVelocity: .fast, thenHoldForDuration: 0)
+        pause(1.2)
+        XCTAssertFalse(mine.isHittable, "a short flick up left the stories open")
+        capture("swipe-flicked")
+
+        // Put away: still away at the next launch.
+        relaunch()
+        XCTAssertFalse(mine.isHittable, "put away, the stories opened again at launch")
+        capture("swipe-relaunch-closed")
+
+        // Another story is posted on the computer: still put away now…
+        step("post-sample", wait: 8)
+        XCTAssertFalse(mine.isHittable, "a new story opened the stories")
+        capture("swipe-new-story")
+
+        // …and open at the next launch, as it was posted since.
+        relaunch()
+        XCTAssertTrue(mine.isHittable, "a story posted since didn't open the stories at launch")
+        capture("swipe-relaunch-open")
+    }
+
+    /// The app again from cold, waiting for home and its stories to settle.
+    private func relaunch() {
+        app.terminate()
+        app.launch()
+        home()
+        XCTAssertTrue(element("story-circle:self").waitForExistence(timeout: 10), "no stories after launch")
+        pause(3)
     }
 }

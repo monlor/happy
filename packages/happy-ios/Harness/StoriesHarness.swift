@@ -2,6 +2,8 @@
 @testable import HappyCore
 import HappyLayout
 @testable import HappyUI
+import AVFoundation
+import HappyWire
 import UIKit
 
 /// Stories over a computer of the harness's own (`-screen stories`): three
@@ -17,11 +19,22 @@ import UIKit
 /// a conversation's draft would; its "+" opens the real library sheet over
 /// the simulator's photos.
 /// The stories sit in a home header over a list of the harness's own, as
-/// Stem Cells home has them; `header=open` or `header=closed` in the probe.
+/// Stem Cells home has them; `header=open` or `header=closed` in the probe,
+/// and `stories=N` how many the row has. `harness-new-story` posts another
+/// of Ana's, unseen, as a `story.posted` event brings it.
 @MainActor
 final class StoriesHarness {
     private let window: UIWindow
-    private let transport = StoriesHarnessTransport()
+    private let transport = StoriesHarnessTransport(videos: ProcessInfo.processInfo.arguments.contains("-storiesVideo"), epoch: StoriesHarness.epoch,
+                                                    newer: ProcessInfo.processInfo.arguments.contains("-storiesNewer"))
+
+    /// The stories' clock: `-storiesEpoch MS` dates them from the same
+    /// moment across launches, else now.
+    private static var epoch: Int64 {
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "-storiesEpoch"), arguments.indices.contains(index + 1), let value = Int64(arguments[index + 1]) { return value }
+        return Int64(Date().timeIntervalSince1970 * 1000)
+    }
     private let session: StoriesSession
     private let host: StoriesHarnessHome
     private let probe = UILabel()
@@ -33,15 +46,41 @@ final class StoriesHarness {
     init(window: UIWindow) {
         self.window = window
         let arguments = ProcessInfo.processInfo.arguments
+        // The one-time tooltip only for the test that looks at it.
+        if arguments.contains("-storiesTooltip") {
+            UserDefaults.standard.removeObject(forKey: StoriesHomeController.tooltipShownKey)
+        } else {
+            UserDefaults.standard.set(true, forKey: StoriesHomeController.tooltipShownKey)
+        }
+        // The row starts closed, as put away long ago, but for the tests of
+        // how it starts: `-storiesFresh` never put away, `-storiesKept` as
+        // the last run left it.
+        if arguments.contains("-storiesFresh") {
+            UserDefaults.standard.removeObject(forKey: StoriesHomeController.putAwayKey)
+        } else if !arguments.contains("-storiesKept") {
+            UserDefaults.standard.set(["stories-harness": NSNumber(value: Int64.max)], forKey: StoriesHomeController.putAwayKey)
+        }
+        // Every animation N times slower, to film one.
+        if let index = arguments.firstIndex(of: "-storiesSlowMotion"), arguments.indices.contains(index + 1), let slower = Float(arguments[index + 1]), slower > 0 {
+            window.layer.speed = 1 / slower
+        }
         if let index = arguments.firstIndex(of: "-storiesShowScale"), arguments.indices.contains(index + 1), let scale = Double(arguments[index + 1]) {
             StoryViewerViewController.showScale = scale
         }
         let client = DirectAgentClient(transport: transport, token: "harness")
+        let (events, arrive) = AsyncStream.makeStream(of: StemCellsStore.ConversationEvent.self)
         session = StoriesSession(accountID: "stories-harness", client: client, images: StemCellsImages(client: client), offline: nil) {
-            AsyncStream { _ in }
+            events
         }
         host = StoriesHarnessHome(session: session)
         let session = session
+        let transport = transport
+        host.onNewStory = {
+            Task {
+                guard let data = await transport.postNew(), let event = try? JSONDecoder().decode(JSONValue.self, from: data) else { return }
+                arrive.yield(.event(event))
+            }
+        }
         host.onEditDraft = { [weak host] in
             guard let host else { return }
             let drafts = session.snapshot.stories.values.filter { $0.status == .draft }
@@ -54,6 +93,12 @@ final class StoriesHarness {
         probe.alpha = 0.02
         host.view.addSubview(probe)
         window.rootViewController = host
+        // A conversation's story card over home, on a draft of the person's.
+        if arguments.contains("-storiesCard") {
+            let card = StoriesHarnessCard(session: session)
+            card.modalPresentationStyle = .fullScreen
+            DispatchQueue.main.async { [weak host] in host?.present(card, animated: false) }
+        }
         Task { await transport.drawFrames(Self.frames()) }
         Task { await transport.drawStickers(Self.stickers()) }
         watch = session.watch { [weak self] snapshot in
@@ -105,11 +150,18 @@ final class StoriesHarness {
         return nil
     }
 
+    /// What the row remembers of being put away, for the probe.
+    private static var putAway: String {
+        guard let value = UserDefaults.standard.dictionary(forKey: StoriesHomeController.putAwayKey)?["stories-harness"] as? NSNumber else { return "none" }
+        return value.int64Value == .max ? "always" : String(value.int64Value)
+    }
+
     private func report() {
         // Over everything, so a full-screen editor doesn't take it away.
         if probe.superview !== window { window.addSubview(probe) }
         window.bringSubviewToFront(probe)
-        let made = snapshot.stories.values.filter { !["m1", "s1", "s2", "a1"].contains($0.id) }
+        // The harness's own stories (`d1` is the story card's draft) aren't made here.
+        let made = snapshot.stories.values.filter { !["m1", "s1", "s2", "a1", "a2", "d1"].contains($0.id) && !$0.id.hasPrefix("new-") }
             .sorted { $0.createdAt < $1.createdAt }
             .map { "\($0.status.rawValue):\($0.artifactVersion):\($0.frames.first?.overlays.count ?? 0)" }.joined(separator: ",")
         if let editor {
@@ -128,12 +180,19 @@ final class StoriesHarness {
             probe.accessibilityValue = "editor=1 frames=\(editor.draft.frames.count) selected=\(editor.draft.selected) overlays=\(kinds.joined(separator: ",")) top=\(top) trail=\(editor.trail.joined(separator: ";")) saved=\(made) haptics=\(recorder.played.joined(separator: ","))"
             return
         }
+        if let card = host.presentedViewController as? StoriesHarnessCard {
+            let viewer = card.presentedViewController is StoryViewerViewController
+            probe.accessibilityValue = "card=\(card.state) viewer=\(viewer ? 1 : 0)"
+            return
+        }
         guard let viewer = host.presentedViewController as? StoryViewerViewController else {
-            probe.accessibilityValue = "viewer=0 editor=0 header=\(host.stories.unlocked ? "open" : "closed") title=\(host.titleX) saved=\(made) haptics=\(recorder.played.joined(separator: ","))"
+            let count = snapshot.feed?.authors.reduce(0) { $0 + $1.storyIds.count } ?? 0
+            probe.accessibilityValue = "viewer=0 editor=0 header=\(host.stories.unlocked ? "open" : "closed") putAway=\(Self.putAway) stories=\(count) title=\(host.titleX) saved=\(made) haptics=\(recorder.played.joined(separator: ","))"
             return
         }
         let reaction = viewer.current?.story.myReaction ?? "nil"
-        probe.accessibilityValue = "viewer=1 author=\(viewer.authorIndex) position=\(viewer.position) paused=\(viewer.isPaused ? 1 : 0) chrome=\(viewer.currentPage.chromeHidden ? 0 : 1) reaction=\(reaction) trail=\(viewer.trail.joined(separator: ",")) haptics=\(recorder.played.joined(separator: ","))"
+        let sound = viewer.currentPage.soundButton.isHidden ? "none" : viewer.currentPage.soundButton.accessibilityValue ?? "none"
+        probe.accessibilityValue = "viewer=1 author=\(viewer.authorIndex) position=\(viewer.position) paused=\(viewer.isPaused ? 1 : 0) sound=\(sound) muted=\(viewer.currentPage.canvas.player?.isMuted == true ? 1 : 0) chrome=\(viewer.currentPage.chromeHidden ? 0 : 1) reaction=\(reaction) trail=\(viewer.trail.joined(separator: ",")) haptics=\(recorder.played.joined(separator: ","))"
     }
 
     /// The harness packs' files: each a shape in its colour, and the
@@ -195,6 +254,7 @@ final class StoriesHarness {
             ("f-s1", .systemGreen, .systemBlue, CGSize(width: 720, height: 1280)),
             ("f-s2", .systemPurple, .systemRed, CGSize(width: 720, height: 1280)),
             ("f-a1", .systemYellow, .systemBrown, CGSize(width: 720, height: 1280)),
+            ("f-d1", .systemTeal, .systemIndigo, CGSize(width: 720, height: 1280)),
         ]
         var frames: [String: Data] = [:]
         for (name, top, bottom, size) in names {
@@ -235,6 +295,9 @@ actor StoriesHarnessTransport: DirectTransport {
     private var stories: [String: [String: Any]] = [:]
     private var frames: [String: Data] = [:]
     private var order = ["self": ["m1"], "u2": ["s1", "s2"], "u3": ["a1"]]
+    /// Ana's story as two recordings, the first with sound, the second
+    /// without (`-storiesVideo`).
+    private let videos: Bool
     private var uploads: [String: Data] = [:]
     private var recents: [[String: Any]] = []
     private var stickerFiles: [String: Data] = [:]
@@ -292,8 +355,10 @@ actor StoriesHarnessTransport: DirectTransport {
         return frame
     }
 
-    init() {
-        let now = Int64(Date().timeIntervalSince1970 * 1000)
+    /// `newer`: one more of Ana's, posted a minute after the rest.
+    init(videos: Bool = false, epoch: Int64, newer: Bool = false) {
+        self.videos = videos
+        let now = epoch
         func frame(_ id: String, width: Int, height: Int, background: [String], overlays: [[String: Any]]) -> [String: Any] {
             ["id": id, "kind": "image", "width": width, "height": height, "thumbhash": NSNull(), "durationMs": NSNull(),
              "asset": ["type": "chat_media", "agentId": "a1", "toolCallId": "t1", "index": 0], "available": true,
@@ -318,7 +383,7 @@ actor StoriesHarnessTransport: DirectTransport {
             frame("f-m1b", width: 1280, height: 720, background: ["#F08030", "#F03080"], overlays: [
                 ["id": "o3", "type": "emoji", "emoji": "🚀", "transform": t(0.25, 0.25, 0.25, -0.3)],
             ]),
-        ], caption: "Two frames of mine", viewCount: 2)
+        ], caption: "Two frames of mine", viewCount: 6)
         stories["s1"] = story("s1", author: "u2", postedAgo: 120, frames: [
             frame("f-s1", width: 720, height: 1280, background: ["#108040", "#1040A0"], overlays: [
                 text("o4", "React to this", fill: "regular", color: "#FFFFFF", font: "typewriter", t(0.5, 0.25, 1.3)),
@@ -329,22 +394,69 @@ actor StoriesHarnessTransport: DirectTransport {
             frame("f-s2", width: 720, height: 1280, background: ["#602080", "#A02020"], overlays: [
                 text("o6", "Second from Steve", fill: "semi", color: "#000000", font: "georgia", t(0.5, 0.3, 1.1, 0.1)),
             ]),
-        ], caption: "Late night")
+        ], caption: "Late night at the studio, finally got the last of the boulder problems set for the weekend comp. Six new routes on the overhang, two slabs that will humble everyone, and a dyno I am weirdly proud of. Huge thanks to Maya for holding the ladder for three hours straight and to whoever left the pizza in the break room. Doors open at nine, bring chalk, bring friends, and please stretch first this time.")
         stories["a1"] = story("a1", author: "u3", postedAgo: 30, frames: [
             frame("f-a1", width: 720, height: 1280, background: ["#C0A010", "#604020"], overlays: [
                 text("o7", "Ana's story", fill: "stroke", color: "#2040FF", font: "noteworthy", t(0.5, 0.3, 1.4)),
             ]),
         ], caption: nil)
+        if newer {
+            stories["a2"] = story("a2", author: "u3", postedAgo: -1, frames: [
+                frame("f-a1", width: 720, height: 1280, background: ["#C0A010", "#604020"], overlays: [
+                    text("o9", "Ana's newer one", fill: "stroke", color: "#2040FF", font: "noteworthy", t(0.5, 0.3, 1.4)),
+                ]),
+            ], caption: nil)
+            order["u3", default: []].append("a2")
+        }
+        // A draft of the person's, for the story card.
+        var draft = story("d1", author: nil, postedAgo: 5, frames: [
+            frame("f-d1", width: 720, height: 1280, background: ["#203040", "#405060"], overlays: [
+                text("o8", "A draft", fill: "filled", color: "#FFFFFF", t(0.5, 0.25, 1.2)),
+            ]),
+        ], caption: "Drafted in a conversation")
+        for key in ["postedAt", "expiresAt", "viewCount"] { draft[key] = NSNull() }
+        draft["status"] = "draft"
+        draft["seen"] = false
+        stories["d1"] = draft
+        if videos {
+            func video(_ id: String) -> [String: Any] {
+                var made = frame(id, width: 360, height: 640, background: ["#202020", "#000000"], overlays: [])
+                made["kind"] = "video"
+                made["durationMs"] = 3000
+                return made
+            }
+            stories["a1"]?["frames"] = [video("f-a1-sound"), video("f-a1-silent")]
+        }
     }
 
     func drawFrames(_ frames: [String: Data]) { self.frames = frames }
+
+    /// Another of Ana's stories, posted now and unseen: the `story.posted`
+    /// event that brings it, the feed already counting it.
+    func postNew() -> Data? {
+        guard var story = stories["a1"] else { return nil }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        revision += 1
+        let id = "new-\(revision)"
+        story["id"] = id
+        story["postedAt"] = now
+        story["createdAt"] = now
+        story["updatedAt"] = now
+        story["expiresAt"] = now + 86_400_000
+        story["seen"] = false
+        story["version"] = "v\(revision)"
+        stories[id] = story
+        order["u3", default: []].append(id)
+        return try? JSONSerialization.data(withJSONObject: ["type": "story.posted", "payload": ["story": story]])
+    }
 
     private func author(_ key: String) -> [String: Any] {
         let names = ["self": "Kirill Dubovitskiy", "u2": "Steve Korshakov", "u3": "Ana Lima"]
         let ids = order[key] ?? []
         let unseen = key == "self" ? 0 : ids.filter { (stories[$0]?["seen"] as? Bool) == false }.count
+        let latest = ids.compactMap { stories[$0]?["postedAt"] as? Int64 }.max()
         return ["userId": key == "self" ? NSNull() as Any : key, "name": names[key] ?? key, "photo": NSNull(), "thumbhash": NSNull(),
-                "isSelf": key == "self", "storyIds": ids, "unseenCount": unseen, "draftCount": key == "self" ? 0 : NSNull(), "latestPostedAt": NSNull()]
+                "isSelf": key == "self", "storyIds": ids, "unseenCount": unseen, "draftCount": key == "self" ? 0 : NSNull(), "latestPostedAt": (latest as Any?) ?? NSNull()]
     }
 
     private func ok(_ object: Any) -> DirectHTTPResponse {
@@ -354,6 +466,10 @@ actor StoriesHarnessTransport: DirectTransport {
     func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) async throws -> DirectHTTPResponse {
         try await Task.sleep(for: .milliseconds(60))
         let route = String(path.split(separator: "?").first ?? "")
+        // "-storiesSlowFrames": pictures take a while, as over a slow link.
+        if route.contains("/frames/"), ProcessInfo.processInfo.arguments.contains("-storiesSlowFrames") {
+            try await Task.sleep(for: .milliseconds(1500))
+        }
         let parts = route.split(separator: "/").map(String.init)
         switch (method, route) {
         case ("GET", "/v0/health"):
@@ -431,12 +547,28 @@ actor StoriesHarnessTransport: DirectTransport {
         case ("GET", ""):
             return ok(["story": story])
         case ("GET", "frames"):
-            guard parts.count > 4, let data = frames[parts[4]] else { return DirectHTTPResponse(status: 404) }
+            guard parts.count > 4 else { return DirectHTTPResponse(status: 404) }
+            if videos, parts[4].hasPrefix("f-a1-") {
+                if frames[parts[4]] == nil { frames[parts[4]] = await StoriesHarnessVideo.make(sound: parts[4] == "f-a1-sound") }
+                guard let data = frames[parts[4]] else { return DirectHTTPResponse(status: 404) }
+                return DirectHTTPResponse(status: 200, headers: ["content-type": "video/mp4"], body: data)
+            }
+            guard let data = frames[parts[4]] else { return DirectHTTPResponse(status: 404) }
             return DirectHTTPResponse(status: 200, headers: ["content-type": "image/png"], body: data)
         case ("GET", "viewers"):
+            // As the API orders them: reactors by latest reaction, then the rest by name.
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            func viewer(_ id: String, _ name: String, _ reaction: String? = nil, minutesAgo: Int64 = 0) -> [String: Any] {
+                ["userId": id, "name": name, "photo": NSNull(), "thumbhash": NSNull(),
+                 "reaction": (reaction as Any?) ?? NSNull(), "reactedAt": reaction == nil ? NSNull() : now - minutesAgo * 60_000]
+            }
             return ok(["viewers": [
-                ["userId": "u2", "name": "Steve Korshakov", "photo": NSNull(), "thumbhash": NSNull(), "reaction": "❤️", "reactedAt": 1],
-                ["userId": "u3", "name": "Ana Lima", "photo": NSNull(), "thumbhash": NSNull(), "reaction": NSNull(), "reactedAt": NSNull()],
+                viewer("u2", "Steve Korshakov", "❤️", minutesAgo: 2),
+                viewer("u4", "Maya Okafor", "🔥", minutesAgo: 14),
+                viewer("u5", "Leo Brandt", "👍", minutesAgo: 1_700),
+                viewer("u3", "Ana Lima"),
+                viewer("u6", "Jonas Weber"),
+                viewer("u7", "Priya Raman"),
             ], "nextCursor": NSNull()])
         case ("POST", "seen"):
             // Seen through this one: every earlier story of the author too.
@@ -516,6 +648,9 @@ final class StoriesHarnessHome: UIViewController, UIScrollViewDelegate {
     /// A draft's Edit, as a conversation's story card has it.
     var onEditDraft: (() -> Void)?
     private let editDraft = UIButton(type: .custom)
+    /// Somebody posts a story while home is up.
+    var onNewStory: (() -> Void)?
+    private let newStory = UIButton(type: .custom)
 
     init(session: StoriesSession) {
         self.session = session
@@ -566,6 +701,10 @@ final class StoriesHarnessHome: UIViewController, UIScrollViewDelegate {
         editDraft.backgroundColor = UIColor.black.withAlphaComponent(0.02)
         editDraft.addAction(UIAction { [weak self] _ in self?.onEditDraft?() }, for: .touchUpInside)
         view.addSubview(editDraft)
+        newStory.accessibilityIdentifier = "harness-new-story"
+        newStory.backgroundColor = UIColor.black.withAlphaComponent(0.02)
+        newStory.addAction(UIAction { [weak self] _ in self?.onNewStory?() }, for: .touchUpInside)
+        view.addSubview(newStory)
     }
 
     private func moved(_ change: StoriesHomeController.Change) {
@@ -587,6 +726,7 @@ final class StoriesHarnessHome: UIViewController, UIScrollViewDelegate {
         header.frame = layout.header
         list.frame = view.bounds
         editDraft.frame = CGRect(x: 0, y: view.bounds.height - 60, width: 44, height: 44)
+        newStory.frame = CGRect(x: view.bounds.width - 44, y: view.bounds.height - 60, width: 44, height: 44)
         for (index, row) in rows.enumerated() { row.frame = CGRect(x: 0, y: CGFloat(index) * 52, width: view.bounds.width, height: 51) }
         list.contentSize = CGSize(width: view.bounds.width, height: CGFloat(rows.count) * 52)
         let home = StemCellsHomeLayout(size: view.bounds.size, contentTop: layout.insets.contentTop, chromeTop: layout.insets.chromeTop, listBottom: layout.insets.listBottom, bannerHeight: 0, storiesHeight: stories.inset)
@@ -610,5 +750,135 @@ final class StoriesHarnessHome: UIViewController, UIScrollViewDelegate {
         stories.listDidEndDragging(decelerate: decelerate)
     }
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { stories.listDidEndDecelerating() }
+}
+/// A three second recording made here: colours going round under a
+/// counter, with a 440 Hz tone or no sound track at all.
+enum StoriesHarnessVideo {
+    static func make(sound: Bool) async -> Data? {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("stories-harness-\(sound ? "sound" : "silent")-\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return nil }
+        let size = CGSize(width: 360, height: 640)
+        let video = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: size.width, AVVideoHeightKey: size.height,
+        ])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: video, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: size.width, kCVPixelBufferHeightKey as String: size.height,
+        ])
+        writer.add(video)
+        let rate = 44_100.0
+        var audio: AVAssetWriterInput?
+        if sound {
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: rate, AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 64_000,
+            ])
+            writer.add(input)
+            audio = input
+        }
+        guard writer.startWriting() else { return nil }
+        writer.startSession(atSourceTime: .zero)
+        let fps: Int32 = 15
+        let seconds = 3
+        for index in 0..<(Int(fps) * seconds) {
+            while !video.isReadyForMoreMediaData { try? await Task.sleep(for: .milliseconds(5)) }
+            guard let pool = adaptor.pixelBufferPool else { return nil }
+            var buffer: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer)
+            guard let buffer else { return nil }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
+                                       bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpaceCreateDeviceRGB(),
+                                       bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) {
+                let hue = CGFloat(index) / CGFloat(Int(fps) * seconds)
+                context.setFillColor(UIColor(hue: hue, saturation: 0.6, brightness: 0.8, alpha: 1).cgColor)
+                context.fill(CGRect(origin: .zero, size: size))
+                UIGraphicsPushContext(context)
+                context.translateBy(x: 0, y: size.height)
+                context.scaleBy(x: 1, y: -1)
+                let label = NSAttributedString(string: "\(sound ? "sound" : "silent") \(index / Int(fps) + 1)", attributes: [
+                    .font: UIFont.systemFont(ofSize: 44, weight: .heavy), .foregroundColor: UIColor.white,
+                ])
+                label.draw(at: CGPoint(x: (size.width - label.size().width) / 2, y: size.height * 0.45))
+                UIGraphicsPopContext()
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(index), timescale: fps))
+            // The sound alongside, a frame's worth at a time, so the two interleave.
+            if let audio {
+                let chunk = Int(rate) / Int(fps)
+                while !audio.isReadyForMoreMediaData { try? await Task.sleep(for: .milliseconds(5)) }
+                guard let samples = tone(start: index * chunk, count: chunk, rate: rate) else { return nil }
+                audio.append(samples)
+            }
+        }
+        video.markAsFinished()
+        audio?.markAsFinished()
+        await writer.finishWriting()
+        guard writer.status == .completed else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    /// `count` 16-bit mono samples of a quiet 440 Hz sine from `start`.
+    private static func tone(start: Int, count: Int, rate: Double) -> CMSampleBuffer? {
+        var description = AudioStreamBasicDescription(
+            mSampleRate: rate, mFormatID: kAudioFormatLinearPCM, mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
+            mBytesPerPacket: 2, mFramesPerPacket: 1, mBytesPerFrame: 2, mChannelsPerFrame: 1, mBitsPerChannel: 16, mReserved: 0
+        )
+        var format: CMAudioFormatDescription?
+        guard CMAudioFormatDescriptionCreate(allocator: nil, asbd: &description, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &format) == noErr,
+              let format else { return nil }
+        var samples = (0..<count).map { Int16(sin(2 * .pi * 440 * Double(start + $0) / rate) * 6_000) }
+        var block: CMBlockBuffer?
+        let bytes = count * 2
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: bytes, blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: bytes, flags: 0, blockBufferOut: &block) == noErr,
+              let block else { return nil }
+        samples.withUnsafeMutableBytes { raw in _ = CMBlockBufferReplaceDataBytes(with: raw.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: bytes) }
+        var buffer: CMSampleBuffer?
+        guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(allocator: nil, dataBuffer: block, formatDescription: format, sampleCount: count,
+                                                                   presentationTimeStamp: CMTime(value: CMTimeValue(start), timescale: CMTimeScale(rate)),
+                                                                   packetDescriptions: nil, sampleBufferOut: &buffer) == noErr else { return nil }
+        return buffer
+    }
+}
+/// A conversation's story card alone (`-storiesCard`), on the draft d1:
+/// Post, a delete as the viewer's would make, and the viewer it opens.
+final class StoriesHarnessCard: UIViewController, StoriesProviding {
+    let session: StoriesSession
+    var stories: StoriesSession? { session }
+    private let card = StoryInlineView()
+    private let delete = UIButton(type: .custom)
+
+    init(session: StoriesSession) {
+        self.session = session
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    /// What the card shows, for the probe.
+    var state: String { card.accessibilityValue?.split(separator: "#").first.map(String.init) ?? "none" }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = UIColor(Palette.groupedBackground)
+        view.addSubview(card)
+        card.apply("d1")
+        delete.accessibilityIdentifier = "harness-delete-card"
+        delete.backgroundColor = UIColor.black.withAlphaComponent(0.02)
+        let session = session
+        delete.addAction(UIAction { _ in
+            let store = session.store
+            Task { try? await store.delete("d1") }
+        }, for: .touchUpInside)
+        view.addSubview(delete)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let size = StoryCardLayout.size(width: view.bounds.width - 32)
+        card.frame = CGRect(origin: CGPoint(x: 16, y: view.safeAreaInsets.top + 24), size: size)
+        delete.frame = CGRect(x: view.bounds.width - 44, y: view.bounds.height - 60, width: 44, height: 44)
+    }
 }
 #endif
