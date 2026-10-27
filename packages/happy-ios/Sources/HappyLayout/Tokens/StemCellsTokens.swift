@@ -37,12 +37,6 @@ extension Palette {
     /// the "·" between them (`--input-placeholder`).
     public static let stemCellsWorkingText = ColorToken("#49454f", "#cac4d0")
     public static let stemCellsWorkingSeparator = ColorToken("#999999", "#8e8e93")
-    /// A usage ring (`UsageRing`): its quiet track, its arc, and the arc
-    /// when little or almost nothing is left.
-    public static let stemCellsUsageTrack = ColorToken("#c0c0c0", "#48484a")
-    public static let stemCellsUsageArc = ColorToken("#49454f", "#cac4d0")
-    public static let stemCellsUsageLow = ColorToken("#ff9500", "#ffab00")
-    public static let stemCellsUsageCritical = ColorToken("#ff3b30", "#ff453a")
     /// A recording's play button over its first frame, and its glyph.
     public static let stemCellsPlayFill = ColorToken(light: RGBA(red: 0, green: 0, blue: 0, alpha: 0.55), dark: RGBA(red: 0, green: 0, blue: 0, alpha: 0.55))
     public static let stemCellsPlayGlyph = ColorToken("#ffffff")
@@ -111,6 +105,75 @@ extension Palette {
     public static let stemCellsHoldHighlight = ColorToken(light: RGBA(red: 60 / 255.0, green: 60 / 255.0, blue: 67 / 255.0, alpha: 0.2), dark: RGBA(red: 1, green: 1, blue: 1, alpha: 0.15))
     public static let stemCellsHoldInk = ColorToken("#000000", "#ffffff")
     public static let stemCellsHoldDestructive = ColorToken("#ff3b30", "#eb5545")
+
+    /// The model and effort lists (desktop's `composer-model-control.css`):
+    /// the panel (`--surface`, `--modal-border`), a picked or pressed line
+    /// (`--surface-pressed`), a pressed heading (`--surface-selected`), the
+    /// hairline (`--divider`) and the ink (`--text`, `--text-secondary`).
+    public static let stemCellsPanelFill = ColorToken("#ffffff", "#212121")
+    public static let stemCellsPanelBorder = ColorToken(light: RGBA(red: 0, green: 0, blue: 0, alpha: 0.1), dark: RGBA(red: 1, green: 1, blue: 1, alpha: 0.1))
+    public static let stemCellsPanelPressed = ColorToken("#f0f0f2", "#2c2c2e")
+    public static let stemCellsPanelHeadingPressed = ColorToken("#eaeaea", "#2c2c2e")
+    public static let stemCellsPanelDivider = ColorToken("#eaeaea", "#292929")
+    public static let stemCellsPanelText = ColorToken("#000000", "#ffffff")
+    public static let stemCellsPanelSecondary = ColorToken("#49454f", "#cac4d0")
+    /// A usage ring (`UsageRing`): its quiet track, its arc, and the arc
+    /// when little or almost nothing is left.
+    public static let stemCellsUsageTrack = ColorToken("#c0c0c0", "#48484a")
+    public static let stemCellsUsageArc = ColorToken("#49454f", "#cac4d0")
+    public static let stemCellsUsageLow = ColorToken("#ff9500", "#ffab00")
+    public static let stemCellsUsageCritical = ColorToken("#ff3b30", "#ff453a")
+}
+
+/// Desktop's model control panels at 1.25, which puts their 14px type at
+/// iOS menus' 17.5 and their 32px lines at 40.
+public enum StemCellPickerMetrics {
+    public static let scale: CGFloat = 1.25
+    /// `--happy-panel-inset`, the panel's padding.
+    public static let inset: CGFloat = 6 * scale
+    /// Between a panel's blocks: services, hairlines, the footer.
+    public static let gap: CGFloat = 4 * scale
+    public static let radius: CGFloat = 14 * scale
+    public static let border: CGFloat = 1
+    /// A model, effort or account line, and a service's heading.
+    public static let row: CGFloat = 32 * scale
+    public static let heading: CGFloat = 28 * scale
+    /// A line's text inset, and its highlight 2 inside it, rounded 8.
+    public static let padding: CGFloat = 10 * scale
+    public static let highlightInset: CGFloat = 2 * scale
+    public static let highlightRadius: CGFloat = 8 * scale
+    public static let labelSize: CGFloat = 14 * scale
+    public static let headingSize: CGFloat = 12 * scale
+    public static let linkSize: CGFloat = 13 * scale
+    /// The check after a picked line's name, 6 after it.
+    public static let check: CGFloat = 14 * scale
+    public static let checkGap: CGFloat = 6 * scale
+    /// A heading: its service, 4, its account (at most 112 wide), its
+    /// usage 6 apart, and its chevron.
+    public static let headingGap: CGFloat = 4 * scale
+    public static let accountMax: CGFloat = 112 * scale
+    public static let usageGap: CGFloat = 6 * scale
+    public static let chevron: CGFloat = 12 * scale
+    /// A usage gauge: its number, 4, a ring 12 across.
+    public static let gaugeSize: CGFloat = 12 * scale
+    public static let ring: CGFloat = 12 * scale
+    public static let ringGap: CGFloat = 4 * scale
+    /// The account's windows under its list: 6 and 10 in, lines 4 apart,
+    /// the week's 20 high, the rest 16; a window's name at least 48 wide.
+    public static let detailsInsetY: CGFloat = 6 * scale
+    public static let detailsLine: CGFloat = 16 * scale
+    public static let detailsPrimaryLine: CGFloat = 20 * scale
+    public static let detailsLabelMin: CGFloat = 48 * scale
+    public static let detailsGap: CGFloat = 8 * scale
+    /// The panel stands 8 over its chip, at least 8 from the screen's edges.
+    public static let anchorGap: CGFloat = 8 * scale
+    public static let margin: CGFloat = 8
+    public static let maxHeight: CGFloat = 480 * scale
+    /// Widths: the model list 216 to 256, effort at least 128, accounts 288.
+    public static let modelsMinWidth: CGFloat = 216 * scale
+    public static let modelsMaxWidth: CGFloat = 256 * scale
+    public static let effortsMinWidth: CGFloat = 128 * scale
+    public static let accountsWidth: CGFloat = 288 * scale
 }
 
 public enum StemCellsMetrics {
@@ -120,21 +183,36 @@ public enum StemCellsMetrics {
     public static let sheenDuration: Double = 1.6
     // Desktop's sidebar at its own pixels (`Sidebar.tsx`: `SIDEBAR_ROW_HEIGHT`
     // and the rest, `styles/sidebar.css`, `theme.css`), half again as big on
-    // the phone: rows, gaps, type and marks all `phone` times desktop's. The
-    // edges are the phone's own: marks stand under the header's left
-    // control, folds under its right one, and nesting stays tight.
+    // the phone: rows, gaps, type and marks all `phone` times desktop's.
+    // Nesting stays tight.
     /// How much bigger than desktop's the phone draws the sidebar.
     public static let phone: CGFloat = 1.5
     /// The row box's inset from the screen's edges.
     public static let inset: CGFloat = 8
-    /// A top-level mark's centre: the header's left control's
-    /// (`HomeHeaderLayout`: 16 in, 44 wide).
-    public static let markCenter: CGFloat = HomeHeaderLayout.Metrics.paddingHorizontal + HomeHeaderLayout.Metrics.controlSize / 2
-    /// The trailing square's centre from the right edge: the header's
-    /// right-most button's (16 in, a 1 rim, 44 wide).
-    public static let trailingCenter: CGFloat = HomeHeaderLayout.Metrics.paddingHorizontal + HomeHeaderLayout.Metrics.controlBorder + HomeHeaderLayout.Metrics.controlSize / 2
     /// `SIDEBAR_ROW_HEIGHT`.
     public static let rowHeight: CGFloat = 32 * phone
+    /// Each end of a row holds its mark in a square the row's height: the
+    /// mark's optical centre half the row in from the row box's side, as
+    /// far as it is from the box's top (desktop's 16 in a 32 row).
+    public static let endInset: CGFloat = rowHeight / 2
+    /// A top-level mark's centre, from the screen's left edge.
+    public static let markCenter: CGFloat = inset + endInset
+    /// The fold's optical centre, and the trailing square's, from the right edge.
+    public static let trailingCenter: CGFloat = inset + endInset
+    /// A row's title, lifted so its x-height's middle is the row's middle,
+    /// where the end marks' centres are. Figtree 19.5 centred in the row
+    /// sets its baseline at 30.83 (line 23.4, ascender 18.53) and its
+    /// x-height (9.75) from 21.08: middle 25.95, 1.95 below the row's 24.
+    /// On whole pixels at 3x, 2 (`StemCellsRowInkTests` measures it).
+    public static let titleLift: CGFloat = 2
+    /// Where a fold chevron's ink weighs, from its image's centre, at
+    /// `chevronGlyph` (alpha-weighted at 3x; `StemCellsRowInkTests`):
+    /// a "⌄" is heavier at its top, a "›" at its left.
+    public static let chevronDownInk = CGVector(dx: 0, dy: -0.34)
+    public static let chevronRightInk = CGVector(dx: -0.21, dy: -0.13)
+    /// A section heading's title: desktop's row padding 10 in, which is
+    /// where a top-level glyph's ink starts.
+    public static let sectionTitleInset: CGFloat = 10 * phone
     /// `.happy-sidebar__section-item`.
     public static let sectionHeight: CGFloat = 28 * phone
     /// `.happy-sidebar__separator`.
@@ -159,7 +237,6 @@ public enum StemCellsMetrics {
     public static let trailing: CGFloat = 18 * phone
     public static let trailingGap: CGFloat = 8 * phone
     /// `.happy-sidebar__item-unread`.
-    public static let unreadDot: CGFloat = 6 * phone
     /// `--happy-hover-radius`.
     public static let cornerRadius: CGFloat = 6 * phone
     /// A picture's rounding in its lane: a rounded square, never a circle.

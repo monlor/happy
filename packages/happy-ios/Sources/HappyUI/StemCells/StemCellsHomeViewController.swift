@@ -20,6 +20,8 @@ final class StemCellsHomeViewController: UIViewController {
     private let dock = AgentInputCardView(configuration: AgentInputCardConfiguration(placeholder: Strings.StemCells.composerPlaceholder))
     private let dockScrim = HeaderScrimView(edge: .bottom)
     private var modelsWatch: StemCellsWatch?
+    /// The dock's model or effort list while it is open.
+    private var picker: StemCellPickerPresenter?
     private var session: StemCellsSession?
     private var watch: StemCellsWatch?
     private var accountsObservation: AccountsObservation?
@@ -58,7 +60,8 @@ final class StemCellsHomeViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(Palette.groupedBackground)
+        // The conversation's own ground, light and dark.
+        view.backgroundColor = UIColor(Palette.surface)
         view.addSubview(sidebar)
         view.addSubview(empty)
         view.addSubview(banner)
@@ -81,6 +84,10 @@ final class StemCellsHomeViewController: UIViewController {
         dock.textView.accessibilityIdentifier = "stem-new-work"
         view.addSubview(dock)
         sidebar.onSelect = { [weak self] row in self?.open(row) }
+        sidebar.onIntent = { [weak self] row in
+            guard let agentId = row.agentId, row.targetKind != "surface" else { return }
+            self?.session?.warm.intent(agentId)
+        }
         sidebar.onFold = { [weak self] row in self?.fold(row) }
         sidebar.onAdd = { [weak self] row in self?.makeNewWork(in: row.nodeId) }
         sidebar.menu = { [weak self] row in self?.menu(for: row) }
@@ -111,6 +118,7 @@ final class StemCellsHomeViewController: UIViewController {
         super.viewWillDisappear(animated)
         // A row lifted from its menu goes back before another screen covers it.
         sidebar.disarm(animated: false)
+        picker?.close(animated: false)
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -153,6 +161,7 @@ final class StemCellsHomeViewController: UIViewController {
         self.snapshot = snapshot
         onSnapshot?(snapshot)
         if previous.rows != snapshot.rows { sidebar.apply(Self.drawn(snapshot.rows)) }
+        warmUp()
         if previous.availability != snapshot.availability || previous.error != snapshot.error || previous.stemCellError != snapshot.stemCellError {
             applyChrome()
         }
@@ -184,17 +193,14 @@ final class StemCellsHomeViewController: UIViewController {
         let models = session?.models
         let menus = models?.catalog.flatMap { catalog in models?.newWorkMode.map { StemCellModelMenus(catalog: catalog, selection: $0) } }
         StemCellModelPickers.configure(dock, menus: menus)
+        picker?.update(menus: menus, usage: models?.usage ?? [:])
         view.setNeedsLayout()
     }
 
     /// A pick here is what the next new work is sent with.
-    private func pick(_ kind: StemCellModelPickers.Kind) {
-        sidebar.disarm()
-        guard let models = session?.models, let mode = models.newWorkMode else {
-            session?.models.load()
-            return
-        }
-        StemCellModelPickers.present(kind, from: self, state: models, mode: mode) { next in
+    private func choose(_ key: String) {
+        guard let models = session?.models else { return }
+        StemCellModelPickers.choose(key, state: models, mode: models.newWorkMode) { next in
             models.dockMode = next
         }
     }
@@ -211,11 +217,13 @@ final class StemCellsHomeViewController: UIViewController {
         let bannerHeight = banner.isEmpty ? 0 : banner.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
         let docked = StemCellsDockLayout(size: bounds.size, safeArea: LayoutInsets(view.safeAreaInsets)) { [dock] width in dock.height(fitting: width) }
         dock.setLayoutFrame(docked.card)
+        picker?.follow()
         dockScrim.frame = docked.scrim
         let listBottom = dock.isHidden ? contentInsets.listBottom : docked.listBottom
         let layout = StemCellsHomeLayout(size: bounds.size, contentTop: contentInsets.contentTop, chromeTop: contentInsets.chromeTop, listBottom: listBottom, bannerHeight: bannerHeight, storiesHeight: sidebar.isHidden ? 0 : stories.inset)
         banner.frame = layout.banner
         sidebar.frame = bounds
+        session?.warm.layOut(width: bounds.width, environment: traitCollection.textEnvironment)
         let insets = UIEdgeInsets(layout.listInsets)
         if sidebar.contentInset != insets {
             let atTop = sidebar.contentOffset.y <= -sidebar.contentInset.top + 1
@@ -279,6 +287,7 @@ final class StemCellsHomeViewController: UIViewController {
             guard let agentId = row.agentId else { return }
             session.selectedRowId = row.id
             sidebar.selectedRowId = row.id
+            session.warm.tap(agentId)
             let space = row.spaceId.flatMap { id in snapshotSpace(id) }
             let chat = StemCellChatViewController(session: session, agentId: agentId, title: row.label, spaceId: row.spaceId, stemCell: space)
             navigationController?.pushViewController(chat, animated: animated)
@@ -484,10 +493,19 @@ extension StemCellsHomeViewController: UIScrollViewDelegate {
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
         stories.listDidEndDragging(decelerate: decelerate)
+        if !decelerate { warmUp() }
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
         stories.listDidEndDecelerating()
+        warmUp()
+    }
+
+    /// The sidebar's conversations and those on screen, for reading ahead.
+    private func warmUp() {
+        guard let session, !snapshot.allRows.isEmpty else { return }
+        sidebar.layoutIfNeeded()
+        session.warm.update(rows: snapshot.allRows, visible: sidebar.visibleRows, references: snapshot.references)
     }
 }
 
@@ -584,15 +602,30 @@ extension StemCellsHomeViewController: AgentInputCardDelegate, UIGestureRecogniz
     func agentInputCardDidInvalidateHeight(_ card: AgentInputCardView) { view.setNeedsLayout() }
 
     func agentInputCard(_ card: AgentInputCardView, didSelect key: String, in chip: AgentInputChip) {
-        StemCellModelPickers.Kind(rawValue: key).map(pick)
+        choose(key)
     }
 
+    /// A chip opens its list; with no models yet, they are asked for again.
     func agentInputCard(_ card: AgentInputCardView, didPress chip: AgentInputChip) {
-        switch chip {
-        case .permission: pick(.provider)
-        case .model: pick(.model)
-        case .effort: pick(.effort)
+        sidebar.disarm()
+        guard let models = session?.models else { return }
+        guard let catalog = models.catalog, let mode = models.newWorkMode else { return models.load() }
+        picker?.close(animated: false)
+        let picker = StemCellPickerPresenter(list: chip == .effort ? .effort : .model, card: card, menus: StemCellModelMenus(catalog: catalog, selection: mode), usage: models.usage) { [weak self] key in
+            self?.choose(key)
         }
+        picker.onClose = { [weak self, weak picker] in
+            if let self, self.picker === picker { self.picker = nil }
+        }
+        self.picker = picker
+        picker.show(in: view)
+        StemCellModelPickers.opened(models, mode: mode)
+    }
+
+    func agentInputCard(_ card: AgentInputCardView, didOpenMenuIn chip: AgentInputChip) {
+        sidebar.disarm()
+        guard let models = session?.models else { return }
+        StemCellModelPickers.opened(models, mode: models.newWorkMode)
     }
 
     /// The dock's own taps are its field's: its buttons and chips keep theirs.

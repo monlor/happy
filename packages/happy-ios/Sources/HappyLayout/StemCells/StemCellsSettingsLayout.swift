@@ -209,8 +209,7 @@ public struct StemCellsQRSheetLayout: Equatable, Sendable {
         public static let nameGap: CGFloat = 16
         /// Telegram's sheet: 38 round, its title in a 54 band.
         public static let radius: CGFloat = 38
-        public static let close: CGFloat = 44
-        public static let closeInset: CGFloat = 16
+        public static let close: CGFloat = SheetCloseLayout.size
         public static let titleBand: CGFloat = 54
         public static let titleCenter: CGFloat = 36
         public static let titleHeight: CGFloat = 22
@@ -235,7 +234,7 @@ public struct StemCellsQRSheetLayout: Equatable, Sendable {
     public init(size: CGSize, safeTop: CGFloat, safeBottom: CGFloat, nameHeight: CGFloat, text: Measurable) {
         typealias M = Metrics
         let inner = max(0, size.width - 2 * M.textSide)
-        close = CGRect(x: M.closeInset, y: M.closeInset, width: M.close, height: M.close)
+        close = SheetCloseLayout.frame(width: size.width)
         title = CGRect(x: M.textSide + M.close, y: M.titleCenter - M.titleHeight / 2, width: max(0, size.width - 2 * (M.textSide + M.close)), height: M.titleHeight)
         self.text = CGRect(x: M.textSide, y: M.titleBand + M.textGap, width: inner, height: text.height(fitting: inner))
         primary = CGRect(x: M.textSide, y: self.text.maxY + M.buttonsGap, width: inner, height: M.button)
@@ -249,61 +248,64 @@ public struct StemCellsQRSheetLayout: Equatable, Sendable {
     }
 }
 
-/// The link sheet's content, over its buttons: Happy's mark, the title and
-/// a line on what to do on the computer, centred.
+/// The link sheet's content, over its buttons: the title, centred, then
+/// what to do on the computer.
 public struct StemCellsLinkContentLayout: Equatable, Sendable {
     public enum Metrics {
-        public static let mark: CGFloat = 72
-        public static let titleGap: CGFloat = 20
-        public static let bodyGap: CGFloat = 8
+        /// From the title to the first step, as the relay's checklist has it.
+        public static let stepsGap: CGFloat = LinkComputerContentLayout.Metrics.checklistMarginTop
         public static let bottom: CGFloat = 12
     }
 
-    public var mark: CGRect
     public var title: CGRect
-    public var body: CGRect
+    /// Each step as a checklist row, its number where the box goes.
+    public var steps: [ChecklistRowLayout]
     public var size: CGSize
 
-    public init(width: CGFloat, title: Measurable, body: Measurable) {
+    public init(width: CGFloat, title: Measurable, steps: [LinkComputerContentLayout.Row]) {
         typealias M = Metrics
-        mark = CGRect(x: ((width - M.mark) / 2).rounded(), y: 0, width: M.mark, height: M.mark)
-        self.title = CGRect(x: 0, y: mark.maxY + M.titleGap, width: width, height: title.height(fitting: width))
-        self.body = CGRect(x: 0, y: self.title.maxY + M.bodyGap, width: width, height: body.height(fitting: width))
-        size = CGSize(width: width, height: self.body.maxY + M.bottom)
+        let width = max(0, width)
+        self.title = CGRect(x: 0, y: 0, width: width, height: title.height(fitting: width))
+        var y = self.title.maxY + M.stepsGap
+        var rows: [ChecklistRowLayout] = []
+        for (index, step) in steps.enumerated() {
+            let row = ChecklistRowLayout(origin: CGPoint(x: 0, y: y), width: width, title: step.title, body: step.body)
+            rows.append(row)
+            y = row.maxY + (index < steps.count - 1 ? ChecklistRowLayout.Metrics.marginBottom : 0)
+        }
+        self.steps = rows
+        size = CGSize(width: width, height: y + M.bottom)
     }
 }
 
-/// The link screen's switch between the two ways to link a computer,
-/// under its glass bar: a segmented control, Relay then Direct, centred,
-/// with Direct's "Experimental" tag riding its top edge over that half's
-/// right end; what each way shows starts under it.
-///
-///     (  Relay  |  Direct  )
-///                    [EXPERIMENTAL]
+/// The link sheet's Relay | Direct switch: 60% as wide as the screen's
+/// buttons and centred over them, just above the primary one
+/// (`OnboardingLayout.accessory`), with the Beta tag astride its top edge
+/// at Direct's end.
 public struct StemCellsLinkSwitchLayout: Equatable, Sendable {
     public enum Metrics {
-        public static let side: CGFloat = 16
-        public static let top: CGFloat = 8
         public static let height: CGFloat = 36
-        public static let maxWidth: CGFloat = 360
+        /// Of the buttons' width.
+        public static let widthShare: CGFloat = 0.6
         /// From the control's right end to the tag's.
         public static let tagInset: CGFloat = 10
-        public static let bottom: CGFloat = 8
     }
 
     public var control: CGRect
     public var tag: CGRect
-    /// Where the chosen way's screen starts.
-    public var contentTop: CGFloat
 
-    /// `top` is where the bar's row ends.
-    public init(width: CGFloat, top: CGFloat, tag size: CGSize) {
+    /// In the room the screen keeps for it, `accessory`.
+    public init(accessory: CGRect, tag size: CGSize) {
+        let width = (accessory.width * Metrics.widthShare).rounded()
+        self.init(control: CGRect(x: accessory.minX + ((accessory.width - width) / 2).rounded(), y: accessory.minY, width: width, height: accessory.height), tag: size)
+    }
+
+    /// The tag on `control` where it stands now.
+    public init(control: CGRect, tag size: CGSize) {
         typealias M = Metrics
-        let controlWidth = min(M.maxWidth, max(0, width - 2 * M.side))
-        control = CGRect(x: ((width - controlWidth) / 2).rounded(), y: top + M.top, width: controlWidth, height: M.height)
+        self.control = control
         let tagSize = CGSize(width: size.width.rounded(.up), height: size.height.rounded(.up))
         tag = CGRect(x: control.maxX - M.tagInset - tagSize.width, y: (control.minY - tagSize.height / 2).rounded(), width: tagSize.width, height: tagSize.height)
-        contentTop = control.maxY + M.bottom
     }
 }
 

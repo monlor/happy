@@ -28,7 +28,8 @@ final class StemCellsDirectHomeViewController: UIViewController, StemCellsDockHo
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = UIColor(Palette.groupedBackground)
+        // The conversation's own ground, light and dark.
+        view.backgroundColor = UIColor(Palette.surface)
         addChild(stemCells)
         stemCells.view.frame = view.bounds
         stemCells.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -59,8 +60,10 @@ final class StemCellsDirectHomeViewController: UIViewController, StemCellsDockHo
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Settings has its own glass bar.
-        if let top = navigationController?.topViewController, top !== self, !(top is StemCellsSettingsViewController) {
+        // Settings has its own glass bar, a chat its own header: shown for
+        // them, the bar would slide in with them and away again.
+        if let top = navigationController?.topViewController, top !== self,
+           !(top is StemCellsSettingsViewController), !(top is StemCellChatViewController) {
             navigationController?.setNavigationBarHidden(false, animated: animated)
         }
     }

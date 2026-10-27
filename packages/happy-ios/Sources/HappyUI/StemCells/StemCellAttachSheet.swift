@@ -11,8 +11,8 @@ import UIKit
 /// clipboard, Add files, and the permission the next message runs with.
 ///
 /// It only says what was chosen: the sheet goes first, then `onAction`
-/// hears it, except for the permission, picked over the sheet, which
-/// stays with the value updated by whoever presents it.
+/// hears it, except for the permission, picked in a menu over the sheet,
+/// which stays with the value updated by whoever presents it.
 @MainActor
 final class StemCellAttachSheetViewController: UIViewController {
     enum Action: Equatable {
@@ -30,12 +30,23 @@ final class StemCellAttachSheetViewController: UIViewController {
     var permission: String {
         didSet { if permission != oldValue { rows[2].value.text = permission; view.setNeedsLayout() } }
     }
+    /// The permission row's menu, as the composer's model control opens
+    /// its own; nil until the models are read, the row dimmed meanwhile.
+    var permissionMenu: UIMenu? {
+        get { rows[2].menu }
+        set {
+            rows[2].menu = newValue
+            rows[2].alpha = newValue == nil ? 0.5 : 1
+        }
+    }
 
     private let limit: Int
+    /// Going because something was chosen.
+    private var chose = false
     private let closeGlass = StemCellChatHeaderView.glass()
     private let closeButton = UIButton(type: .system)
     private let titleLabel = UILabel()
-    private let trailingButton = UIButton(type: .system)
+    private let photosButton = UIButton(type: .system)
     private let strip = UIScrollView()
     private let camera = StemCellAttachTile()
     private var tiles: [StemCellAttachTile] = []
@@ -56,7 +67,7 @@ final class StemCellAttachSheetViewController: UIViewController {
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .pageSheet
         if let sheet = sheetPresentationController {
-            let height = Self.layout(width: 0, title: 0, trailing: 0, tiles: 1).height
+            let height = Self.layout(width: 0, title: 0, photos: 0, tiles: 1).height
             sheet.detents = [.custom(identifier: .init("attach")) { _ in height }]
             sheet.prefersGrabberVisible = true
         }
@@ -64,8 +75,8 @@ final class StemCellAttachSheetViewController: UIViewController {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    private static func layout(width: CGFloat, title: CGFloat, trailing: CGFloat, tiles: Int, values: [CGFloat?] = [nil, nil, 0], scale: CGFloat = 3) -> StemCellAttachSheetLayout {
-        StemCellAttachSheetLayout(width: width, titleWidth: title, trailingWidth: trailing, tiles: tiles, values: values, scale: scale)
+    private static func layout(width: CGFloat, title: CGFloat, photos: CGFloat, tiles: Int, values: [CGFloat?] = [nil, nil, 0], scale: CGFloat = 3) -> StemCellAttachSheetLayout {
+        StemCellAttachSheetLayout(width: width, titleWidth: title, photosWidth: photos, tiles: tiles, values: values, scale: scale)
     }
 
     override func viewDidLoad() {
@@ -89,12 +100,12 @@ final class StemCellAttachSheetViewController: UIViewController {
         titleLabel.accessibilityTraits = .header
         view.addSubview(titleLabel)
 
-        trailingButton.titleLabel?.font = .systemFont(ofSize: 17)
-        trailingButton.tintColor = UIColor(Palette.headerTint)
-        trailingButton.accessibilityIdentifier = "attach-photos"
-        trailingButton.addAction(UIAction { [weak self] _ in self?.trailingTapped() }, for: .touchUpInside)
-        view.addSubview(trailingButton)
-        updateTrailing()
+        photosButton.titleLabel?.font = .systemFont(ofSize: 17)
+        photosButton.tintColor = UIColor(Palette.headerTint)
+        photosButton.accessibilityIdentifier = "attach-photos"
+        photosButton.addAction(UIAction { [weak self] _ in self?.photosTapped() }, for: .touchUpInside)
+        view.addSubview(photosButton)
+        updatePhotos()
 
         strip.showsHorizontalScrollIndicator = false
         strip.alwaysBounceHorizontal = true
@@ -190,24 +201,24 @@ final class StemCellAttachSheetViewController: UIViewController {
             tile.setNumber(number, animated: true)
             tile.accessibilityLabel = Strings.StemCells.photo(picked: number)
         }
-        updateTrailing()
+        updatePhotos()
     }
 
     /// Photos, or "Add N" while the strip holds picks.
-    private func updateTrailing() {
+    private func updatePhotos() {
         let title = picked.isEmpty ? Strings.StemCells.photos : Strings.StemCells.addPhotos(picked.count)
-        trailingButton.setTitle(title, for: .normal)
-        trailingButton.titleLabel?.font = .systemFont(ofSize: 17, weight: picked.isEmpty ? .regular : .semibold)
+        photosButton.setTitle(title, for: .normal)
+        photosButton.titleLabel?.font = .systemFont(ofSize: 17, weight: picked.isEmpty ? .regular : .semibold)
         view.setNeedsLayout()
     }
 
     /// The title as just set: the button's own label learns it only on its next layout.
-    private var trailingWidth: CGFloat {
-        guard let title = trailingButton.title(for: .normal), let font = trailingButton.titleLabel?.font else { return 0 }
+    private var photosWidth: CGFloat {
+        guard let title = photosButton.title(for: .normal), let font = photosButton.titleLabel?.font else { return 0 }
         return ceil((title as NSString).size(withAttributes: [.font: font]).width)
     }
 
-    private func trailingTapped() {
+    private func photosTapped() {
         finish(picked.isEmpty ? .photos : .add(picked))
     }
 
@@ -219,8 +230,17 @@ final class StemCellAttachSheetViewController: UIViewController {
         }
     }
 
+    /// Closed or swiped away with nothing chosen (a choice is `onAction`).
+    var onGone: (() -> Void)?
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isBeingDismissed, !chose { onGone?() }
+    }
+
     /// The sheet goes, then the choice is heard over what it covered.
     private func finish(_ action: Action) {
+        chose = true
         let onAction = onAction
         dismiss(animated: true) { onAction?(action) }
     }
@@ -232,13 +252,13 @@ final class StemCellAttachSheetViewController: UIViewController {
         let fits = CGSize(width: CGFloat.greatestFiniteMagnitude, height: 44)
         let layout = Self.layout(
             width: view.bounds.width, title: titleLabel.sizeThatFits(fits).width,
-            trailing: trailingWidth, tiles: 1 + tiles.count,
+            photos: photosWidth, tiles: 1 + tiles.count,
             values: rows.map { $0.value.text == nil ? nil : $0.value.sizeThatFits(fits).width }, scale: view.layoutScale
         )
         closeGlass.frame = layout.close
         closeButton.frame = closeGlass.bounds
         titleLabel.frame = layout.title
-        trailingButton.frame = layout.trailing
+        photosButton.frame = layout.photos
         strip.frame = layout.strip
         strip.contentSize = CGSize(width: layout.stripContentWidth, height: layout.strip.height)
         for (tile, frame) in zip([camera] + tiles, layout.tiles) { tile.frame = frame }
@@ -361,6 +381,23 @@ final class StemCellAttachRow: UIControl {
 
     override var isHighlighted: Bool {
         didSet { backgroundColor = isHighlighted ? UIColor(Palette.stemCellsRowPressed) : .clear }
+    }
+
+    /// Opened by a tap, over the sheet; one set while it is open replaces it there.
+    var menu: UIMenu? {
+        didSet {
+            isContextMenuInteractionEnabled = menu != nil
+            showsMenuAsPrimaryAction = menu != nil
+            if let menu { contextMenuInteraction?.updateVisibleMenu { menu.replacing($0) } }
+        }
+    }
+
+    override func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        guard let menu else { return nil }
+        let configuration = UIContextMenuConfiguration(actionProvider: { _ in menu })
+        // Top-down in the order given, whichever way it opens.
+        configuration.preferredMenuElementOrder = .fixed
+        return configuration
     }
 
     /// Placed by the sheet's layout, its parts in its own space.

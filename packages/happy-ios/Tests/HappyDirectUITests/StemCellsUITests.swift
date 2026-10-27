@@ -80,9 +80,10 @@ final class StemCellsUITests: XCTestCase {
         }
     }
 
-    /// A tap on a row's chevron, at its trailing end: its centre 31 in from the row's end.
+    /// A tap on a row's chevron, at its trailing end: its centre half the
+    /// row's height in from the row's end.
     private func tapChevron(_ row: XCUIElement) {
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: row.frame.maxX - 31, dy: row.frame.midY)).tap()
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: row.frame.maxX - row.frame.height / 2, dy: row.frame.midY)).tap()
     }
 
     /// Opens every folded section, top to bottom.
@@ -144,6 +145,8 @@ final class StemCellsUITests: XCTestCase {
         let sections = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:section:"))
         if sections.count > 0 {
             let section = sections.element(boundBy: 0)
+            // Not under the dock, where a tap is the dock's.
+            bringIntoView(section)
             section.tap()
             pause(1.5)
             capture("folded")
@@ -180,6 +183,92 @@ final class StemCellsUITests: XCTestCase {
         app.tapBack()
         pause(4)
         capture("sidebar-after-new-work")
+    }
+
+    /// Desktop's chat layout: new work's intro pinned under the bar, the
+    /// first message right under it with nothing moving, and a follow-up
+    /// sent while the agent is idle lifted 30% down the transcript (no
+    /// higher than the intro's line), the room under it held for the reply.
+    func testChatLayout() {
+        home()
+        pause(1.5)
+        app.descendants(matching: .any)["stem-new-work"].tap()
+        let composer = app.textViews["stem-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 3))
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); pause(0.5) }
+        pause(1.5)
+        let intro = app.descendants(matching: .any)["stem-intro"]
+        let back = app.buttons["stem-chat-back"]
+        let input = app.descendants(matching: .any)["stem-input"]
+        let top = intro.frame.minY
+        XCTAssertGreaterThanOrEqual(top, back.frame.maxY - 1, "the intro is under the bar's row")
+        XCTAssertLessThan(top - back.frame.maxY, 16, "the intro isn't pinned under the bar")
+        capture("layout-intro")
+        // Claude's week is spent on the e2e computer: a model that answers.
+        let model = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Model: ")).firstMatch
+        if !model.label.contains("GPT-6.1 Sol") { pickIn(model, "stem-picker-models", "GPT-6.1 Sol", shot: "layout-model") }
+        XCTAssertEqual(intro.frame.minY, top, accuracy: 1, "picking a model moved the intro")
+        composer.tap()
+        composer.typeText("Plan a long weekend in Lisbon for the four of us. Two lines, no tools.")
+        app.buttons["Send"].tap()
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap() }
+        let messages = app.descendants(matching: .any).matching(identifier: "stem-message")
+        XCTAssertTrue(until(5) { messages.count >= 1 }, "the send never showed")
+        pause(1)
+        XCTAssertEqual(intro.frame.minY, top, accuracy: 1, "the first send moved the intro")
+        XCTAssertEqual(messages.element(boundBy: 0).frame.minY, intro.frame.maxY, accuracy: 1, "the first message isn't right under the intro")
+        let introLine = intro.frame.height
+        capture("layout-first")
+        // The agent done with it, answered or not.
+        let working = app.descendants(matching: .any)["stem-working"]
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline, messages.count < 2 || working.exists { pause(1) }
+        pause(2)
+        capture("layout-answered")
+        let before = messages.count
+        composer.typeText("Swap Saturday and Sunday. One line.")
+        app.buttons["Send"].tap()
+        XCTAssertTrue(until(5) { messages.count > before }, "the follow-up never showed")
+        pause(1)
+        let sent = messages.element(boundBy: before)
+        let viewport = input.frame.minY - 8 - top
+        let line = min(max((viewport * 0.3).rounded(), introLine), (viewport * 0.5).rounded())
+        XCTAssertEqual(sent.frame.minY - top, line, accuracy: 1.5, "the follow-up isn't lifted to the line (viewport \(viewport))")
+        XCTAssertGreaterThan(input.frame.minY - sent.frame.maxY, 40, "no room held for the reply")
+        capture("layout-follow-up")
+        let deadlineReply = Date().addingTimeInterval(120)
+        while Date() < deadlineReply, messages.count < before + 2 || working.exists { pause(1) }
+        pause(2)
+        capture("layout-follow-up-answered")
+    }
+
+    /// New work left with nothing in it goes: the sidebar comes back without
+    /// its row, never showing it on the way, and the computer drops it too
+    /// (it isn't there after a fresh launch either).
+    func testEmptyNewWorkGoes() {
+        home()
+        pause(1.5)
+        let untitled = app.descendants(matching: .any).matching(identifier: "stem-row:space:New")
+        let before = untitled.count
+        app.descendants(matching: .any)["stem-new-work"].tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 3))
+        pause(1)
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); pause(0.5) }
+        capture("empty-new-work")
+        app.tapBack()
+        var most = 0
+        for _ in 0..<6 {
+            most = max(most, untitled.count)
+            pause(0.25)
+        }
+        XCTAssertEqual(most, before, "the empty new work's row showed as the sidebar came back")
+        capture("empty-new-work-gone")
+        pause(2)
+        app.terminate()
+        app.launch()
+        home()
+        pause(2)
+        XCTAssertEqual(untitled.count, before, "the computer kept the empty new work")
     }
 
     /// New work, then back to the sidebar to watch its stem cell hatch into
@@ -511,75 +600,392 @@ final class StemCellsUITests: XCTestCase {
         pause(1)
     }
 
-    /// New work's offers make the real thing: a todo list that takes a todo
-    /// and joins the sidebar, a document with its heading, and a bot whose
-    /// conversation opens. The untouched new work is closed after.
-    func testOffers() {
+    /// New work makes only new work: its intro offers no todo list,
+    /// document, calendar, chat or bot to make instead.
+    func testNoOffers() {
         home()
         pause(1.5)
         app.descendants(matching: .any)["stem-new-work"].tap()
-        XCTAssertTrue(app.staticTexts["Or start one of these:"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 5))
         if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); pause(0.5) }
+        XCTAssertTrue(app.staticTexts["Say what it is — it’ll find its place."].waitForExistence(timeout: 5))
         pause(1.5)
-        capture("offers")
-
-        offer("New todo list", name: "Weekend errands")
-        let field = app.textFields["stem-todo-field"]
-        XCTAssertTrue(field.waitForExistence(timeout: 10))
-        pause(1)
-        field.tap()
-        field.typeText("Buy oranges\n")
-        XCTAssertTrue(app.descendants(matching: .any)["stem-todo"].waitForExistence(timeout: 10))
-        field.tap()
-        field.typeText("Water the cactus\n")
-        pause(2)
-        capture("todo-list")
+        capture("no-offers")
+        XCTAssertFalse(app.staticTexts["Or start one of these:"].exists, "new work still offers things to start")
+        let offers = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-offer"))
+        XCTAssertEqual(offers.count, 0, "new work still offers things to make")
+        for gone in ["New todo list", "New document", "New calendar", "New system monitor", "New chat", "New bot"] {
+            XCTAssertFalse(app.buttons[gone].exists, "new work still offers \(gone)")
+        }
         app.tapBack()
         pause(1)
-
-        offer("New document", name: "Trip notes")
-        XCTAssertTrue(app.descendants(matching: .any)["stem-document"].waitForExistence(timeout: 10))
-        pause(2)
-        capture("document")
-        app.tapBack()
-        pause(1)
-
-        app.descendants(matching: .any)["stem-offer:New bot"].tap()
-        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 20))
-        pause(2)
-        capture("new-bot")
-        app.tapBack()
-        pause(1)
-        app.tapBack()
-        XCTAssertTrue(row("space", "Weekend errands").waitForExistence(timeout: 15), "the todo list never joined the sidebar")
-        XCTAssertTrue(row("space", "Trip notes").waitForExistence(timeout: 15), "the document never joined the sidebar")
-        pause(2)
-        capture("sidebar-with-surfaces")
         let fresh = row("space", "New").firstMatch
         if fresh.exists {
             fresh.press(forDuration: 1.0)
             let close = app.buttons["Close new work"]
             if close.waitForExistence(timeout: 3) { close.tap() }
-            pause(2)
+            pause(1)
         }
-        // Each run makes one more: the newest is any of them.
-        row("space", "Weekend errands").firstMatch.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["stem-todo"].waitForExistence(timeout: 10))
+    }
+
+    /// Home as it looks: the sidebar on the chat's own ground, unread rows
+    /// bold and nothing red beside them. The harness runs it light and dark.
+    func testSidebarLook() {
+        home()
         pause(2)
+        capture("sidebar-look")
+        app.descendants(matching: .any)["stem-new-work"].tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 5))
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); pause(0.5) }
+        pause(1.5)
+        capture("sidebar-look-chat")
         app.tapBack()
+        pause(1)
+        let fresh = row("space", "New").firstMatch
+        if fresh.exists {
+            fresh.press(forDuration: 1.0)
+            let discard = app.buttons["Close new work"]
+            if discard.waitForExistence(timeout: 3) { discard.tap() }
+            pause(1)
+        }
+    }
+
+    /// An unread conversation opened and left reads as read: its row's
+    /// title is no longer bold, here and on the computer (the harness
+    /// checks the daemon after).
+    func testUnreadClears() {
+        home()
+        pause(1.5)
+        capture("unread-before")
+        row("space", "Pasted from").firstMatch.tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 8))
+        pause(3)
+        app.tapBack()
+        pause(2)
+        capture("unread-after")
+    }
+
+    /// A row that folds, selected: its mark and its fold each centred
+    /// half the row in from its ends, folded and open (the frames are
+    /// pinned in StemCellsLayoutTests; this is how it looks).
+    func testRowBalance() {
+        home()
+        pause(1.5)
+        let happy = row("space", "Happy")
+        XCTAssertTrue(happy.waitForExistence(timeout: 5))
+        happy.tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 8))
+        pause(1)
+        app.tapBack()
+        pause(1.5)
+        capture("balance-closed")
+        // The fold, at the row's end.
+        let rowsClosed = shownRows("stem-row:").count
+        tapChevron(happy)
+        XCTAssertTrue(until(3) { self.shownRows("stem-row:").count != rowsClosed }, "the fold didn't open")
+        pause(1.5)
+        capture("balance-open")
+        tapChevron(happy)
+        XCTAssertTrue(until(3) { self.shownRows("stem-row:").count == rowsClosed }, "the fold didn't close")
         pause(1)
     }
 
-    private func offer(_ label: String, name: String) {
-        let button = app.descendants(matching: .any)["stem-offer:\(label)"]
-        XCTAssertTrue(button.waitForExistence(timeout: 5))
-        button.tap()
-        let field = app.alerts.textFields.firstMatch
-        XCTAssertTrue(field.waitForExistence(timeout: 3))
-        field.buttons["Clear text"].firstMatch.tap()
-        field.typeText(name)
-        pause(0.5)
-        app.alerts.buttons["Create"].tap()
+    /// Into a conversation from the sidebar and back, slowly enough to
+    /// watch its header come in (the harness slows the recording).
+    func testOpenFromSidebar() {
+        // UIKit's own slow motion, the simulator's Slow Animations: 4 is 0.25x.
+        if let drag = ProcessInfo.processInfo.environment["STEM_ANIMATION_DRAG"] {
+            app.launchEnvironment["UIAnimationDragCoefficient"] = drag
+            app.launch()
+        }
+        home()
+        pause(1.5)
+        let target = row("space", "Pasted from").firstMatch
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        target.tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 8))
+        pause(2)
+        app.tapBack()
+        pause(1.5)
+        target.tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 8))
+        pause(2)
+        app.tapBack()
+        pause(1.5)
+    }
+
+    /// Conversations read ahead open drawn: several sidebar rows, each
+    /// pushed with its transcript on the push's first frame, timed from
+    /// the tap until it was on screen. `STEM_WARM=0` is the cold "before",
+    /// timed the same way.
+    func testWarmOpens() {
+        let warm = ProcessInfo.processInfo.environment["STEM_WARM"] != "0"
+        if !warm { app.launchEnvironment["STEM_WARM"] = "0" }
+        // Slowed for the recording, the screens take that much longer.
+        var slow = 1.0
+        if let drag = ProcessInfo.processInfo.environment["STEM_ANIMATION_DRAG"] {
+            app.launchEnvironment["UIAnimationDragCoefficient"] = drag
+            slow = Double(drag) ?? 1
+        }
+        app.launch()
+        home()
+        // Desktop's 1.5s before reading ahead, then one conversation at a time.
+        pause(6)
+        var opened: [String] = []
+        // Whatever rows show whole between the bar and the dock, top first,
+        // once each: other tests reorder the sidebar.
+        let dock = app.descendants(matching: .any)["stem-new-work"].frame.minY
+        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:space:")).allElementsBoundByIndex
+            .filter { $0.frame.minY > 100 && $0.frame.maxY < dock - 30 }
+            .sorted { $0.frame.minY < $1.frame.minY }
+        var labels: [String] = []
+        for element in rows {
+            let label = String(element.identifier.dropFirst("stem-row:space:".count))
+            if !labels.contains(label) { labels.append(label) }
+        }
+        for label in labels {
+            let target = row("space", label).firstMatch
+            guard target.exists, target.isHittable else { continue }
+            target.tap()
+            let transcript = app.scrollViews["stem-transcript"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 8), "\(label) didn't open")
+            var value = ""
+            let deadline = Date().addingTimeInterval(10)
+            while Date() < deadline {
+                value = transcript.value as? String ?? ""
+                if !value.isEmpty { break }
+                pause(0.1)
+            }
+            print("STEM_TIMING \(warm ? "warm" : "cold") \(label): \(value)")
+            XCTAssertTrue(value.contains("rows="), "\(label) never showed its transcript")
+            if warm {
+                XCTAssertTrue(value.hasPrefix("first=true"), "\(label) opened without its transcript: \(value)")
+                // An empty one (a bot just made) is drawn too, with nothing in it.
+                if !value.hasSuffix("rows=0") {
+                    XCTAssertTrue(app.descendants(matching: .any)["stem-message"].firstMatch.exists, "\(label) has no message")
+                }
+            }
+            capture("warm-\(opened.count)")
+            opened.append(label)
+            pause(1.5 * slow)
+            app.tapBack()
+            pause(1.5 * slow)
+            if opened.count == 4 { break }
+        }
+        XCTAssertGreaterThanOrEqual(opened.count, 3, "too few conversations on screen: \(opened)")
+        // One left a moment ago comes back drawn too.
+        if warm, let first = opened.first {
+            row("space", first).firstMatch.tap()
+            let transcript = app.scrollViews["stem-transcript"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 8))
+            var value = ""
+            for _ in 0..<100 where value.isEmpty {
+                value = transcript.value as? String ?? ""
+                if value.isEmpty { pause(0.1) }
+            }
+            print("STEM_TIMING warm \(first) again: \(value)")
+            XCTAssertTrue(value.hasPrefix("first=true"), "\(first) came back without its transcript: \(value)")
+            pause(1.5 * slow)
+            app.tapBack()
+        }
+    }
+
+    /// The header's capsule runs to the right edge and opens the
+    /// conversation's detail, never a rename: its tiles, its family drawn
+    /// as the sidebar draws it, and its activity, settled children folded.
+    /// Each row opens its conversation; back comes back to the detail.
+    func testSessionDetail() {
+        home()
+        pause(1)
+        let happy = row("space", "Happy")
+        XCTAssertTrue(happy.waitForExistence(timeout: 5))
+        happy.tap()
+        let title = app.descendants(matching: .any)["stem-chat-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 8))
+        pause(1)
+        capture("detail-header")
+        // The capsule's far right, well past the name, still opens it.
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.width - 30, dy: title.frame.midY)).tap()
+        let detail = app.descendants(matching: .any)["stem-detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), "the capsule's right end didn't open the detail")
+        XCTAssertFalse(app.textFields["stem-chat-title-field"].exists, "the header renamed")
+        XCTAssertEqual(app.staticTexts["stem-detail-name"].label, "Happy")
+        // Happy is never renamed.
+        XCTAssertFalse(app.descendants(matching: .any)["stem-settings:rename"].exists)
+        let tokens = app.descendants(matching: .any)["stem-detail-tile:tokens"]
+        let deadline = Date().addingTimeInterval(8)
+        while Date() < deadline, (tokens.value as? String) == "—" { pause(0.2) }
+        for id in ["tokens", "messages", "subagents", "age", "model", "effort"] {
+            let tile = app.descendants(matching: .any)["stem-detail-tile:\(id)"]
+            XCTAssertTrue(tile.exists, "no \(id) tile")
+            print("STEM_DETAIL \(id) = \(tile.value as? String ?? "")")
+            XCTAssertNotEqual(tile.value as? String, "—", "\(id) never came")
+        }
+        XCTAssertTrue((app.descendants(matching: .any)["stem-detail-tile:subagents"].value as? String ?? "").contains(" of "))
+        // The family is the sidebar's own rows, this one among them.
+        let family = app.descendants(matching: .any)["stem-detail-family"]
+        XCTAssertTrue(family.exists, "no family")
+        XCTAssertTrue(family.descendants(matching: .any)["stem-row:space:Happy"].exists, "it isn't in its own family")
+        // The card holds its rows exactly: none missing, no gap under the last.
+        let members = family.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-row:")).allElementsBoundByIndex
+        print("STEM_FAMILY \(members.map { "\($0.identifier)@\(Int($0.frame.minY))h\(Int($0.frame.height))" }) card \(family.frame)")
+        if let last = members.map(\.frame.maxY).max() {
+            XCTAssertEqual(family.frame.maxY - last, 8 + 12, accuracy: 13, "a gap under the family's last row")
+        }
+        pause(1)
+        capture("detail-top")
+        // Its settled child, folded, then open.
+        let toggle = app.descendants(matching: .any)["stem-detail-completed-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no completed fold")
+        bringIntoView(toggle)
+        toggle.tap()
+        pause(1)
+        let child = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "stem-detail-activity:")).firstMatch
+        XCTAssertTrue(child.waitForExistence(timeout: 3), "the fold never opened")
+        capture("detail-activity")
+        child.tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 8), "the child didn't open")
+        pause(1.5)
+        app.tapBack()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), "back didn't come back to the detail")
+        pause(1)
+        // A sibling from the family opens its own conversation.
+        app.swipeDown()
+        pause(1)
+        let sibling = family.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND NOT identifier ENDSWITH %@", "stem-row:space:", ":Happy")).firstMatch
+        XCTAssertTrue(sibling.exists, "no sibling")
+        let name = String(sibling.identifier.dropFirst("stem-row:space:".count))
+        sibling.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label == %@", "stem-chat-title", name)).firstMatch.waitForExistence(timeout: 8), "\(name) didn't open")
+        pause(1.5)
+        app.tapBack()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5))
+        pause(1)
+        app.tapBack()
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "back didn't come back to the conversation")
+        pause(1)
+        app.tapBack()
+    }
+
+    /// Every modal sheet closes from a button at its top right, as far
+    /// from the top as from the side: settings' QR sheet, the link sheet
+    /// "+" opens and the attach sheet. The link sheet's
+    /// Relay | Direct switch runs across the screen just above what it
+    /// switches (the scan), tagged Beta.
+    func testSheetsClose() {
+        home()
+        app.descendants(matching: .any)["stem-settings-mark"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["stem-settings-qr"].waitForExistence(timeout: 5))
+        pause(1)
+
+        app.descendants(matching: .any)["stem-settings-qr"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["stem-qr"].waitForExistence(timeout: 3))
+        pause(1)
+        capture("sheet-qr")
+        assertCloses(app.descendants(matching: .any)["stem-qr-close"], in: app.descendants(matching: .any)["stem-qr-sheet"], "the QR sheet")
+        closeSheet(app.descendants(matching: .any)["stem-qr-close"], app.descendants(matching: .any)["stem-qr"])
+        XCTAssertTrue(app.descendants(matching: .any)["stem-profile-add"].waitForExistence(timeout: 3))
+
+        app.descendants(matching: .any)["stem-profile-add"].tap()
+        let link = app.descendants(matching: .any)["stem-link"]
+        XCTAssertTrue(link.waitForExistence(timeout: 5), "+ didn't open the link sheet")
+        let control = app.segmentedControls["stem-link-method"]
+        if !control.buttons["Direct"].isSelected { control.buttons["Direct"].tap() }
+        let scan = app.buttons["Scan QR code"]
+        XCTAssertTrue(scan.waitForExistence(timeout: 3))
+        pause(1)
+        // What to do on the computer, in numbered steps, the scan last.
+        for (index, step) in ["Install Happy on your computer", "Open Happy and choose Link Mobile App", "Scan the QR code"].enumerated() {
+            let row = app.descendants(matching: .any)["stem-link-step-\(index + 1)"]
+            XCTAssertTrue(row.exists, "no step \(index + 1)")
+            // The localized lines may hold no-break spaces.
+            XCTAssertEqual(row.label.replacingOccurrences(of: "\u{00A0}", with: " "), "\(index + 1). \(step)")
+        }
+        XCTAssertTrue(app.descendants(matching: .any)["stem-link-paste"].exists, "the paste link is gone")
+        capture("sheet-link-direct")
+        let close = app.buttons["stem-glass-close"]
+        assertCloses(close, in: link, "the link sheet")
+        XCTAssertEqual(control.frame.width, scan.frame.width * 0.6, accuracy: 1, "the switch isn't 60% of the scan's width")
+        XCTAssertEqual(control.frame.midX, scan.frame.midX, accuracy: 1, "the switch isn't centred over the scan")
+        XCTAssertTrue(app.staticTexts["Link your computer"].exists, "the title isn't Link your computer")
+        XCTAssertGreaterThan(control.frame.minY, link.frame.midY, "the switch isn't down over the scan")
+        XCTAssertLessThan(control.frame.maxY, scan.frame.minY, "the switch isn't above the scan")
+        XCTAssertTrue(app.descendants(matching: .any)["stem-link-beta"].exists, "no Beta tag")
+        XCTAssertFalse(app.staticTexts["EXPERIMENTAL"].exists, "the tag still says Experimental")
+        let switchOnDirect = control.frame
+        control.buttons["Relay"].tap()
+        XCTAssertTrue(app.buttons["Create account"].waitForExistence(timeout: 5), "Relay didn't show Welcome")
+        pause(1)
+        capture("sheet-link-relay")
+        XCTAssertEqual(control.frame.minY, switchOnDirect.minY, accuracy: 0.5, "the switch moved between Direct and Relay")
+        XCTAssertLessThan(control.frame.maxY, app.buttons["Create account"].frame.minY, "the switch isn't above Relay's buttons")
+        control.buttons["Direct"].tap()
+        pause(0.8)
+        closeSheet(close, link)
+        app.tapBack()
+        pause(1.5)
+
+        // The attach sheet, over new work.
+        app.descendants(matching: .any)["stem-new-work"].tap()
+        XCTAssertTrue(app.textViews["stem-composer"].waitForExistence(timeout: 5))
+        if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); pause(0.5) }
+        openSheet()
+        capture("sheet-attach")
+        let sheet = app.descendants(matching: .any)["attach-sheet"]
+        assertCloses(app.buttons["attach-close"], in: sheet, "the attach sheet")
+        closeSheet(app.buttons["attach-close"], sheet)
+        app.tapBack()
+        pause(1)
+        let fresh = row("space", "New").firstMatch
+        if fresh.exists {
+            fresh.press(forDuration: 1.0)
+            let discard = app.buttons["Close new work"]
+            if discard.waitForExistence(timeout: 3) { discard.tap() }
+            pause(1)
+        }
+    }
+
+    /// `close` at `sheet`'s top right, as far from its top as from its side.
+    private func assertCloses(_ close: XCUIElement, in sheet: XCUIElement, _ name: String) {
+        guard close.waitForExistence(timeout: 3), sheet.exists else { return XCTFail("\(name) has no close button") }
+        let button = close.frame, frame = sheet.frame
+        XCTAssertGreaterThan(button.midX, frame.midX, "\(name)'s close button isn't at the right")
+        XCTAssertEqual(button.minY - frame.minY, frame.maxX - button.maxX, accuracy: 0.5, "\(name)'s close button: \(button) in \(frame) isn't as far from the top as from the side")
+    }
+
+    private func closeSheet(_ close: XCUIElement, _ sheet: XCUIElement) {
+        if close.exists, close.isHittable { close.tap() } else { app.swipeDown(velocity: .fast) }
+        XCTAssertTrue(until(4) { !sheet.exists }, "the sheet didn't close")
+        pause(0.8)
+    }
+
+    /// Surfaces made elsewhere open from the sidebar: a todo list that takes
+    /// a todo, a document with its heading. The harness makes them first.
+    func testSurfaces() {
+        home()
+        let list = row("space", "Weekend errands").firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 15), "the todo list isn't in the sidebar")
+        list.tap()
+        let field = app.textFields["stem-todo-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        let todos = app.descendants(matching: .any).matching(identifier: "stem-todo")
+        XCTAssertTrue(todos.firstMatch.waitForExistence(timeout: 10))
+        let before = todos.count
+        field.tap()
+        field.typeText("Water the cactus\n")
+        XCTAssertTrue(until(10) { todos.count == before + 1 }, "the todo wasn't added")
+        pause(1)
+        capture("todo-list")
+        app.tapBack()
+        pause(1)
+        let notes = row("space", "Trip notes").firstMatch
+        XCTAssertTrue(notes.waitForExistence(timeout: 15), "the document isn't in the sidebar")
+        notes.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["stem-document"].waitForExistence(timeout: 10))
+        pause(1)
+        capture("document")
+        app.tapBack()
+        pause(1)
     }
 
     /// Prioritizing on (home never mentions it off), then new work: live over the
@@ -979,17 +1385,17 @@ final class StemCellsUITests: XCTestCase {
         capture("large-file")
     }
 
-    /// A task's name renamed where it stands in its conversation's bar: the
-    /// bar and the sidebar row wear it at once and the computer keeps it
-    /// (`STEM_RENAMED`, read back by the run). Renamed back after, so the
-    /// test can run again.
+    /// A task's name renamed from its conversation's detail, where the name
+    /// stands: the detail, the bar and the sidebar row wear it at once and
+    /// the computer keeps it (`STEM_RENAMED`, read back by the run). Renamed
+    /// back after, so the test can run again.
     func testRenameTitle() {
         home()
         pause(1.5)
         let old = ProcessInfo.processInfo.environment["STEM_RENAME_ROW"] ?? "Renew passport"
         let new = old + " by May"
         let titled = { (name: String) in self.app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label == %@", "stem-chat-title", name)).firstMatch }
-        let field = app.textFields["stem-chat-title-field"]
+        let field = app.textFields["stem-detail-rename"]
         for (from, to) in [(old, new), (new, old)] {
             let task = row("space", from)
             XCTAssertTrue(task.waitForExistence(timeout: 10), "no row named \(from)")
@@ -1000,13 +1406,17 @@ final class StemCellsUITests: XCTestCase {
             pause(1)
             if to == new { capture("rename-before") }
             title.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["stem-detail"].waitForExistence(timeout: 5), "the capsule didn't open the detail")
+            app.descendants(matching: .any)["stem-settings:rename"].tap()
             XCTAssertTrue(field.waitForExistence(timeout: 3), "the name never became a field")
             pause(0.8)
             if to == new { capture("rename-editing") }
             // The field opens with its name selected: typing replaces it.
             field.typeText(to + "\n")
-            XCTAssertTrue(titled(to).waitForExistence(timeout: 3), "the bar never showed \(to)")
+            XCTAssertEqual(app.staticTexts["stem-detail-name"].label, to, "the detail never showed \(to)")
             XCTAssertFalse(field.exists)
+            app.tapBack()
+            XCTAssertTrue(titled(to).waitForExistence(timeout: 3), "the bar never showed \(to)")
             pause(1)
             if to == new {
                 capture("rename-after")
@@ -1340,25 +1750,117 @@ final class StemCellsUITests: XCTestCase {
         capture("settings-closed")
     }
 
-    /// The model control's short list (Model, Effort, Provider, each
-    /// showing its value), then its `index`th setting.
-    private func open(_ control: XCUIElement, _ index: Int) {
-        XCTAssertTrue(control.waitForExistence(timeout: 5), "no \(control)")
-        control.tap()
-        let entry = app.collectionViews.buttons.element(boundBy: index)
-        XCTAssertTrue(entry.waitForExistence(timeout: 3), "the model control lists no setting \(index)")
-        entry.tap()
+    /// A row of the menu that is up, by the start of its label (a
+    /// submenu's label goes on with its value).
+    private func menuRow(_ label: String) -> XCUIElement {
+        app.collectionViews.buttons.matching(NSPredicate(format: "label == %@ OR label BEGINSWITH %@", label, label + ",")).firstMatch
     }
 
-    private func pickIn(_ control: XCUIElement, _ index: Int, _ id: String, shot: String) {
-        open(control, index)
-        let row = app.descendants(matching: .any)["stem-pick:\(id)"]
-        XCTAssertTrue(row.waitForExistence(timeout: 5), "the picker has no \(id)")
+    /// A panel of the model control: `stem-picker-models`, `-efforts` or `-accounts`.
+    private func panel(_ id: String) -> XCUIElement {
+        app.descendants(matching: .any)[id]
+    }
+
+    /// `label`'s line in the open panels.
+    private func panelRow(_ label: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "stem-picker-row:", label)).firstMatch
+    }
+
+    /// The picked line of `panel`: in view from the panel's first frame.
+    private func assertPickedShows(_ panel: XCUIElement, _ name: String) {
+        let picked = panel.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND selected == true", "stem-picker-row:")).firstMatch
+        XCTAssertTrue(picked.waitForExistence(timeout: 2), "\(name) checks nothing")
+        let frame = picked.frame
+        XCTAssertTrue(panel.frame.insetBy(dx: -1, dy: -1).contains(frame), "\(name)'s picked line \(frame) isn't in view in \(panel.frame)")
+    }
+
+    /// `control`'s own list, opened on its picked line.
+    private func open(_ control: XCUIElement, _ id: String) {
+        XCTAssertTrue(control.waitForExistence(timeout: 5), "no \(control)")
+        control.tap()
+        XCTAssertTrue(panel(id).waitForExistence(timeout: 3), "\(control) opened no \(id)")
+        assertPickedShows(panel(id), id)
+    }
+
+    /// `label`'s line, scrolled to in short drags inside its panel.
+    @discardableResult
+    private func revealRow(_ label: String, in id: String) -> XCUIElement {
+        let row = panelRow(label)
+        let list = panel(id)
+        // Vertically inside the panel: a line spans its panel's width.
+        func shown() -> Bool { row.exists && row.frame.minY >= list.frame.minY + 4 && row.frame.maxY <= list.frame.maxY - 4 }
+        for _ in 0..<16 where !shown() {
+            let from = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: list.frame.midX, dy: list.frame.midY))
+            let up = row.exists && row.frame.midY < list.frame.midY
+            from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: up ? 80 : -80)))
+            pause(0.5)
+        }
+        return row
+    }
+
+    private func pickIn(_ control: XCUIElement, _ id: String, _ label: String, shot: String) {
+        open(control, id)
+        let row = revealRow(label, in: id)
+        XCTAssertTrue(row.exists, "\(id) has no \(label)")
         pause(1.5)
         capture(shot)
-        if !row.isHittable { app.descendants(matching: .any)["stem-picker"].swipeUp(); pause(1) }
         row.tap()
+        XCTAssertTrue(until(2) { !self.panel(id).exists }, "a pick left \(id) up")
+        pause(1)
+    }
+
+    /// The model chip opens the model list and the effort chip the effort
+    /// list, each opened on its checked line; a service's heading stacks its
+    /// accounts over the model list in place; a touch outside closes the top
+    /// panel only.
+    func testPickerPanels() {
+        home()
         pause(1.5)
+        let model = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Model: ")).firstMatch
+        let effort = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Effort: ")).firstMatch
+        open(model, "stem-picker-models")
+        XCTAssertFalse(panel("stem-picker-efforts").exists)
+        pause(1.5)
+        capture("panel-models")
+        let models = panel("stem-picker-models").frame
+        XCTAssertLessThan(models.maxY, model.frame.minY, "the list isn't over its chip")
+        // A service's heading: its accounts over the list, where it stands.
+        // The picked model's service, in view with it.
+        let heading = app.descendants(matching: .any)["stem-picker-heading:claude"]
+        XCTAssertTrue(heading.exists, "the list has no service heading")
+        heading.tap()
+        let accounts = panel("stem-picker-accounts")
+        XCTAssertTrue(accounts.waitForExistence(timeout: 2), "a heading opened no accounts")
+        XCTAssertEqual(accounts.frame.maxY, models.maxY, accuracy: 1, "the accounts aren't stacked over the list")
+        // Wider than the room left of the list's trailing edge, they keep
+        // the screen's 8pt margin.
+        XCTAssertEqual(accounts.frame.minX, max(8, models.maxX - accounts.frame.width), accuracy: 1)
+        assertPickedShows(accounts, "accounts")
+        pause(1.5)
+        capture("panel-accounts")
+        // Outside the accounts, the list stays.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(until(2) { !accounts.exists }, "a tap away left the accounts up")
+        XCTAssertTrue(panel("stem-picker-models").exists, "a tap away from the accounts closed the list")
+        pause(1)
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(until(2) { !self.panel("stem-picker-models").exists }, "a tap away left the list up")
+        pause(1)
+        open(effort, "stem-picker-efforts")
+        XCTAssertFalse(panel("stem-picker-models").exists, "the effort chip opened the models")
+        pause(1.5)
+        capture("panel-efforts")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        XCTAssertTrue(until(2) { !self.panel("stem-picker-efforts").exists })
+        pause(1)
+        // A pick far down the list: opened again, it shows from the start.
+        pickIn(model, "stem-picker-models", "Opus 5.5 1M", shot: "panel-pick-opus")
+        XCTAssertTrue(model.label.contains("Opus 5.5 1M"), "the chip says \(model.label)")
+        open(model, "stem-picker-models")
+        pause(1.5)
+        capture("panel-models-opus")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
+        pause(1)
     }
 
     /// The pickers: the dock's model chip before new work exists (the same
@@ -1371,15 +1873,9 @@ final class StemCellsUITests: XCTestCase {
         capture("dock-pickers")
         // Home holds one composer: its model chip, whatever it says now.
         let dock = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Model: ")).firstMatch
-        // The provider sheet shows each account's usage; it is looked at and closed.
-        open(dock, 2)
-        XCTAssertTrue(app.descendants(matching: .any)["stem-pick:claude"].waitForExistence(timeout: 5))
-        pause(3)
-        capture("picker-provider")
-        app.descendants(matching: .any)["stem-picker"].swipeDown(velocity: .fast)
-        pause(1.5)
-        pickIn(dock, 0, "claude:anthropic/haiku-5-5", shot: "picker-model")
-        pickIn(dock, 1, "low", shot: "picker-effort")
+        let dockEffort = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Effort: ")).firstMatch
+        pickIn(dock, "stem-picker-models", "Haiku 5.5", shot: "picker-model")
+        pickIn(dockEffort, "stem-picker-efforts", "Low", shot: "picker-effort")
         pause(1)
         capture("dock-picked")
 
@@ -1402,10 +1898,10 @@ final class StemCellsUITests: XCTestCase {
 
         app.swipeDown(velocity: .slow)
         pause(1)
-        pickIn(app.buttons["Model: Haiku 5.5"], 0, "claude:anthropic/sonnet-5", shot: "chat-picker-model")
+        pickIn(app.buttons["Model: Haiku 5.5"], "stem-picker-models", "Sonnet 5", shot: "chat-picker-model")
         // A new model starts on its own default effort.
         XCTAssertTrue(app.buttons["Effort: Medium"].waitForExistence(timeout: 3))
-        pickIn(app.buttons["Effort: Medium"], 1, "high", shot: "chat-picker-effort")
+        pickIn(app.buttons["Effort: Medium"], "stem-picker-efforts", "High", shot: "chat-picker-effort")
         XCTAssertTrue(app.buttons["Effort: High"].waitForExistence(timeout: 3))
         composer.tap()
         composer.typeText("And now? Five words or fewer.")
@@ -1798,6 +2294,20 @@ final class StemCellsUITests: XCTestCase {
         XCTAssertTrue(until(8) { attachments.count == 4 }, "the picture from Files didn't attach")
         pause(1)
         capture("attach-file-picture")
+        // The photos start where the text does, as far down from the box's
+        // top as that is in from its side, and every remove button is inside.
+        let box = app.descendants(matching: .any)["stem-input"].frame
+        let text = app.textViews["stem-composer"].frame
+        let photo = attachments.element(boundBy: 0).frame
+        XCTAssertEqual(photo.minX, text.minX, accuracy: 0.5, "the photos don't start where the text does")
+        XCTAssertEqual(photo.minY - box.minY, text.minX - box.minX, accuracy: 0.5, "the photos' top inset isn't the text's left one")
+        let removes = app.descendants(matching: .any).matching(identifier: "composer-attachment-remove")
+        XCTAssertEqual(removes.count, 4)
+        for index in 0..<removes.count {
+            let remove = removes.element(boundBy: index).frame
+            XCTAssertTrue(box.contains(remove), "remove button \(index) at \(remove) is cut by \(box)")
+            XCTAssertGreaterThan(remove.minY, box.minY)
+        }
         // A text file is said, not sent.
         openSheet()
         app.descendants(matching: .any)["attach-files"].tap()
@@ -1812,14 +2322,16 @@ final class StemCellsUITests: XCTestCase {
         XCTAssertEqual(attachments.count, 4)
 
         // Permission: Read only for the next message.
+        let typing = app.keyboards.firstMatch.exists
         openSheet()
         let permission = app.descendants(matching: .any)["attach-permission"]
         let before = permission.value as? String
         permission.tap()
-        let readOnly = app.descendants(matching: .any)["stem-pick:read_only"]
-        XCTAssertTrue(readOnly.waitForExistence(timeout: 5), "no permission picker")
+        let readOnly = menuRow("Read only")
+        XCTAssertTrue(readOnly.waitForExistence(timeout: 5), "no permission menu")
         pause(1)
         capture("attach-permission-picker")
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the keyboard came up over the sheet with its menu")
         readOnly.tap()
         XCTAssertTrue(until(4) { permission.value as? String == "Read only" }, "the row still says \(before ?? "nothing")")
         XCTAssertTrue(sheet.exists, "picking the permission closed the sheet")
@@ -1827,6 +2339,8 @@ final class StemCellsUITests: XCTestCase {
         capture("attach-permission-read-only")
         app.buttons["attach-close"].tap()
         XCTAssertTrue(until(3) { !sheet.exists }, "the close circle didn't close the sheet")
+        // The keyboard the sheet put down comes back with it gone.
+        if typing { XCTAssertTrue(until(3) { app.keyboards.firstMatch.exists }, "the keyboard didn't come back") }
 
         // Sent: the daemon runs it Read only (checked from outside after the run).
         composer.tap()
