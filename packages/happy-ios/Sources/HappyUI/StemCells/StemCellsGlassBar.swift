@@ -205,6 +205,8 @@ final class StemCellsGlassBar: UIView {
     }
 
     fileprivate func pin(to scroll: UIScrollView) {
+        // The blur comes in as the screen's content goes under the row.
+        scrim.presence = HeaderScrim.presence(scrolledUnder: scroll.contentOffset.y + scroll.adjustedContentInset.top)
         let frame = CGRect(origin: scroll.contentOffset, size: scroll.bounds.size)
         if self.frame.size != frame.size { setNeedsLayout() }
         if self.frame != frame { self.frame = frame }
@@ -222,6 +224,8 @@ final class StemCellsGlassBar: UIView {
         super.layoutSubviews()
         let layout = layout
         scrim.frame = layout.backdrop
+        // It fades into the screen's own ground, whatever that is.
+        if let ground = owner?.view.backgroundColor, scrim.ground != ground { scrim.ground = ground }
         // Nothing on the row, nothing to keep legible.
         scrim.isHidden = !scrims || (leading == nil && !closes && title == nil && actions.isEmpty && !isSearching)
         place(leadingGlass, layout.leading)

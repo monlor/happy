@@ -43,6 +43,13 @@ public struct StemCellCreation: Sendable {
     /// The conversation's ID once the daemon has made it (`agentId` when the
     /// daemon takes the phone's names); a refusal takes the row away again.
     public let created: Task<String, Error>
+
+    public init(spaceId: String, agentId: String, workspaceId: String, created: Task<String, Error>) {
+        self.spaceId = spaceId
+        self.agentId = agentId
+        self.workspaceId = workspaceId
+        self.created = created
+    }
 }
 
 /// One paired computer's Stem Cells sidebar, a port of desktop's
@@ -87,12 +94,18 @@ public actor StemCellsStore {
     private var creating: Set<String> = []
     /// New work being made, by space: what putting it away waits for.
     private var creations: [String: Task<String, Error>] = [:]
-    /// New work put away here: off the sidebar at once, before the daemon
-    /// hears, and back if it refuses.
-    private var awayIds: Set<String> = []
-    /// Of those, the ones the computer has closed: let go once its
-    /// document no longer has them.
-    private var closedIds: Set<String> = []
+    /// Rows taken off here, by document node: off the sidebar at once,
+    /// before the computer hears (new work closed, work archived or left),
+    /// and kept off through every read and event until it confirms; back
+    /// only if it refuses.
+    private var removing: [String: Removal] = [:]
+    private struct Removal {
+        /// When the computer said it was done; nil while it hasn't.
+        var confirmedAt: ContinuousClock.Instant?
+    }
+    /// How long a confirmed removal still holds its row off when the
+    /// document keeps the node (a subtask's): the events have come by then.
+    static let removalLinger: Duration = .seconds(30)
     private var writes = 0
     private var dragging = false
     /// An event or read waited for the hand to lift.
@@ -111,7 +124,13 @@ public actor StemCellsStore {
     private var agents = StemCellsAgents()
     /// Artifact titles references asked for, as read; and those being read.
     private var artifactTitles: [String: StemCellReferences.Artifact] = [:]
+    private var artifactPages: [String: StemCellReferences.Page] = [:]
     private var artifactReads: Set<String> = []
+    /// People messages mention, as named, and those being read; the person reading.
+    private var userNames: [String: String] = [:]
+    private var userReads: Set<String> = []
+    private var usersMissing: Set<String> = []
+    private var me: String?
     private var places = StemCellsPlaces()
     private var placesReload: Task<Void, Never>?
     /// Names given here whose rename no read has carried yet.
@@ -286,6 +305,7 @@ public actor StemCellsStore {
             async let tasks = client.tasks()
             async let setting = client.userSetting(Self.settingKey)
             async let surfaceList = client.surfaces()
+            async let profile = client.profileUser()
             let capabilities = (try? await health)?.capabilities ?? AgentWire.Health.Capabilities()
             self.capabilities = capabilities
             guard capabilities.sidebarOperations == true else {
@@ -299,6 +319,10 @@ public actor StemCellsStore {
             snapshot.prioritizing = (try? await setting) == .bool(true)
             prioritizingDaemon = snapshot.prioritizing
             let served = (try? await surfaceList) ?? nil
+            if let user = (try? await profile) ?? nil {
+                me = user.id
+                if !user.name.isEmpty { userNames[user.id] = user.name }
+            }
             surfaces = served ?? []
             self.bots = botList; self.tasks = taskList
             agents = StemCellsAgents()
@@ -318,6 +342,7 @@ public actor StemCellsStore {
             heldEvents = nil
             // What changed while away is read again when next asked for.
             artifactTitles = [:]
+            artifactPages = [:]
             for event in pending { receive(event) }
             publish()
             keeping?.cancel()
@@ -377,29 +402,88 @@ public actor StemCellsStore {
     /// Reads the titles of artifacts messages name, once each; what is
     /// read is published with the references.
     public func readArtifacts(_ ids: [String]) {
-        let wanted = ids.filter { artifactTitles[$0] == nil && !artifactReads.contains($0) }
+        read(artifacts: ids.filter { artifactTitles[$0] == nil })
+    }
+
+    /// Reads artifacts whether or not they were read before, one read at a time each.
+    private func read(artifacts ids: [String]) {
+        let wanted = ids.filter { !artifactReads.contains($0) }
         guard !wanted.isEmpty else { return }
         artifactReads.formUnion(wanted)
         let client = client
         Task {
             for id in wanted {
                 let read: StemCellReferences.Artifact?
+                var page: StemCellReferences.Page?
                 do {
-                    read = StemCellReferences.artifact(try await client.artifact(id))
+                    let object = try await client.artifact(id)
+                    read = StemCellReferences.artifact(object)
+                    page = StemCellReferences.page(object)
                 } catch DirectAgentError.status(404, _, _) {
                     read = .missing
                 } catch {
                     read = nil
                 }
-                await artifactRead(id, read)
+                await artifactRead(id, read, page: page)
             }
         }
     }
 
-    private func artifactRead(_ id: String, _ read: StemCellReferences.Artifact?) {
+    private func artifactRead(_ id: String, _ read: StemCellReferences.Artifact?, page: StemCellReferences.Page?) {
         artifactReads.remove(id)
         guard let read else { return }
         artifactTitles[id] = read
+        artifactPages[id] = page
+        publish()
+    }
+
+    /// The person's membership of a task they hold, as it is now: a
+    /// loop-in mark set or cleared shows at once.
+    private func adoptMembership(_ membership: JSONValue) {
+        guard let taskId = membership["taskId"]?.stringValue,
+              let index = tasks.firstIndex(where: { $0["id"]?.stringValue == taskId }),
+              var object = tasks[index].objectValue else { return }
+        object["membership"] = membership
+        tasks[index] = .object(object)
+        rebuildPlaces()
+    }
+
+    /// Reads the names of people messages mention, a batch at a time.
+    public func readUsers(_ ids: [String]) {
+        let wanted = Array(Set(ids.filter { userNames[$0] == nil && !userReads.contains($0) && !usersMissing.contains($0) }))
+        guard !wanted.isEmpty else { return }
+        userReads.formUnion(wanted)
+        let client = client
+        Task {
+            var names: [String: String] = [:]
+            for start in stride(from: 0, to: wanted.count, by: 100) {
+                let batch = Array(wanted[start..<min(start + 100, wanted.count)])
+                names.merge((try? await client.userNames(batch)) ?? [:]) { _, new in new }
+            }
+            await usersRead(wanted, names)
+        }
+    }
+
+    private func usersRead(_ asked: [String], _ names: [String: String]) {
+        userReads.subtract(asked)
+        // The reader's own name is the profile's; `/v0/users` may not hold it.
+        for (id, name) in names where !name.isEmpty { userNames[id] = name }
+        // Omitted: no such person here. A failed read is asked again later.
+        if !names.isEmpty || asked.isEmpty { usersMissing.formUnion(asked.filter { userNames[$0] == nil }) }
+        publish()
+    }
+
+    private func readProfile() {
+        let client = client
+        Task {
+            guard let user = (try? await client.profileUser()) ?? nil else { return }
+            await profileRead(user.id, user.name)
+        }
+    }
+
+    private func profileRead(_ id: String, _ name: String) {
+        me = id
+        if !name.isEmpty { userNames[id] = name }
         publish()
     }
 
@@ -443,7 +527,18 @@ public actor StemCellsStore {
         case "agent.created":
             if let agent = payload["agent"] { agents.created(agent); rebuildPlaces() }
         case "bot.created", "bot.updated", "task.created", "task.updated", "task.joined", "task.left":
+            if let membership = payload["membership"] { adoptMembership(membership) }
             schedulePlacesReload()
+        case "task.membership.updated":
+            guard let membership = payload["membership"] else { return }
+            adoptMembership(membership)
+        case "profile.updated":
+            // Names changed somewhere: the ones held are read again.
+            let held = Array(userNames.keys)
+            userNames = userNames.filter { $0.key == me }
+            usersMissing = []
+            readUsers(held)
+            if let me, let id = payload["userId"]?.stringValue ?? payload["profile"]?["userId"]?.stringValue, id == me { readProfile() }
         case "surface.created":
             if let surface = payload["surface"].flatMap(Self.decodeSurface) {
                 surfaces.removeAll { $0.id == surface.id }
@@ -466,6 +561,12 @@ public actor StemCellsStore {
                 artifactTitles[id] = .deleted(title: title)
             } else if case .active(let title, let kind, let latest) = held {
                 artifactTitles[id] = .active(title: changes["title"]?.stringValue ?? title, type: kind, latestVersion: changes["latestVersion"]?.numberValue.map { Int($0) } ?? latest)
+            }
+            if type == "artifact.deleted" || changes["status"]?.stringValue == "deleted" {
+                artifactPages[id] = nil
+            } else if case .active(_, "html", _) = held {
+                // A page shown inline follows its latest version, entry and display.
+                read(artifacts: [id])
             }
         case "user_settings.updated":
             if payload["setting"]?["key"]?.stringValue == Self.settingKey {
@@ -538,15 +639,16 @@ public actor StemCellsStore {
     /// What is on screen: the confirmed document and new work where it was made.
     private func shown() -> SpaceSidebarDocument? {
         guard var document = confirmedShown() else { return nil }
-        for id in closedIds where SpaceSidebar.locate(document, id) == nil {
-            closedIds.remove(id)
-            awayIds.remove(id)
+        let now = ContinuousClock.now
+        for (id, removal) in removing {
+            guard let confirmed = removal.confirmedAt else { continue }
+            if SpaceSidebar.locate(document, id) == nil || now - confirmed > Self.removalLinger { removing[id] = nil }
         }
         inserts.removeAll { insert in !creating.contains(insert.spaceId) && SpaceSidebar.locate(document, insert.spaceId) != nil }
         for insert in inserts where SpaceSidebar.locate(document, insert.spaceId) == nil {
             document = SidebarDocumentEdits.insert(document, spaceId: insert.spaceId, sectionId: insert.sectionId, happySpaceId: insert.happySpaceId) ?? document
         }
-        for id in awayIds {
+        for id in removing.keys {
             if let applied = try? SpaceSidebar.apply(document, [.remove(id)]) { document = applied.document }
         }
         return document
@@ -562,6 +664,10 @@ public actor StemCellsStore {
         snapshot.happySpaceId = spaces.values.first { places.isHappy($0) }?.id
         var references = StemCellReferences.entities(owners: composedOwners)
         references.artifacts = artifactTitles
+        references.pages = artifactPages
+        references.users = userNames
+        references.me = me
+        references.missingUsers = usersMissing
         snapshot.references = references
         continuation.yield(snapshot)
         // What the events changed is kept too, once they settle.
@@ -762,14 +868,16 @@ public actor StemCellsStore {
     /// Takes new work off the sidebar here only, or puts it back: leaving
     /// it, while the leaving may still be undone.
     public func putAway(_ spaceId: String, _ away: Bool) {
-        guard awayIds.contains(spaceId) != away else { return }
-        if away { awayIds.insert(spaceId) } else { awayIds.remove(spaceId) }
+        guard (removing[spaceId] != nil) != away else { return }
+        removing[spaceId] = away ? Removal() : nil
         publish()
     }
 
-    /// Closes new work nobody wrote in: off the sidebar at once, then off
-    /// the computer, once it is made there if it is still being made. The
-    /// daemon refuses once its chat has a message, which brings it back.
+    /// Closes new work nobody wrote in ("Close new work"), as desktop's
+    /// `stemCellDiscard`: off the sidebar at once, then off the computer,
+    /// once it is made there if it is still being made. A lost answer is
+    /// asked again with the same mutation; only a refusal (the chat has a
+    /// message) brings it back.
     public func discard(_ spaceId: String) {
         putAway(spaceId, true)
         let mutationId = ClientID.make()
@@ -778,7 +886,8 @@ public actor StemCellsStore {
         Task {
             // Never made there: nothing to close.
             if let creation, (try? await creation.value) == nil { return }
-            for attempt in 0..<3 {
+            var wait = 0.5
+            for _ in 0..<20 {
                 do {
                     try await client.removeSpace(spaceId, mutationId: mutationId)
                     return await self.closed(spaceId)
@@ -786,42 +895,163 @@ public actor StemCellsStore {
                     // An earlier try closed it.
                     return await self.closed(spaceId)
                 } catch let error as DirectAgentError where (error.status ?? 500) < 500 {
-                    break
+                    return await self.putAway(spaceId, false)
                 } catch {
-                    try? await Task.sleep(for: .milliseconds(500 * (attempt + 1)))
+                    try? await Task.sleep(for: .seconds(wait))
+                    wait = min(wait * 2, 30)
                 }
             }
-            await self.putAway(spaceId, false)
         }
     }
 
     private func closed(_ spaceId: String) {
         inserts.removeAll { $0.spaceId == spaceId }
-        closedIds.insert(spaceId)
+        removing[spaceId, default: Removal()].confirmedAt = .now
         publish()
     }
 
-    /// Leaves a task, or archives a task or bot; the row goes when the daemon says so.
-    public func leave(taskId: String) {
-        let client = client
-        Task { do { try await client.leaveTask(taskId) } catch { self.failed(error) } }
+    // MARK: Reuse
+
+    /// Untouched new work the person could be sent back to rather than
+    /// given another: its space, its conversation, the section its row is
+    /// in, and how it is being made when it still is.
+    public struct NewWork: Sendable {
+        public let spaceId: String
+        public let agentId: String
+        public let workspaceId: String
+        public let sectionId: String?
+        public let creation: Task<String, Error>?
     }
 
-    public func archive(kind: String, id: String) {
+    /// Unnamed new work to try in turn, newest first, as desktop has it:
+    /// for a heading's "+" only what stands under that heading, for new
+    /// work anywhere. Nothing being taken off counts, nor new work this
+    /// phone last left holding something (`leftHolding`).
+    public func newWork(under heading: String?) -> [NewWork] {
+        let document = shown()
+        let all = spaces.values
+            .filter { $0.target.kind == "task" && Self.untouched($0) && removing[$0.id] == nil && !heldOnLeaving.contains($0.id) }
+            .sorted { $0.createdAt > $1.createdAt }
+            .compactMap { space -> NewWork? in
+                guard let agentId = space.target.agentId, let workspaceId = space.target.workspaceId else { return nil }
+                return NewWork(spaceId: space.id, agentId: agentId, workspaceId: workspaceId, sectionId: document.flatMap { Self.section(of: space.id, in: $0) }, creation: creations[space.id])
+            }
+        guard let heading else { return all }
+        return all.filter { $0.sectionId == heading }
+    }
+
+    /// New work left holding something (text, a picture), whose draft may
+    /// not have reached the computer and whose pictures never do: not
+    /// reused until it is left empty again. Kept for this launch only, as
+    /// desktop keeps it for its window.
+    private var heldOnLeaving: Set<String> = []
+
+    /// New work being made or looked for, by the heading whose "+" asked
+    /// for it, nil for new work from the dock: what another ask meanwhile
+    /// gets instead of a second one.
+    private var goingToNewWork: [String?: (id: UUID, work: Task<StemCellCreation, Never>)] = [:]
+
+    /// New work to go to, as desktop's `stemCellCreate`: from the dock,
+    /// new work holding nothing wherever it is, newest first; from a
+    /// heading's "+", only such new work under that heading. Made, right
+    /// below Happy or that heading, only when none is empty. Asked again
+    /// while one is on its way, the dock gets any, a "+" its own
+    /// heading's: the same `id`, so it is opened once.
+    public func goToNewWork(under heading: String?) -> (id: UUID, work: Task<StemCellCreation, Never>) {
+        if let waiting = heading == nil ? goingToNewWork.values.first : goingToNewWork[heading] { return waiting }
+        let id = UUID()
+        let candidates = newWork(under: heading)
+        let work = Task<StemCellCreation, Never> {
+            defer { Task { await self.wentToNewWork(heading, id) } }
+            for candidate in candidates where await isEmpty(candidate) {
+                // Still new work, and still on the sidebar, once the computer has answered.
+                guard let space = spaces[candidate.spaceId], Self.untouched(space), removing[space.id] == nil else { continue }
+                let agentId = candidate.agentId
+                return StemCellCreation(spaceId: candidate.spaceId, agentId: agentId, workspaceId: candidate.workspaceId, created: candidate.creation ?? Task { agentId })
+            }
+            return createStemCell(sectionId: heading)
+        }
+        goingToNewWork[heading] = (id, work)
+        return (id, work)
+    }
+
+    private func wentToNewWork(_ heading: String?, _ id: UUID) {
+        if goingToNewWork[heading]?.id == id { goingToNewWork[heading] = nil }
+    }
+
+    public func leftHolding(_ spaceId: String, _ holding: Bool) {
+        if holding { heldOnLeaving.insert(spaceId) } else { heldOnLeaving.remove(spaceId) }
+    }
+
+    /// `happyAgentSpaceNewWorkIs`: nobody has named it yet.
+    static func untouched(_ space: AgentWire.Space) -> Bool { space.title == nil && space.icon == .stemCell }
+
+    /// The section (or separator) heading the top-level row `id` sits under.
+    static func section(of id: String, in document: SpaceSidebarDocument) -> String? {
+        var heading: String?
+        for item in document.items {
+            if item.kind == .section || item.kind == .separator { heading = item.id }
+            if item.kind == .space && item.id == id { return heading }
+        }
+        return nil
+    }
+
+    /// Whether new work still holds nothing on the computer, as desktop
+    /// reads it: no run in its history, nothing pending, idle, not
+    /// archived, and no draft text. A read that fails is not empty.
+    public func isEmpty(_ work: NewWork) async -> Bool {
+        // Still being made here: nothing can be in it yet.
+        if let creation = work.creation { return (try? await creation.value) != nil }
         let client = client
+        async let history = client.messages(work.agentId, limit: 1)
+        async let start = client.bootstrap(work.agentId)
+        guard let runs = try? await history.runs, let start = try? await start else { return false }
+        return runs.isEmpty && (start.pending ?? []).isEmpty && start.agent.status == "idle" && start.agent.archivedAt == nil
+            && (start.draft?.value?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Leaves a task: its row goes at once, and comes back if the computer refuses.
+    public func leave(taskId: String, nodeId: String? = nil) {
+        let client = client
+        removeAtOnce(nodeId) { try await client.leaveTask(taskId) }
+    }
+
+    /// Archives a task or bot: its row goes at once, and comes back if the computer refuses.
+    public func archive(kind: String, id: String, nodeId: String? = nil) {
+        let client = client
+        removeAtOnce(nodeId) { try await kind == "bot" ? client.archiveBot(id) : client.archiveTask(id) }
+    }
+
+    /// Archives a subtask: its row goes at once, and comes back if the computer refuses.
+    public func archiveSubtask(_ agentId: String, nodeId: String? = nil) {
+        let client = client
+        removeAtOnce(nodeId) { try await client.archiveAgent(agentId) }
+    }
+
+    private func removeAtOnce(_ nodeId: String?, _ work: @escaping @Sendable () async throws -> Void) {
+        if let nodeId {
+            removing[nodeId] = Removal()
+            publish()
+        }
         Task {
-            do { try await kind == "bot" ? client.archiveBot(id) : client.archiveTask(id) }
-            catch { self.failed(error) }
+            do {
+                try await work()
+                await self.removalConfirmed(nodeId)
+            } catch {
+                await self.removalRefused(nodeId, error)
+            }
         }
     }
 
-    /// Archives a subtask; its row goes when the daemon says so.
-    public func archiveSubtask(_ agentId: String) {
-        let client = client
-        Task {
-            do { try await client.archiveAgent(agentId) }
-            catch { self.failed(error) }
-        }
+    private func removalConfirmed(_ nodeId: String?) {
+        guard let nodeId, removing[nodeId] != nil else { return }
+        removing[nodeId]?.confirmedAt = .now
+        publish()
+    }
+
+    private func removalRefused(_ nodeId: String?, _ error: Error) {
+        if let nodeId { removing[nodeId] = nil }
+        failed(error)
     }
 
     private func failed(_ error: Error) {

@@ -53,6 +53,8 @@ public struct StemCellsPlaces: Equatable, Sendable {
 public struct StemCellsRow: Equatable, Sendable, Identifiable {
     public enum Kind: Equatable, Sendable {
         case search, create, section, separator, widget, space, session
+        /// Not the document's: a quick action or a setting search found.
+        case result
     }
 
     /// The mark in a row's leading lane.
@@ -86,7 +88,11 @@ public struct StemCellsRow: Equatable, Sendable, Identifiable {
     public var mark: Mark
     public var status: Status
     public var unread: Bool
-    /// Set when something folds under it: whether it is folded now.
+    /// Someone looped the person in and they haven't opened it yet: the
+    /// row stands out until they do.
+    public var isNew = false
+    /// Set when something folds under it: whether it is folded now. A
+    /// heading without it (search's) folds nothing.
     public var collapsed: Bool?
     /// Happy's own row, which never goes under another.
     public var isHappy: Bool
@@ -108,6 +114,27 @@ public struct StemCellsRow: Equatable, Sendable, Identifiable {
     public var hasShownSessions = false
     /// A Surface row's type: `todo`, `document`, `calendar`, `system_monitor` or `chat`.
     public var surfaceType: String?
+    /// The agent's own line about where its work stands (`set_status`).
+    public var statusLine: String?
+    /// When the agent last set its status line (ms since 1970): the time a
+    /// story row shows at the end of its first line.
+    public var statusTime: Double?
+    /// The row has an agent behind it, so a story row keeps a second line for it.
+    public var hasAgent = false
+    /// Set while agent stories are on: drawn as sidebar v2's story row.
+    public var story: StoryRowState?
+
+    /// What sidebar v2 draws of a row's stories: its ring's segments and how
+    /// many of them are new (none: no ring).
+    public struct StoryRowState: Equatable, Sendable {
+        public var segments: Int
+        public var unseen: Int
+
+        public init(segments: Int = 0, unseen: Int = 0) {
+            self.segments = segments
+            self.unseen = unseen
+        }
+    }
 
     public init(id: String, nodeId: String, kind: Kind, depth: Int = 0, label: String, mark: Mark = .none, status: Status = .none, unread: Bool = false, collapsed: Bool? = nil, isHappy: Bool = false, agentId: String? = nil, workspaceId: String? = nil, spaceId: String? = nil, targetKind: String? = nil, isUntouchedStemCell: Bool = false) {
         self.id = id
@@ -127,7 +154,24 @@ public struct StemCellsRow: Equatable, Sendable, Identifiable {
         self.isUntouchedStemCell = isUntouchedStemCell
     }
 
-    public var opens: Bool { kind == .space || kind == .session || kind == .search || kind == .create }
+    public var opens: Bool { kind == .space || kind == .session || kind == .search || kind == .create || kind == .result }
+
+    /// Something stands in the trailing square: a question, a wait, or a new
+    /// row's dot. A story row has none: its one signal is its corner.
+    public var hasTrailingMark: Bool { story == nil && status != .working && (status == .waiting || status == .awaitingInput || isNew) }
+
+    /// A story row's corner: a dot while it waits on the person (a question
+    /// or an approval), braille dots while a run is going, nothing on a timed wait
+    /// or at rest.
+    public var corner: Corner {
+        switch status {
+        case .awaitingInput: .dot
+        case .working: .braille
+        case .waiting, .none: .none
+        }
+    }
+
+    public enum Corner: Equatable, Sendable { case none, dot, braille }
 }
 
 /// The document as the rows the sidebar draws.
@@ -206,6 +250,22 @@ public enum StemCellsRows {
         return shown
     }
 
+    /// The rows as sidebar v2 draws them while agent stories are on
+    /// (`rings` set, keyed by agent): each conversation's row a story row,
+    /// a task's or bot's wearing its agent's ring. Off (nil), as they are.
+    public static func withStories(_ rows: [StemCellsRow], rings: [String: StoryRing]?) -> [StemCellsRow] {
+        guard let rings else { return rows }
+        return rows.map { row in
+            guard row.kind == .space || row.kind == .session else { return row }
+            var row = row
+            if row.mark == .none { row.mark = .glyph(row.kind == .session ? "agents" : "tasks") }
+            // A session row shows no ring; its stories roll up into its task's.
+            let ring = row.kind == .space ? row.agentId.flatMap { rings[$0] } : nil
+            row.story = StemCellsRow.StoryRowState(segments: ring?.storyIds.count ?? 0, unseen: min(ring?.unseenCount ?? 0, ring?.storyIds.count ?? 0))
+            return row
+        }
+    }
+
     static func knownTarget(_ space: AgentWire.Space) -> Bool {
         ["task", "bot", "surface", "agent"].contains(space.target.kind)
     }
@@ -227,12 +287,17 @@ public enum StemCellsRows {
         )
         if row.workspaceId == nil, let agentId = row.agentId { row.workspaceId = places.agent(agentId)?.workspaceId }
         row.targetId = space.target.id
+        // Looped in by someone and not yet read.
+        row.isNew = space.target.kind == "task" && places.task(space.target.id)?.membership?.unread != nil
         row.sessions = sessionTree(conversation?.subtasks ?? [])
         row.hasHiddenSessions = hasMissing(row.sessions, under: node, held: held)
         // Subtasks not yet in the sidebar: folded, and unfolding brings them.
         if row.collapsed == nil, row.hasHiddenSessions { row.collapsed = true }
         row.hasShownSessions = node.children.contains { spaces[$0.id] == nil && places.agent($0.id) != nil }
         if space.target.kind == "surface" { row.surfaceType = places.surface(space.target.id)?.type }
+        row.hasAgent = conversation != nil
+        row.statusLine = conversation?.statusLine?.text
+        row.statusTime = conversation?.statusLine?.updatedAt
         // A bot can always be archived; a task only where the daemon says so.
         row.canArchive = space.target.kind == "bot" || places.task(space.target.id)?.canArchive == true
         return [row] + children
@@ -274,6 +339,9 @@ public enum StemCellsRows {
                 collapsed: children.isEmpty ? nil : !node.expanded,
                 agentId: agent.id, workspaceId: agent.workspaceId
             )
+            row.hasAgent = true
+            row.statusLine = agent.statusLine?.text
+            row.statusTime = agent.statusLine?.updatedAt
             // A subtask's own subtasks show and hide under it as a row's do.
             row.sessions = sessionTree(agent.subtasks ?? [])
             row.hasHiddenSessions = hasMissing(row.sessions, under: node, held: held)
@@ -321,10 +389,28 @@ public enum StemCellsRows {
         }
     }
 
+    /// A row's conversation is live: its agent's own events end its work the
+    /// moment a turn settles. The space's `working` is the daemon's reading
+    /// at the row's last change and isn't sent again when the run ends, so
+    /// it is only for a row with no conversation here.
     static func status(_ agent: AgentWire.Agent?, working: Bool) -> StemCellsRow.Status {
-        if agent?.pendingQuestionId != nil { return .awaitingInput }
-        if agent?.wait != nil { return .waiting }
-        if working || agent?.isWorking == true { return .working }
+        guard let agent else { return working ? .working : .none }
+        return activity(agent)
+    }
+
+    /// Desktop's `happyAgentConversationActivityProject`: a session works
+    /// while its own turn runs and equally while only the work it handed
+    /// on does. An open question, its own or below, outranks it all; a
+    /// scheduled wait is the low modifier, so a session waiting while its
+    /// subtasks work is working.
+    static func activity(_ agent: AgentWire.Agent) -> StemCellsRow.Status {
+        let children = (agent.subtasks ?? []).filter { $0.archivedAt == nil }
+        let below = children.map(activity)
+        if agent.pendingQuestionId != nil || below.contains(.awaitingInput) { return .awaitingInput }
+        // The host's count takes in the subtasks; only hidden children need it.
+        if (agent.subagents?.running ?? 0) > children.filter(\.isWorking).count { return .working }
+        if (agent.isWorking && agent.wait == nil) || below.contains(.working) { return .working }
+        if agent.isWorking || below.contains(.waiting) { return .waiting }
         return .none
     }
 

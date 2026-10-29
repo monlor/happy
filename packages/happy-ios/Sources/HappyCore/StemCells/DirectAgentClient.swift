@@ -20,7 +20,7 @@ public enum DirectAgentError: Error, Equatable, Sendable {
 /// one a device token may use (happy-agent `API.md`, "Mobile connector").
 public final class DirectAgentClient: Sendable {
     let transport: any DirectTransport
-    private let token: String
+    let token: String
 
     init(transport: any DirectTransport, token: String) {
         self.transport = transport
@@ -31,9 +31,20 @@ public final class DirectAgentClient: Sendable {
 
     // MARK: Requests
 
+    #if DEBUG
+    /// `STEM_SLOW_WRITES` seconds before every write, for a test that
+    /// watches what shows before the computer answers.
+    private static let slowWrites = ProcessInfo.processInfo.environment["STEM_SLOW_WRITES"].flatMap(Double.init)
+    #endif
+
     /// `raw` is sent as is, in place of `json` (an upload's bytes).
     func send(_ method: String, _ path: String, json: JSONValue? = nil, raw: Data? = nil, headers: [String: String] = [:]) async throws -> DirectHTTPResponse {
-        let body = try raw ?? json.map { try JSONEncoder().encode($0) }
+        #if DEBUG
+        if method != "GET", let slow = Self.slowWrites { try await Task.sleep(for: .seconds(slow)) }
+        #endif
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        let body = try raw ?? json.map { try encoder.encode($0) }
         let response = try await transport.request(method: method, path: path, credential: token, body: body, headers: headers)
         if response.status == 401 { throw DirectAgentError.revoked }
         guard (200..<300).contains(response.status) || response.status == 304 || response.status == 206 else {
@@ -122,9 +133,40 @@ public final class DirectAgentClient: Sendable {
         try await decode(JSONValue.self, "GET", "/v0/bots")["bots"]?.arrayValue ?? []
     }
 
-    /// The tasks the person joined, as sent.
+    /// The tasks the person joined, as sent, each holding the person's own
+    /// membership of it (`memberships[]`, matched by `taskId`) as `membership`.
     public func tasks() async throws -> [JSONValue] {
-        try await decode(JSONValue.self, "GET", "/v0/tasks?scope=joined")["tasks"]?.arrayValue ?? []
+        let answer = try await decode(JSONValue.self, "GET", "/v0/tasks?scope=joined")
+        var memberships: [String: JSONValue] = [:]
+        for membership in answer["memberships"]?.arrayValue ?? [] {
+            if let taskId = membership["taskId"]?.stringValue { memberships[taskId] = membership }
+        }
+        return (answer["tasks"]?.arrayValue ?? []).map { task in
+            guard var object = task.objectValue, let id = object["id"]?.stringValue, let membership = memberships[id] else { return task }
+            object["membership"] = membership
+            return .object(object)
+        }
+    }
+
+    // MARK: People
+
+    /// The person this device is paired as, and their name. Standalone,
+    /// `GET /v0/users` names only guests, so the reader's own name is read here.
+    public func profileUser() async throws -> (id: String, name: String)? {
+        let profile = try await decode(JSONValue.self, "GET", "/v0/profile")["profile"]
+        guard let id = profile?["userId"]?.stringValue else { return nil }
+        return (id, profile?["name"]?.stringValue ?? "")
+    }
+
+    /// People by ID (at most 100 a read), as named; unknown ones are left out.
+    public func userNames(_ ids: [String]) async throws -> [String: String] {
+        guard !ids.isEmpty else { return [:] }
+        let answer = try await decode(JSONValue.self, "GET", "/v0/users?ids=" + ids.prefix(100).map(Self.escape).joined(separator: ","))
+        var names: [String: String] = [:]
+        for user in answer["users"]?.arrayValue ?? [] {
+            if let id = user["id"]?.stringValue { names[id] = user["name"]?.stringValue ?? "" }
+        }
+        return names
     }
 
     public func renameTask(_ taskId: String, name: String) async throws {
@@ -204,7 +246,8 @@ public final class DirectAgentClient: Sendable {
     // MARK: Conversations
 
     public func agent(_ agentId: String) async throws -> AgentWire.Agent {
-        try await decode(AgentWire.Agent.self, "GET", "/v0/agents/\(Self.escape(agentId))")
+        struct Response: Decodable { let agent: AgentWire.Agent }
+        return try await decode(Response.self, "GET", "/v0/agents/\(Self.escape(agentId))").agent
     }
 
     public func bootstrap(_ agentId: String) async throws -> AgentWire.Bootstrap {
@@ -263,11 +306,17 @@ public final class DirectAgentClient: Sendable {
     /// Always steering, as desktop sends: mid-turn it is taken at the next
     /// boundary rather than waiting behind the run; idle, it starts one.
     public func sendMessage(_ agentId: String, id: String, text: String, images: [(mimeType: String, data: Data)], mode: AgentWire.Mode) async throws {
+        guard images.allSatisfy({ $0.data.count <= DirectAttachmentRules.maxInlineImageBytes }),
+              images.reduce(0, { $0 + $1.data.count }) <= DirectAttachmentRules.maxInlineImageTotalBytes else {
+            throw DirectAttachmentRules.invalid("Inline images exceed the model's image limit.")
+        }
+        let caption = text.isEmpty && !images.isEmpty ? (images.count == 1 ? "Attached image." : "Attached images.") : text
         var object: [String: JSONValue] = [
-            "id": .string(id), "text": .string(text), "delivery": .string("steer"),
+            "id": .string(id), "text": .string(caption), "delivery": .string("steer"),
             "clientMetadata": .object(["composer": .string("mobile")]),
         ]
         if !images.isEmpty {
+            // /send prepends its required top-level text to these rich blocks.
             object["content"] = .array(images.map {
                 .object(["type": .string("image"), "mimeType": .string($0.mimeType), "data": .string($0.data.base64EncodedString())])
             })
@@ -330,6 +379,13 @@ public final class DirectAgentClient: Sendable {
     public func artifact(_ artifactId: String) async throws -> JSONValue {
         guard let artifact = try await decode(JSONValue.self, "GET", "/v0/artifacts/\(Self.escape(artifactId))")["artifact"] else { throw DirectAgentError.invalidResponse }
         return artifact
+    }
+
+    /// What the daemon serves every page beside its files: `api/v1/style.css`,
+    /// `client.js` and the rest (`GET /v0/artifacts/:id/api/v1/*`). `path` is
+    /// what follows `api/v1/`, escaped as the page wrote it.
+    public func artifactAPI(_ artifactId: String, path: String) async throws -> DirectHTTPResponse {
+        try await send("GET", "/v0/artifacts/\(Self.escape(artifactId))/api/v1/\(path)")
     }
 
     /// One version of an artifact, `nil` for the latest: its entry, its files

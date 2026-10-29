@@ -6,7 +6,12 @@ import UIKit
 /// One row of the Stem Cells sidebar as desktop's `Sidebar` draws it: a
 /// rounded box, the mark in its leading lane, the label, and the trailing
 /// square for a status or a section's fold. Unread is the title in bold,
-/// nothing beside it. It applies the
+/// nothing beside it. A row someone looped the person into is new until
+/// opened: tinted, bold, with a dot in the trailing square, and it pulses
+/// once when it arrives on screen. While agent stories are on, a
+/// conversation's row is sidebar v2's story row instead: its mark on a round
+/// plate inside its story ring, the agent's status under the title, and one
+/// signal in the bottom-right corner (no shimmer, no trailing mark). It applies the
 /// frames `StemCellsSidebarLayout` gives it and decides nothing about where
 /// anything goes.
 final class StemCellsRowView: UIView {
@@ -18,6 +23,11 @@ final class StemCellsRowView: UIView {
     private let chevron = UIImageView()
     private let add = UIImageView()
     private let rule = UIView()
+    private let ring = StemCellsStoryRingView()
+    private let subtitle = UILabel()
+    private let time = UILabel()
+    private let corner = StemCellsCornerView()
+    private let separator = UIView()
     private var pictureJob: Task<Void, Never>?
 
     private(set) var row: StemCellsRow?
@@ -31,10 +41,26 @@ final class StemCellsRowView: UIView {
     var pressed = false {
         didSet { if pressed != oldValue { applyState() } }
     }
+    /// The row right above the selected one: its hairline goes.
+    var aboveSelected = false {
+        didSet { if aboveSelected != oldValue { applyState() } }
+    }
     /// The row is being carried: it rides above the others.
     var lifted = false {
         didSet { if lifted != oldValue { applyState() } }
     }
+    /// False while the list has the row scrolled out of sight: its title's
+    /// sweep stops until it is back.
+    var onScreen = true {
+        didSet { label.onScreen = onScreen; corner.onScreen = onScreen }
+    }
+    /// When the title's running sweep began; nil while it doesn't run.
+    var titleSweepBegan: CFTimeInterval? { label.sweepBegan }
+    var workingSignalRunning: Bool { corner.animating }
+    /// The story ring, for the viewer to grow out of and close into.
+    var ringView: UIView? { ring.isHidden ? nil : ring }
+    /// What the row wears as its mark, for the viewer's avatar.
+    var markImage: UIImage? { picture.isHidden ? nil : picture.image }
     /// What a hold on the row offers, as VoiceOver's actions on it.
     var actions: (() -> [UIAccessibilityCustomAction]?)?
 
@@ -62,7 +88,17 @@ final class StemCellsRowView: UIView {
         add.contentMode = .center
         add.image = StemCellsGlyphs.image("add", size: StemCellsMetrics.addGlyph)
         rule.backgroundColor = UIColor(Palette.stemCellsDivider)
-        for view in [fill, stemCell, picture, label, trailing, chevron, add, rule] { addSubview(view) }
+        subtitle.numberOfLines = StemCellsStoryRowMetrics.subtitleLines
+        subtitle.textColor = UIColor(Palette.stemCellsRowText)
+        time.font = StemCellsStoryRowText.timeFont
+        time.textColor = UIColor(Palette.stemCellsRowText)
+        time.textAlignment = .right
+        separator.backgroundColor = UIColor(Palette.stemCellsDivider)
+        ring.isHidden = true
+        subtitle.isHidden = true
+        time.isHidden = true
+        separator.isHidden = true
+        for view in [fill, separator, ring, stemCell, picture, label, subtitle, time, trailing, chevron, add, rule, corner] { addSubview(view) }
         isAccessibilityElement = true
     }
 
@@ -78,24 +114,48 @@ final class StemCellsRowView: UIView {
         guard row != self.row else { return }
         let previous = self.row
         self.row = row
-        if previous?.mark != row.mark {
+        if previous?.mark != row.mark || (previous?.story == nil) != (row.story == nil) {
             applyMark(row.mark)
             if case .stemCell(let seed) = previous?.mark, case .clay(let slug) = row.mark, let image = ClayIconImages.image(slug) { hatch(seed: seed, into: image) }
         }
         applyText(row)
         applyTrailing(row)
+        applyStory(row)
         applyState()
+        if row.isNew, previous?.isNew != true { pulse() }
         accessibilityLabel = row.kind == .separator ? nil : row.label
         accessibilityTraits = row.kind == .section ? [.header, .button] : row.kind == .separator ? .none : .button
         isAccessibilityElement = row.kind != .separator
         accessibilityIdentifier = "stem-row:\(row.kind):\(row.label)"
         // What the row wears, so a test can watch a stem cell grow its icon.
-        accessibilityValue = switch row.mark {
+        let wears: String? = switch row.mark {
         case .stemCell: "stem cell"
         case .clay(let slug): slug
         default: nil
         }
+        let value = [row.isNew ? Strings.StemCells.newRow : nil, wears].compactMap { $0 }
+        accessibilityValue = value.isEmpty ? nil : value.joined(separator: ", ")
+        if let story = row.story {
+            accessibilityValue = [row.statusLine, story.unseen > 0 ? Strings.Stories.newStories(story.unseen) : nil, row.corner == .dot ? Strings.Stories.waitingOnYou : nil]
+                .compactMap { $0 }.joined(separator: ", ")
+        }
         setNeedsLayout()
+    }
+
+    /// Sidebar v2's story row: the ring, the status line and the corner.
+    private func applyStory(_ row: StemCellsRow) {
+        let story = row.story
+        ring.isHidden = story == nil || row.mark == .none
+        ring.apply(story ?? .init())
+        ring.accessibilityIdentifier = "stem-ring:\(row.label)"
+        subtitle.isHidden = story == nil
+        subtitle.attributedText = row.statusLine.map { StemCellsStoryRowText.status($0, scale: StemCellsStoryRowText.scale(row)) }
+        subtitle.lineBreakMode = .byTruncatingTail
+        let time = story == nil ? nil : StemCellsStoryRowText.time(row)
+        self.time.isHidden = time == nil
+        self.time.text = time
+        self.time.font = StemCellsStoryRowText.timeFont(row)
+        corner.apply(story == nil && row.status != .working ? .none : row.corner)
     }
 
     private func applyMark(_ mark: StemCellsRow.Mark) {
@@ -125,10 +185,10 @@ final class StemCellsRowView: UIView {
             picture.contentMode = .center
             picture.image = StemCellsGlyphs.image(name, size: StemCellsMetrics.glyph)
         case .image(let path, let thumbhash):
-            // A picture is a rounded square.
+            // A picture is a rounded square; in a story ring, a circle.
             picture.isHidden = false
             picture.contentMode = .scaleAspectFill
-            picture.layer.cornerRadius = StemCellsMetrics.pictureRadius
+            picture.layer.cornerRadius = row?.story != nil ? StemCellsStoryRowMetrics.plate / 2 : StemCellsMetrics.pictureRadius
             let pixels = Int(StemCellsMetrics.mark * 3)
             if let cached = images?.cachedPicture(path, thumbhash: thumbhash, pixels: pixels) {
                 picture.image = cached
@@ -152,15 +212,15 @@ final class StemCellsRowView: UIView {
         case .separator:
             label.attributedText = nil
         default:
-            let weight: StemCellsFonts.Weight = row.unread ? .bold : selected ? .semiBold : .medium
-            label.attributedText = NSAttributedString(string: row.label, attributes: [.font: StemCellsFonts.ui(weight, size: StemCellsMetrics.labelSize)])
+            let weight: StemCellsFonts.Weight = row.unread || row.isNew ? .bold : selected ? .semiBold : .medium
+            let size = row.story != nil ? StemCellsStoryRowMetrics.titleSize * StemCellsStoryRowText.scale(row) : StemCellsMetrics.labelSize
+            label.attributedText = NSAttributedString(string: row.label, attributes: [.font: StemCellsFonts.ui(weight, size: size)])
         }
-        // Working rows shimmer their title; nothing else spins.
-        label.shimmering = row.status == .working && (row.kind == .space || row.kind == .session)
     }
 
     private func applyTrailing(_ row: StemCellsRow) {
         trailing.isHidden = true
+        // A heading search shows (`collapsed` nil) folds nothing.
         let folds = row.kind == .section || ((row.kind == .space || row.kind == .session) && row.collapsed != nil)
         chevron.isHidden = !folds
         rule.isHidden = row.kind != .separator
@@ -169,6 +229,8 @@ final class StemCellsRowView: UIView {
             let closed = row.collapsed == true || row.hasHiddenSessions
             chevron.image = StemCellsGlyphs.image(closed ? "chevron-right" : "chevron-down", size: StemCellsMetrics.chevronGlyph)
         }
+        // A story row's corner says all of this instead.
+        guard row.story == nil else { return }
         switch row.status {
         case .awaitingInput:
             trailing.isHidden = false
@@ -179,12 +241,16 @@ final class StemCellsRowView: UIView {
             trailing.image = StemCellsGlyphs.image("clock", size: StemCellsMetrics.clockGlyph)
             trailing.tintColor = UIColor(Palette.stemCellsRowText)
         case .working, .none:
-            break
+            guard row.isNew else { break }
+            trailing.isHidden = false
+            trailing.image = Self.newDot
+            trailing.tintColor = UIColor(Palette.stemCellsRowNewDot)
         }
     }
 
     private func applyState() {
-        let ink = UIColor(selected || row?.unread == true ? Palette.stemCellsRowTextActive : Palette.stemCellsRowText)
+        // A story row's title is always in full ink, as Telegram's are; unread is its weight.
+        let ink = UIColor(selected || row?.unread == true || row?.isNew == true || row?.story != nil ? Palette.stemCellsRowTextActive : Palette.stemCellsRowText)
         label.textColor = ink
         label.ground = UIColor(selected ? Palette.stemCellsRowSelected : Palette.surface)
         picture.tintColor = picture.contentMode == .center ? ink : nil
@@ -192,11 +258,13 @@ final class StemCellsRowView: UIView {
         add.tintColor = UIColor(Palette.stemCellsRowText)
         if let row, row.kind != .section, row.kind != .separator { applyText(row) }
         let carryable = row?.kind != .section && row?.kind != .separator
-        fill.backgroundColor = lifted ? UIColor(Palette.stemCellsBackground) : selected ? UIColor(Palette.stemCellsRowSelected) : pressed && carryable ? UIColor(Palette.stemCellsRowPressed) : .clear
+        fill.backgroundColor = lifted ? UIColor(Palette.stemCellsBackground) : selected ? UIColor(Palette.stemCellsRowSelected) : pressed && carryable ? UIColor(Palette.stemCellsRowPressed) : row?.isNew == true ? UIColor(Palette.stemCellsRowNew) : .clear
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOpacity = lifted ? 0.14 : 0
         layer.shadowRadius = 12
         layer.shadowOffset = CGSize(width: 0, height: 4)
+        // The hairline goes where the row is filled.
+        separator.alpha = selected || aboveSelected || pressed || lifted || row?.isNew == true ? 0 : 1
     }
 
     override func layoutSubviews() {
@@ -207,9 +275,38 @@ final class StemCellsRowView: UIView {
         func local(_ rect: CGRect) -> CGRect { rect.offsetBy(dx: -origin.x, dy: -origin.y) }
         fill.frame = bounds
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: StemCellsMetrics.cornerRadius).cgPath
-        let mark = frames.mark.map(local) ?? .zero
+        var mark = frames.mark.map(local) ?? .zero
+        ring.frame = frames.ring.map(local) ?? .zero
+        if frames.ring != nil, let row {
+            // On the plate: art and glyphs at their own size in its middle,
+            // a picture filling it.
+            let side: CGFloat? = switch row.mark {
+            case .clay, .happy, .stemCell: StemCellsStoryRowMetrics.plateArt
+            case .glyph: StemCellsStoryRowMetrics.plateGlyph
+            default: nil
+            }
+            if let side {
+                let scaled = side * StemCellsStoryRowText.scale(row)
+                mark = mark.insetBy(dx: (mark.width - scaled) / 2, dy: (mark.height - scaled) / 2)
+            }
+        }
         stemCell.frame = mark
         picture.frame = mark
+        // One fixed line, including while empty; no measuring on apply.
+        subtitle.frame = frames.subtitle.map(local) ?? .zero
+        if let frame = frames.time.map(local) {
+            // On the title's baseline.
+            let factor = row.map(StemCellsStoryRowText.scale) ?? 1
+            let title = StemCellsFonts.ui(.medium, size: StemCellsStoryRowMetrics.titleSize * factor)
+            let small = row.map(StemCellsStoryRowText.timeFont) ?? StemCellsStoryRowText.timeFont
+            let drop = ((title.lineHeight - small.lineHeight) / 2 + small.descender - title.descender).rounded()
+            time.frame = frame.offsetBy(dx: 0, dy: drop)
+        } else {
+            time.frame = .zero
+        }
+        separator.frame = frames.separator.map(local) ?? .zero
+        separator.isHidden = frames.separator == nil
+        corner.frame = frames.corner.map(local) ?? .zero
         label.frame = local(frames.label)
         field?.frame = label.frame
         trailing.frame = frames.trailing.map(local) ?? .zero
@@ -217,6 +314,29 @@ final class StemCellsRowView: UIView {
         add.frame = frames.add.map(local) ?? .zero
         add.isHidden = frames.add == nil
         rule.frame = frames.rule.map(local) ?? .zero
+    }
+
+    // MARK: New
+
+    /// The new row's dot, drawn once as a template to tint.
+    private static let newDot: UIImage = {
+        let size = CGSize(width: StemCellsMetrics.newDot, height: StemCellsMetrics.newDot)
+        return UIGraphicsImageRenderer(size: size).image { _ in UIBezierPath(ovalIn: CGRect(origin: .zero, size: size)).fill() }
+            .withRenderingMode(.alwaysTemplate)
+    }()
+
+    /// A row that just became new flashes its tint once, where the person can see it.
+    private func pulse() {
+        guard window != nil, !UIAccessibility.isReduceMotionEnabled, !selected else { return }
+        let flash = UIColor(Palette.stemCellsRowNewDot).withAlphaComponent(0.35)
+        let rest = UIColor(Palette.stemCellsRowNew)
+        fill.backgroundColor = rest
+        UIView.animateKeyframes(withDuration: StemCellsMetrics.newPulseDuration, delay: 0.15, options: [.allowUserInteraction]) {
+            UIView.addKeyframe(withRelativeStartTime: 0, relativeDuration: 0.25) { self.fill.backgroundColor = flash }
+            UIView.addKeyframe(withRelativeStartTime: 0.25, relativeDuration: 0.25) { self.fill.backgroundColor = rest }
+            UIView.addKeyframe(withRelativeStartTime: 0.5, relativeDuration: 0.25) { self.fill.backgroundColor = flash }
+            UIView.addKeyframe(withRelativeStartTime: 0.75, relativeDuration: 0.25) { self.fill.backgroundColor = rest }
+        } completion: { [weak self] _ in self?.applyState() }
     }
 
     // MARK: Hatch
@@ -352,15 +472,19 @@ final class StemCellsRenameField: UITextField, UITextFieldDelegate {
 /// into the ground, wipes through them, the letters never moving. The
 /// band is a mask over a second copy of the text (one layer animation the
 /// render server runs, nothing per frame here); its ramp is three widths
-/// of the text sliding two widths a sweep, as desktop's background is. A
-/// change of text or width keeps the sweep where it was.
+/// of the text sliding two widths a sweep, as desktop's background is.
+/// Every sweep keeps one clock (`epoch`), so shimmering titles move
+/// together and a change of text or width keeps the sweep where it was.
+/// It stops off screen, in the background and under Reduce Motion.
 final class StemCellsShimmerLabel: UIView {
     private let base = UILabel()
     private let highlight = UILabel()
     private let band = CAGradientLayer()
-    /// When the running sweep began; a restart picks it up from here.
-    private var sweepStart: CFTimeInterval?
     private var sweptWidth: CGFloat = 0
+    private var backgrounded = false
+
+    /// The one clock every sweep keeps.
+    private static let epoch = CACurrentMediaTime()
 
     var attributedText: NSAttributedString? {
         didSet {
@@ -381,12 +505,16 @@ final class StemCellsShimmerLabel: UIView {
     }
 
     var shimmering = false {
-        didSet {
-            guard shimmering != oldValue else { return }
-            if shimmering { sweepStart = CACurrentMediaTime() } else { sweepStart = nil }
-            update()
-        }
+        didSet { if shimmering != oldValue { update() } }
     }
+
+    /// False where whatever holds the text has it scrolled out of sight.
+    var onScreen = true {
+        didSet { if onScreen != oldValue { update() } }
+    }
+
+    /// When the running sweep's clock began; nil while it doesn't run.
+    var sweepBegan: CFTimeInterval? { band.animation(forKey: "sweep")?.beginTime }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -404,18 +532,22 @@ final class StemCellsShimmerLabel: UIView {
         highlight.layer.mask = band
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.applyColors() }
         NotificationCenter.default.addObserver(self, selector: #selector(update), name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(update), name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(foregrounded), name: UIApplication.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(wentAway), name: UIApplication.didEnterBackgroundNotification, object: nil)
     }
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
     /// Asked for less motion, the text simply stays.
-    private var sweeps: Bool { shimmering && window != nil && !UIAccessibility.isReduceMotionEnabled }
+    private var sweeps: Bool { shimmering && onScreen && !backgrounded && window != nil && !UIAccessibility.isReduceMotionEnabled }
 
     @objc private func update() {
         highlight.isHidden = !sweeps
         if sweeps { startBand() } else { band.removeAllAnimations() }
     }
+
+    @objc private func wentAway() { backgrounded = true; update() }
+    @objc private func foregrounded() { backgrounded = false; update() }
 
     private func applyColors() {
         let ink = textColor.resolvedColor(with: traitCollection)
@@ -454,20 +586,22 @@ final class StemCellsShimmerLabel: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        // Off screen the band stops; back on, it picks up where it was.
+        // Out of the window the band stops; back in, it picks up the clock.
         update()
     }
 
     private func startBand() {
         let width = band.bounds.width / 3
         guard width > 0 else { return }
+        // Already running at this width: nothing to start again.
+        if let running = band.animation(forKey: "sweep") as? CABasicAnimation, running.toValue as? CGFloat == width * 1.5 { return }
         band.removeAnimation(forKey: "sweep")
         let sweep = CABasicAnimation(keyPath: "position.x")
         sweep.fromValue = -width * 0.5
         sweep.toValue = width * 1.5
         sweep.duration = StemCellsMetrics.sheenDuration
         sweep.repeatCount = .infinity
-        sweep.beginTime = sweepStart ?? CACurrentMediaTime()
+        sweep.beginTime = band.convertTime(Self.epoch, from: nil)
         sweep.isRemovedOnCompletion = false
         sweep.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         band.add(sweep, forKey: "sweep")

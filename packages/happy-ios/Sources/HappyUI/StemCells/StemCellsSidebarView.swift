@@ -16,10 +16,12 @@ import UIKit
 /// in place to be renamed.
 final class StemCellsSidebarView: UIScrollView {
     var onSelect: ((StemCellsRow) -> Void)?
+    /// A story row's ring was tapped: its agent's stories, not its conversation.
+    var onOpenStory: ((StemCellsRow, UIView) -> Void)?
     /// A finger came down on a row that opens: it may be opened next.
     var onIntent: ((StemCellsRow) -> Void)?
     var onFold: ((StemCellsRow) -> Void)?
-    /// A section's "+": new work in that section. Sections show it only when set.
+    /// A section's "+": new work in that section. The control is always shown.
     var onAdd: ((StemCellsRow) -> Void)?
     /// What a hold on the row offers, in groups; nil for a row that has nothing.
     var menu: ((StemCellsRow) -> [[StemCellsMenuItem]]?)?
@@ -42,11 +44,12 @@ final class StemCellsSidebarView: UIScrollView {
         didSet { isScrollEnabled = scrolls }
     }
 
-    /// The row whose conversation is open, which stays selected.
+    /// The row drawn selected: on home, the one whose screen is coming in.
     var selectedRowId: String? {
         didSet {
             guard selectedRowId != oldValue else { return }
             for (id, view) in views { view.selected = id == selectedRowId }
+            applyAboveSelected()
         }
     }
 
@@ -169,10 +172,11 @@ final class StemCellsSidebarView: UIScrollView {
             view.configure(row)
             // Rows a tap doesn't open (a proposal's) read as what they are.
             if onSelect == nil, row.kind != .section, row.kind != .separator { view.accessibilityTraits = .staticText }
-            if onFold == nil, row.kind == .section { view.accessibilityTraits = .header }
+            if onFold == nil || row.collapsed == nil, row.kind == .section { view.accessibilityTraits = .header }
             view.selected = row.id == selectedRowId
             touched += 1
         }
+        applyAboveSelected()
         for (id, view) in views where !live.contains(id) {
             view.removeFromSuperview()
             views.removeValue(forKey: id)
@@ -198,6 +202,12 @@ final class StemCellsSidebarView: UIScrollView {
         view.actions = { [weak self, weak view] in
             guard let self, editing == nil, let row = view?.row else { return nil }
             var actions: [UIAccessibilityCustomAction] = []
+            if (row.story?.segments ?? 0) > 0, let onOpenStory, let ring = view?.ringView {
+                actions.append(UIAccessibilityCustomAction(name: Strings.Stories.watchStory) { _ in
+                    onOpenStory(row, ring)
+                    return true
+                })
+            }
             if row.kind == .section, let onAdd {
                 actions.append(UIAccessibilityCustomAction(name: Strings.StemCells.newWorkIn(row.label), image: StemCellsGlyphs.image("add")) { _ in
                     onAdd(row)
@@ -215,8 +225,14 @@ final class StemCellsSidebarView: UIScrollView {
     }
 
     @objc private func rowTapped(_ gesture: UITapGestureRecognizer) {
+        guard let view = gesture.view as? StemCellsRowView else { return }
+        tap(view, at: gesture.location(in: self))
+    }
+
+    /// A tap on a row at `point`, in the list's content.
+    func tap(_ view: StemCellsRowView, at point: CGPoint) {
         // The touch that opened a hold, let go: the hold stays and that is all.
-        guard hold == nil, let view = gesture.view as? StemCellsRowView, let row = view.row else { return }
+        guard hold == nil, let row = view.row else { return }
         // A lifted row put back by a tap that didn't move it.
         if armed { return disarm() }
         // A tap while something is open closes it and does nothing else; a
@@ -226,18 +242,27 @@ final class StemCellsSidebarView: UIScrollView {
             return
         }
         switch row.kind {
+        case .section where row.collapsed == nil:
+            // Search's heading: nothing folds under it.
+            break
         case .section:
             // Its "+", with a finger's room around it, makes new work in it.
-            if let add = view.frames?.add, let onAdd, gesture.location(in: self).x >= add.minX - 7, gesture.location(in: self).x < add.maxX + StemCellsMetrics.trailingGap / 2 {
+            if let add = view.frames?.add, let onAdd, point.x >= add.minX - 7, point.x < add.maxX + StemCellsMetrics.trailingGap / 2 {
                 onAdd(row)
             } else {
                 onFold?(row)
             }
         case .separator: break
         default:
+            // A ring with stories in it opens them, with a finger's room around it.
+            if let ring = view.frames?.ring, (row.story?.segments ?? 0) > 0, let onOpenStory,
+               ring.insetBy(dx: -8, dy: -8).contains(point), let ringView = view.ringView {
+                onOpenStory(row, ringView)
+                return
+            }
             // A row's fold is its chevron, with a finger's room around it;
             // a row that opens nothing (a proposal's) folds wherever it's tapped.
-            if let chevron = view.frames?.chevron, onSelect == nil || gesture.location(in: self).x >= chevron.minX - 14 {
+            if let chevron = view.frames?.chevron, onSelect == nil || point.x >= chevron.minX - 14 {
                 onFold?(row)
             } else {
                 onSelect?(row)
@@ -256,7 +281,7 @@ final class StemCellsSidebarView: UIScrollView {
 
     @objc private func rowPressed(_ gesture: PressRecognizer) {
         guard let view = gesture.view as? StemCellsRowView else { return }
-        let opens = view.row?.kind == .section ? onFold != nil : onSelect != nil
+        let opens = view.row?.kind == .section ? onFold != nil && view.row?.collapsed != nil : onSelect != nil
         view.pressed = opens && hold == nil && (gesture.state == .began || gesture.state == .changed)
         if gesture.state == .began, onSelect != nil, let row = view.row { onIntent?(row) }
     }
@@ -270,10 +295,10 @@ final class StemCellsSidebarView: UIScrollView {
     }
 
     private func layoutRows(_ rows: [StemCellsRow]) -> [StemCellsSidebarLayout.Row] {
-        Self.layoutRows(rows, adds: onAdd != nil)
+        Self.layoutRows(rows)
     }
 
-    nonisolated static func layoutRows(_ rows: [StemCellsRow], adds: Bool = false) -> [StemCellsSidebarLayout.Row] {
+    nonisolated static func layoutRows(_ rows: [StemCellsRow]) -> [StemCellsSidebarLayout.Row] {
         rows.map { row in
             let kind: StemCellsSidebarLayout.Kind = switch row.kind {
             case .section: .section
@@ -281,7 +306,13 @@ final class StemCellsSidebarView: UIScrollView {
             case .widget: .widget
             default: .row
             }
-            return StemCellsSidebarLayout.Row(kind: kind, depth: row.depth, hasMark: row.mark != .none, hasTrailing: row.status == .waiting || row.status == .awaitingInput, hasFold: (row.kind == .space || row.kind == .session) && row.collapsed != nil, hasAdd: adds && row.kind == .section, foldClosed: row.collapsed == true || row.hasHiddenSessions)
+            let corner: StemCellsSidebarLayout.Corner = switch row.corner {
+            case .none: .none
+            case .dot: .dot
+            case .braille: .braille
+            }
+            let story = row.story.map { _ in StemCellsSidebarLayout.StoryRow(hasSubtitle: true, corner: corner, timeWidth: StemCellsStoryRowText.timeWidth(row)) }
+            return StemCellsSidebarLayout.Row(kind: kind, depth: row.depth, hasMark: row.mark != .none, hasTrailing: row.hasTrailingMark, hasWorkingSignal: row.status == .working, hasFold: (row.kind == .space || row.kind == .session) && row.collapsed != nil, hasAdd: row.kind == .section, foldClosed: row.collapsed == true || row.hasHiddenSessions, story: story)
         }
     }
 
@@ -293,6 +324,9 @@ final class StemCellsSidebarView: UIScrollView {
         if laidOut?.width != width || laidOut?.rows != input || layoutResult?.frames.count != shown.count {
             place(shown, animated: false)
         }
+        // A row scrolled out of sight stops its title's sweep. Drawn whole
+        // inside another screen's scroll, every row counts as seen.
+        for view in views.values { view.onScreen = !scrolls || view.frame.intersects(bounds) }
     }
 
     /// Lays `shown` out and moves each row to its place, gliding when asked.
@@ -326,6 +360,14 @@ final class StemCellsSidebarView: UIScrollView {
     }
 
     func view(for rowId: String) -> StemCellsRowView? { views[rowId] }
+
+    /// The row just above the selected one drops its hairline: the
+    /// selection's fill parts the list there, as desktop's does.
+    private func applyAboveSelected() {
+        for (index, row) in rows.enumerated() {
+            views[row.id]?.aboveSelected = index + 1 < rows.count && rows[index + 1].id == selectedRowId
+        }
+    }
 
     private func row(at point: CGPoint) -> StemCellsRowView? {
         for view in views.values where view.frame.contains(point) { return view }

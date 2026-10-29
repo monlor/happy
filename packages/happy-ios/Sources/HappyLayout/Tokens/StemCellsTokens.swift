@@ -14,6 +14,14 @@ extension Palette {
     public static let stemCellsRowTextActive = ColorToken("#000000", "#ffffff")
     /// The open row's fill (`--surface-selected`).
     public static let stemCellsRowSelected = ColorToken("#eaeaea", "#2c2c2e")
+    /// A row someone looped the person into, not yet opened: its fill and
+    /// the dot in its trailing square.
+    public static let stemCellsRowNew = ColorToken("#e3f3f7", "#16343c")
+    public static let stemCellsRowNewDot = ColorToken("#2baccc")
+    /// A person a message mentions ("@Steve"), and the tint behind a
+    /// mention of the person reading.
+    public static let stemCellsMention = ColorToken("#1a7f99", "#5cc8e2")
+    public static let stemCellsMentionMe = ColorToken("#d8eef4", "#1d3f48")
     /// A pressed or carried row's fill (`--surface-ripple`).
     public static let stemCellsRowPressed = ColorToken(light: RGBA(red: 0, green: 0, blue: 0, alpha: 0.08), dark: RGBA(red: 1, green: 1, blue: 1, alpha: 0.08))
     /// A separator's hairline (`--divider`).
@@ -187,6 +195,8 @@ public enum StemCellsMetrics {
     /// into its ground; one sweep takes 1.6s.
     public static let sheenInk: CGFloat = 0.15
     public static let sheenDuration: Double = 1.6
+    /// A row that just became new flashes its tint twice in this long.
+    public static let newPulseDuration: Double = 1.4
     // Desktop's sidebar at its own pixels (`Sidebar.tsx`: `SIDEBAR_ROW_HEIGHT`
     // and the rest, `styles/sidebar.css`, `theme.css`), half again as big on
     // the phone: rows, gaps, type and marks all `phone` times desktop's.
@@ -242,7 +252,8 @@ public enum StemCellsMetrics {
     /// The trailing square a status mark, an unread dot or a fold stands in (`SIDEBAR_SLOT_CELL`).
     public static let trailing: CGFloat = 18 * phone
     public static let trailingGap: CGFloat = 8 * phone
-    /// `.happy-sidebar__item-unread`.
+    /// `.happy-sidebar__item-unread`: the dot a new row wears in that square.
+    public static let newDot: CGFloat = 8 * phone
     /// `--happy-hover-radius`.
     public static let cornerRadius: CGFloat = 6 * phone
     /// A picture's rounding in its lane: a rounded square, never a circle.
@@ -268,6 +279,54 @@ public enum StemCellsMetrics {
     public static let contentBottom: CGFloat = 6 * phone
 }
 
+/// Compact conversation rows: a story ring, a title and one status line,
+/// with the chat's braille loader in the bottom-right corner while running.
+public enum StemCellsStoryRowMetrics {
+    static let phone = StemCellsMetrics.phone
+    /// One height whatever the status says, with a smaller nested variant.
+    public static let rowHeight: CGFloat = 64
+    public static let nestedScale: CGFloat = 0.875
+    public static let nestedRowHeight: CGFloat = 56
+    /// The ring 12 into the row box.
+    public static let ringInset: CGFloat = 12
+    /// The avatar, and the ring's own radius in it.
+    public static let ring: CGFloat = 48
+    public static let ringRadius: CGFloat = 22
+    /// Unseen segments 3 wide, seen ones 1.875, 4.5 between segments when there are several.
+    public static let unseenWidth: CGFloat = 2 * phone
+    public static let seenWidth: CGFloat = 1.25 * phone
+    public static let segmentGap: CGFloat = 3 * phone
+    /// The mark's round plate inside the ring, its ink at 8%.
+    public static let plate: CGFloat = 36
+    public static let plateInk: CGFloat = 0.08
+    /// A glyph, and clay art, on the plate.
+    public static let plateGlyph: CGFloat = 22
+    public static let plateArt: CGFloat = 26
+    /// Ring to text, and the text's end to the box's.
+    public static let textGap: CGFloat = 12
+    public static let textTrailing: CGFloat = 16
+    /// The title: 17 on a 22 line whose top is 10 into the row.
+    public static let titleSize: CGFloat = 17
+    public static let titleLine: CGFloat = 22
+    public static let titleTop: CGFloat = 10
+    /// The status: 14 on one 18-point line, 2 under the title.
+    public static let subtitleSize: CGFloat = 14
+    public static let subtitleLine: CGFloat = 18
+    public static let subtitleLines = 1
+    public static let lineGap: CGFloat = 2
+    /// The time at the end of the first line, and its room from the title.
+    public static let timeSize: CGFloat = 12
+    public static let timeGap: CGFloat = 8
+    /// The corner signal, centred on the status line at the text's
+    /// end; the status always keeps `cornerSlot` clear of it, so it never
+    /// reflows when the signal comes or goes.
+    public static let dot: CGFloat = 12
+    public static let braille = CGSize(width: 8, height: 14)
+    public static let cornerSlot: CGFloat = 12 + 8
+    /// A nested row starts at its parent's text column.
+    public static let indent: CGFloat = ring + textGap
+}
+
 extension ChatTextStyles {
     /// A message from another agent (`agent-activity-row.css`): its sender,
     /// what it said it is, and the message opened under them.
@@ -277,4 +336,7 @@ extension ChatTextStyles {
     public static func stemCellsActivityHeader(_ level: Int) -> ChatTextStyle {
         ChatTextStyle(.figtree(.semibold), size: 12, lineHeight: 18)
     }
+    /// Show full / Show less under a long message: desktop's quiet mono
+    /// meta line (`agent-trace-row.css`, `data-variant="meta"`), 11/16.
+    public static let stemCellsFold = ChatTextStyle(.plex(.mono), size: 11, lineHeight: 16)
 }

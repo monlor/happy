@@ -125,6 +125,8 @@ extension AgentWire {
             public var sidebarAttachments: Bool?
             public var stories: Bool?
             public var stickers: Bool?
+            /// Agents' stories, their rings and status lines.
+            public var agentStories: Bool?
         }
         public var ready: Bool
         public var capabilities: Capabilities?
@@ -160,6 +162,17 @@ extension AgentWire {
         }
     }
 
+    /// The one line an agent last wrote about where its work stands (`set_status`).
+    public struct AgentStatusLine: Equatable, Sendable, Codable {
+        public var text: String
+        public var updatedAt: Double
+
+        public init(text: String, updatedAt: Double) {
+            self.text = text
+            self.updatedAt = updatedAt
+        }
+    }
+
     public struct AgentSubagents: Equatable, Sendable, Codable {
         public var total: Int?
         public var running: Int?
@@ -180,8 +193,9 @@ extension AgentWire {
         public let version: String?
         public let retrying: AgentRetrying?
         public let subagents: AgentSubagents?
+        public let statusLine: AgentStatusLine?
 
-        public init(id: String, workspaceId: String, parentAgentId: String? = nil, title: String? = nil, status: String = "idle", wait: AgentWait? = nil, subtasks: [Agent]? = nil, pendingQuestionId: String? = nil, unread: AgentUnread? = nil, canSendMessages: Bool? = nil, archivedAt: Double? = nil, version: String? = nil, retrying: AgentRetrying? = nil, subagents: AgentSubagents? = nil) {
+        public init(id: String, workspaceId: String, parentAgentId: String? = nil, title: String? = nil, status: String = "idle", wait: AgentWait? = nil, subtasks: [Agent]? = nil, pendingQuestionId: String? = nil, unread: AgentUnread? = nil, canSendMessages: Bool? = nil, archivedAt: Double? = nil, version: String? = nil, retrying: AgentRetrying? = nil, subagents: AgentSubagents? = nil, statusLine: AgentStatusLine? = nil) {
             self.id = id
             self.workspaceId = workspaceId
             self.parentAgentId = parentAgentId
@@ -196,6 +210,7 @@ extension AgentWire {
             self.version = version
             self.retrying = retrying
             self.subagents = subagents
+            self.statusLine = statusLine
         }
 
         public static func == (lhs: Agent, rhs: Agent) -> Bool {
@@ -203,7 +218,7 @@ extension AgentWire {
                 && lhs.wait == rhs.wait && lhs.subtasks == rhs.subtasks && lhs.pendingQuestionId == rhs.pendingQuestionId
                 && lhs.unread == rhs.unread && lhs.canSendMessages == rhs.canSendMessages && lhs.archivedAt == rhs.archivedAt
                 && lhs.parentAgentId == rhs.parentAgentId && lhs.version == rhs.version
-                && lhs.retrying == rhs.retrying && lhs.subagents == rhs.subagents
+                && lhs.retrying == rhs.retrying && lhs.subagents == rhs.subagents && lhs.statusLine == rhs.statusLine
         }
 
         public var isWorking: Bool { status != "idle" }
@@ -229,6 +244,45 @@ extension AgentWire {
         public var canArchive: Bool?
         public var version: String?
         public var agent: Agent?
+        /// The person's own membership of it, as `tasks()` attaches it.
+        public var membership: TaskMembership?
+    }
+
+    /// One person's membership of a task. `unread` is set when an agent
+    /// looped them in, until they read the task's conversation.
+    public struct TaskMembership: Equatable, Sendable, Codable {
+        public var taskId: String
+        public var unread: TaskUnread?
+
+        public init(taskId: String, unread: TaskUnread? = nil) {
+            self.taskId = taskId
+            self.unread = unread
+        }
+
+        enum CodingKeys: String, CodingKey { case taskId, unread }
+
+        /// A mark this build can't read is no mark, never a lost task.
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            taskId = (try? container.decode(String.self, forKey: .taskId)) ?? ""
+            unread = (try? container.decodeIfPresent(TaskUnread.self, forKey: .unread)) ?? nil
+        }
+    }
+
+    public struct TaskUnread: Equatable, Sendable, Codable {
+        /// `looped_in` today.
+        public var reason: String
+        public var since: Double
+        /// The task agent that looped them in, and the one sentence why.
+        public var agentId: String?
+        public var note: String?
+
+        public init(reason: String, since: Double, agentId: String? = nil, note: String? = nil) {
+            self.reason = reason
+            self.since = since
+            self.agentId = agentId
+            self.note = note
+        }
     }
 
     /// A Surface: a todo list, document, calendar, system monitor or chat.
