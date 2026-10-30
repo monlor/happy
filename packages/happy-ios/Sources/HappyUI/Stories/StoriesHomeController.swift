@@ -1,13 +1,14 @@
 #if canImport(UIKit)
 import HappyCore
 import HappyLayout
+import OSLog
 import UIKit
 
-/// Stories on Stem Cells home, in the header as Telegram's chat list has
-/// them (`ChatListNavigationBar` over `StoryPeerListComponent`): open above
-/// the list, or closed into the title as small avatars; opened by pulling
-/// the list down past 65 or tapping the avatars, and put away by scrolling
-/// the list up past 61 or by seeing everything.
+/// Stories on V2 home, in a band under the navigation bar
+/// (`StoriesBandView`), after Telegram's chat list (`StoryPeerListComponent`):
+/// a row open above the list, or put away; opened by pulling the list
+/// down past 65, and put away by scrolling the list up past 61 or by
+/// seeing everything. Put away, nothing of them shows.
 ///
 /// Home starts with them open when there is something to look at, until
 /// the person puts them away; that is remembered, and only a launch with a
@@ -25,6 +26,7 @@ import UIKit
 /// while it glides, so the list never jumps.
 @MainActor
 final class StoriesHomeController {
+    private static let log = Logger(subsystem: "engineering.happy", category: "stories")
     /// How the room above the list changed: as the list was let go of or
     /// came to rest (the list stays where it is), on its own as the stories
     /// were seen or new ones came (the list follows, animated), or as home
@@ -59,9 +61,9 @@ final class StoriesHomeController {
         }
     }
     private weak var host: UIViewController?
-    private weak var header: HomeHeaderView?
+    private weak var header: StoriesBandView?
     private(set) var session: StoriesSession?
-    private var watch: StemCellsWatch?
+    private var watch: Watch?
     private var snapshot = StoriesSnapshot()
     private var items: [StoriesRowItem] = []
     private(set) var unlocked = false
@@ -126,13 +128,12 @@ final class StoriesHomeController {
         return !list.isDragging && !list.isDecelerating && !carrying
     }
 
-    /// Puts the stories in `header`, or takes them out with nil.
-    func install(in header: HomeHeaderView?) {
+    /// Puts the stories in `header`, the band under the bar, or takes
+    /// them out with nil.
+    func install(in header: StoriesBandView?) {
         guard header !== self.header else { return }
         if let previous = self.header, previous.accessory === view {
             previous.accessory = nil
-            previous.titleX = nil
-            previous.backdropExtension = 0
         }
         hideTooltip()
         self.header = header
@@ -140,12 +141,12 @@ final class StoriesHomeController {
         layout()
     }
 
-    func attach(_ stemCells: StemCellsSession?) {
-        guard stemCells?.accountID != session?.accountID else { return }
-        attach(stemCells.map(StoriesSession.session(for:)), images: stemCells?.images)
+    func attach(_ v2: Session?) {
+        guard v2?.accountID != session?.accountID else { return }
+        attach(v2.map(StoriesSession.session(for:)), images: v2?.images)
     }
 
-    func attach(_ stories: StoriesSession?, images: StemCellsImages?) {
+    func attach(_ stories: StoriesSession?, images: Images?) {
         watch?.invalidate(); watch = nil
         stopOpening()
         hideTooltip()
@@ -426,13 +427,48 @@ final class StoriesHomeController {
     /// A sidebar row's ring was tapped: the viewer plays that agent's ring,
     /// oldest first from its first new story, grown out of the ring and
     /// closing back into it, then closes.
+    ///
+    /// A tap on a ring always gets its viewer: a header circle still loading
+    /// gives way, a viewer that went without saying so is forgotten, a ring
+    /// not yet in this feed is read from the session's, and anything left
+    /// presented is put away first. What can't open is logged.
     func openRing(agentId: String, name: String, from ring: UIView) {
-        guard opening == nil, !viewerUp, let session, let host, let stories = rings?[agentId] else { return }
+        if let viewer, viewer.presentingViewController == nil, !viewer.isBeingPresented { release() }
+        guard !viewerUp else { return Self.log.info("ring \(agentId, privacy: .public): a viewer is up") }
+        stopOpening()
+        guard let session, let host else { return Self.log.error("ring \(agentId, privacy: .public): no stories session") }
+        guard let stories = rings?[agentId] ?? StoriesRow.rings(session.snapshot.feed)?[agentId] else {
+            return Self.log.error("ring \(agentId, privacy: .public): not in the feed")
+        }
+        if let presented = host.presentedViewController {
+            // The tap reached the list, so nothing presented covers it: what
+            // is left (a sheet on its way out, one left behind) goes first,
+            // and the ring opens once it has.
+            Self.log.info("ring \(agentId, privacy: .public): \(String(describing: type(of: presented)), privacy: .public) put away first")
+            let reopen = { [weak self, weak ring] in
+                guard let self, let ring, ring.window != nil else { return }
+                guard host.presentedViewController == nil else {
+                    return Self.log.error("ring \(agentId, privacy: .public): \(String(describing: type(of: presented)), privacy: .public) stayed up")
+                }
+                self.openRing(agentId: agentId, name: name, from: ring)
+            }
+            if presented.isBeingDismissed, let coordinator = presented.transitionCoordinator {
+                coordinator.animate(alongsideTransition: nil) { _ in reopen() }
+            } else {
+                presented.presentingViewController?.dismiss(animated: false) { reopen() }
+            }
+            return
+        }
         let author = StoriesRow.ringAuthor(stories, name: name)
         var feed = StoryFeed(authors: [author], stories: session.snapshot.stories, cursor: "")
         feed.stories.merge(snapshot.feed?.stories ?? [:]) { held, _ in held }
-        let image = (ring.superview as? StemCellsRowView)?.markImage
-        guard let viewer = StoriesViewerPresenter.present(session: session, feed: feed, authorIndex: 0, from: host, origin: ring, ringImage: image) else { return }
+        if !stories.storyIds.contains(where: { feed.stories[$0] != nil }) {
+            Self.log.error("ring \(agentId, privacy: .public): none of its \(stories.storyIds.count) stories are read yet")
+        }
+        let image = (ring.superview as? RowView)?.markImage
+        guard let viewer = StoriesViewerPresenter.present(session: session, feed: feed, authorIndex: 0, from: host, origin: ring, ringImage: image) else {
+            return Self.log.error("ring \(agentId, privacy: .public): the viewer didn't present")
+        }
         hideTooltip()
         launching = false
         self.viewer = viewer
@@ -506,8 +542,6 @@ final class StoriesHomeController {
             return
         }
         guard isShown else {
-            header.titleX = nil
-            header.backdropExtension = 0
             view.ticking = false
             return
         }
@@ -528,19 +562,16 @@ final class StoriesHomeController {
         }
         drawn = state
         let width = header.bounds.width
-        let base = header.layout(width: width)
         let layout = StoriesHeaderLayout(.init(
-            width: width, title: base.title, bandMinX: base.logoControl.maxX, bandMaxX: base.actions.minX,
+            width: width, title: StoriesHeaderLayout.bandTitle(width: width), bandMinX: 0, bandMaxX: width,
             count: items.count, collapseStart: StoriesRow.collapseStart(items),
             scroll: view.pager.contentOffset.x, state: state
         ))
         view.place(layout, unlocked: unlocked, side: state.side)
-        tooltipTip = layout.tooltipTip
-        if let tooltip, let container = tooltip.superview {
-            if let tip = layout.tooltipTip { tooltip.point(at: header.convert(tip, to: container)) } else { hideTooltip() }
-        }
-        header.titleX = layout.titleX
-        header.backdropExtension = StoriesHeaderLayout.Metrics.scrollHeight * max(0, min(1, state.max))
+        // The tooltip points at avatars closed into a title, which the
+        // band has none of.
+        tooltipTip = nil
+        if tooltip != nil { hideTooltip() }
     }
 }
 
@@ -578,6 +609,35 @@ private final class StoriesOpening {
         } onCancel: {
             Task { @MainActor in gate.finish() }
         }
+    }
+}
+/// The stories' band under the navigation bar: as tall as the room under
+/// the bar, cut at its top so the row put away is out of sight. Touches
+/// off the row go through to the list.
+final class StoriesBandView: UIView {
+    var accessory: UIView? {
+        didSet {
+            guard accessory !== oldValue else { return }
+            oldValue?.removeFromSuperview()
+            if let accessory { addSubview(accessory) }
+            setNeedsLayout()
+        }
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        accessory?.frame = bounds
+    }
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
     }
 }
 #endif

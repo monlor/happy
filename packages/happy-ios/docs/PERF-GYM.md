@@ -1,6 +1,6 @@
 # The iOS performance gym
 
-A runnable suite that scrolls long Stem Cells conversations in the simulator
+A runnable suite that scrolls long V2 conversations in the simulator
 and measures every frame, so a scrolling regression fails a run instead of
 reaching a phone. It is modelled on happy-desktop's gym
 (`packages/happy-desktop-gym`): the same throwaway Happy Agent, a fake model,
@@ -12,15 +12,18 @@ scripted workloads, and budgets per workload.
   throwaway daemon, builds the app, runs the workloads, and checks the budgets.
 - `scripts/perf-gym/fakellm.py`: the fake model the throwaway daemon talks to.
   A message `stream P W` gets a reply of P Markdown sections (a paragraph, a
-  list, a table and code), streamed one word every W ms.
+  list, a table and code), streamed one word every W ms. A message
+  `status TEXT` makes the agent call its `set_status` tool with TEXT, so a
+  sidebar row has a status line to show. A message `tool NAME JSON` makes it
+  call its tool NAME with that JSON object (`create_artifact`, `post_story`).
 - `scripts/perf-gym/budgets.json`: the most each workload may cost.
 - `scripts/perf-gym/baselines/`: measured runs on the synthetic chats, before
-  and after the October 2026 transcript work (e7363747a), with the same
-  Mac and simulator.
+  and after the October 2026 transcript work (e7363747a), and on the gym's
+  fixed daemon (`preview11.json`), with the same Mac and simulator.
 - `Tests/HappyDirectUITests/ScrollPerfGymTests.swift`: the workloads, as UI tests.
 - `Sources/HappyUI/Perf/GymFrameMeter.swift`: the app's own frame meter and
   scripted scroll. It is compiled only into DEBUG and `HAPPY_FIXTURES` builds,
-  and runs only with `STEM_GYM_METER=1`.
+  and runs only with `HAPPY_GYM_METER=1`.
 
 Everything the runner makes goes into its work folder, `GYM_WORK`. The default
 is `<repo>/.context/gym`, which is gitignored. That covers the daemon's home and
@@ -32,7 +35,8 @@ configuration, the fixtures, derived data, logs and results. Nothing touches
 ```sh
 cd packages/happy-ios
 python3 scripts/perf-gym/gym.py up        # synthetic chats, throwaway daemon, fake model
-python3 scripts/perf-gym/gym.py run       # builds once, primes, runs every workload, checks budgets
+python3 scripts/perf-gym/gym.py build     # the app and its UI tests; again after changing the app
+python3 scripts/perf-gym/gym.py run       # primes, runs every workload, checks budgets
 python3 scripts/perf-gym/gym.py run fling-to-top image-heavy --no-prime
 python3 scripts/perf-gym/gym.py compare scripts/perf-gym/baselines/before.json scripts/perf-gym/baselines/after.json
 python3 scripts/perf-gym/gym.py down
@@ -46,11 +50,17 @@ them.
 What it needs:
 
 - Xcode and XcodeGen;
-- a `happy-agent` binary, taken from `--agent`, from `HAPPY_AGENT_BIN`, or the
-  newest one in `~/.happy/dist/version`;
-  0.4.110-preview.6 and .7 cut large history pages short over the mobile
-  connector (the app reads an empty chat), so the baselines were made with
-  0.4.110-preview.4 (`--agent ~/.happy/dist/version/0.4.110-preview.4/happy-agent`);
+- Happy Agent 0.4.110-preview.11, the gym's fixed daemon (`AGENT_VERSION` in
+  `gym.py`). The first run copies it from
+  `~/.happy/dist/version/0.4.110-preview.11/happy-agent` into
+  `<work>/../gym-agents/`, as Happy Agent's updater later prunes old versions
+  from `~/.happy/dist`, and checks its `--version`. Another daemon through
+  `--agent` or `HAPPY_AGENT_BIN`. Keep it fixed so a run compares the
+  app, not the daemon. From 0.4.110-preview.6 until the fix in .9, the mobile
+  connector cut history pages over about 130 KB short (the app reads an empty
+  chat), and the app asks for desktop's 100 runs a page;
+- full access outside the sandbox: it binds local ports and drives the
+  simulator;
 - free local ports 24821 for the mobile connector and 24823 for the fake model,
   or others through `GYM_CONNECTOR_PORT` and `GYM_FAKE_PORT`;
 - a short work folder, because the daemon's unix socket lives in it.
@@ -74,11 +84,18 @@ close to a release build's.
 | `slow-drag` | Drags at 300 pt/s, a finger reading line by line, up into history and down again. |
 | `image-heavy` | Flings through the chat heaviest with pictures. |
 | `scroll-while-streaming` | Sends `stream 30 40`, then flings and drags through history while the reply streams in. |
+| `sidebar` | Flings the sidebar down its rows and back twice, then folds and unfolds two section headings. Frame-meter totals over the whole run (`allLate`, `allMax`, `mainMax`): the transcript-only counts stay 0. |
 | `history-paging` | Makes the phone forget the long chat, then runs to the top three times (`top`, 40,000 pt/s) and flings around it while each older page lands. |
 
 Before the workloads, `testPrime` runs both chats to the top until no more
 pages come, as someone who has read their long chats has them on the phone.
 With the retention below, the phone then keeps the newest 100 runs.
+
+`testStoryRingOpens` is a check, not a workload: run it alone. When the test
+prints `GYM_POST_STORY <task>`, the gym has that task's agent post a story
+with an html artifact as its one frame, while home is on screen and again
+while the task's chat is. Each time, a tap on the new ring must open the
+viewer with no relaunch, and the ring must read seen once the viewer closes.
 
 ### The synthetic chats
 
@@ -94,6 +111,10 @@ generated pictures:
   without them.
 - "Gym Pictures": 90 turns, four in five presenting one to four pictures in
   columns.
+
+`gym.py up` also turns Stories on, so the sidebar draws story rows, and adds
+twelve short tasks (`SIDEBAR` in `gym.py`) whose agents set a status through
+the fake model, enough rows for the `sidebar` workload to scroll.
 
 ### Real conversations, locally only
 
@@ -196,6 +217,13 @@ Mac, iOS 26 simulator, the gym's `-O` build:
 Hitch ratio is ms/s. Before, flings show no hitches only because the meter
 counts frames in motion: the cost was in every apply and in memory.
 
+Those two ran on daemon 0.4.110-preview.4, whose connector cut large pages
+short, so the prime read only part of each chat. `baselines/preview11.json`
+is the gym's fixed daemon, 0.4.110-preview.11, with the app asking for 100
+runs a page: the prime reads both chats whole (540 and 180 rows), and the
+history-paging peak is 274 MB, against 215 MB with 50-run pages. Compare a
+change with that one.
+
 ## What the gym found (October 2026)
 
 These are Kirill's five longest conversations, loaded into a throwaway daemon.
@@ -208,12 +236,12 @@ after numbers per workload are in `baselines/` for the synthetic chats.
    thread, so opening it held the main thread 1.9 s on the simulator. The rows are
    now virtualised, as desktop's transcript is with `@tanstack/react-virtual`.
    Every row's frame is still planned, but only rows within a screen of what
-   shows have views (`StemCellChatMountedRows`), and they go only two screens
+   shows have views (`ChatMountedRows`), and they go only two screens
    away. A few rows that went off screen stay hidden, ready for the next.
 2. **A long reply was one row of hundreds of views.** A 30-section answer is
    about 14,000 pt tall, with 330 marks and 210 texts. It came in whole and cost
    a 250 ms frame. A tall row is now cut between its marks into chunks of at
-   least 1,024 pt (`StemCellChatChunks`), and only the chunks near the screen
+   least 1,024 pt (`ChatChunks`), and only the chunks near the screen
    have views.
 3. **Every layout pass read the whole conversation again.** `replan()` looked
    through every message's text for artifact and person references on the main
@@ -233,5 +261,7 @@ after numbers per workload are in `baselines/` for the synthetic chats.
    rewrote the whole conversation to SQLite every 500 ms while it changed: 5 MB
    for the longest chat. It now keeps the newest 100 runs, desktop's window on a
    conversation nobody reads (`connectHappyAgent`'s `trimHistory`).
-   An open conversation still keeps everything it reads, and scrolling back
-   past the kept runs pages them in again.
+   An open conversation keeps what it reads until it passes 200 runs; then a
+   run's end trims it to the newest 100 while the reader is at the newest
+   message and the scroll at rest (desktop's rule for a watched session).
+   Scrolling back past the kept runs pages them in again.

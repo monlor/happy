@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The iOS performance gym (docs/PERF-GYM.md): long Stem Cells conversations on a
+"""The iOS performance gym (docs/PERF-GYM.md): long V2 conversations on a
 throwaway Happy Agent, the app on a simulator against it, scripted scroll workloads
 measured by the app's own frame meter, and budgets that fail a regression.
 
@@ -17,7 +17,7 @@ Everything lives in the work folder (GYM_WORK, default <repo>/.context/gym), nev
 `export` only ever sends GET requests to the person's own daemon; what it copies stays in
 the work folder, which is gitignored, and must never be committed or sent anywhere.
 """
-import argparse, base64, hashlib, http.client, json, os, random, re, shutil, signal, socket, sqlite3, struct
+import argparse, base64, filecmp, hashlib, http.client, json, os, random, re, shutil, signal, socket, sqlite3, struct
 import subprocess, sys, threading, time, urllib.parse, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +46,7 @@ WORKLOADS = {
     "slow-drag": ("testSlowDrag", None),
     "image-heavy": ("testImageHeavy", None),
     "scroll-while-streaming": ("testScrollWhileStreaming", None),
+    "sidebar": ("testSidebar", None),
     # Last: it leaves the long chat only partly on the phone.
     "history-paging": ("testHistoryPaging", "paging"),
 }
@@ -335,16 +336,31 @@ def healthy():
         return False
 
 
+# The daemon the baselines were measured on. A fixed one, so a run compares the
+# app and not the daemon; from 0.4.110-preview.9 the mobile connector sends a
+# 100-run history page whole.
+AGENT_VERSION = "0.4.110-preview.11"
+# The gym's own copy: Happy Agent's updater prunes old versions from ~/.happy/dist.
+AGENTS = os.path.join(os.path.dirname(WORK), "gym-agents")
+
+
 def agent_binary(args):
     if getattr(args, "agent", None):
         return args.agent
     if os.environ.get("HAPPY_AGENT_BIN"):
         return os.environ["HAPPY_AGENT_BIN"]
-    versions = os.path.expanduser("~/.happy/dist/version")
-    found = sorted((os.path.join(versions, v, "happy-agent") for v in os.listdir(versions)), key=os.path.getmtime) if os.path.isdir(versions) else []
-    if not found:
-        sys.exit("gym: no happy-agent binary; pass --agent or set HAPPY_AGENT_BIN")
-    return found[-1]
+    kept = os.path.join(AGENTS, AGENT_VERSION, "happy-agent")
+    installed = os.path.expanduser(f"~/.happy/dist/version/{AGENT_VERSION}/happy-agent")
+    if not os.path.exists(kept) and os.path.exists(installed):
+        os.makedirs(os.path.dirname(kept), exist_ok=True)
+        shutil.copy2(installed, kept)
+    if not os.path.exists(kept):
+        sys.exit(f"gym: no happy-agent {AGENT_VERSION} (looked in {installed} and {kept}); "
+                 "put that version at either, or pass --agent / HAPPY_AGENT_BIN")
+    version = subprocess.run([kept, "--version"], capture_output=True, text=True).stdout.strip()
+    if not version.endswith(AGENT_VERSION):
+        sys.exit(f"gym: {kept} says {version!r}, not {AGENT_VERSION}")
+    return kept
 
 
 def write_config():
@@ -408,8 +424,10 @@ def start_daemon(args):
         return
     os.makedirs(DAEMON, exist_ok=True)
     binary = os.path.join(DAEMON, "happy-agent")
-    if not os.path.exists(binary):
-        shutil.copy2(agent_binary(args), binary)
+    source = agent_binary(args)
+    # Another version asked for than the one copied before: that one.
+    if not os.path.exists(binary) or not filecmp.cmp(source, binary):
+        shutil.copy2(source, binary)
     for sub in ("projects", "workspaces", "tmp"):
         os.makedirs(os.path.join(DAEMON, sub), exist_ok=True)
     env = dict(os.environ, HAPPY_HOME_DIR=HOME, HAPPY_AGENT_PROJECTS_DIRECTORY=os.path.join(DAEMON, "projects"),
@@ -501,7 +519,7 @@ def records(folder):
                         tool_result = {"type": "tool_result", "callId": block["id"], "display": f"Tool {block['name']} returned.",
                                        "output": output if isinstance(output, str) else json.dumps(output or ""), "toolName": block["name"], "isError": block.get("status") == "failed"}
                         presentation = block.get("presentation")
-                        # Only what Stem Cells draws keeps its presentation; the rest
+                        # Only what V2 draws keeps its presentation; the rest
                         # (exec_command, file_diff...) is derived by the API and never stored.
                         if presentation and presentation.get("type") in ("media", "artifact"):
                             presentation = json.loads(json.dumps(presentation))
@@ -566,6 +584,58 @@ def load(fixtures):
     database.close()
 
 
+# The sidebar's other work: short synthetic tasks, each with a status its agent set, so
+# the sidebar has story rows enough to scroll. None for the last, which shows the empty mark.
+SIDEBAR = {
+    "Release notes": "Shipped to preview",
+    "Landing page copy": "Two headlines drafted; waiting on the pricing table before the hero section can be written",
+    "Bug triage": "● ● [●] ○ Sorting 14 new reports",
+    "Perf budget": "Rows hold 120 fps while flinging; the open is 56 ms on a cold start",
+    "Android build": "Stuck on the signing key",
+    "Docs cleanup": "Merged the setup pages into one guide and removed the old screenshots",
+    "Onboarding flow": "On main",
+    "Billing webhook": "Retries are idempotent now; next is the refund path",
+    "Search index": "Reindexing 2,400 chats",
+    "Design review": "Visualization ready",
+    "Weekly report": "Draft is in the shared doc for a read before Friday",
+    "Icon set": None,
+}
+
+
+def send(agent, text):
+    """A message to the agent in the daemon's default mode (the fake model)."""
+    mode = dict(api("GET", "/v0/config")["config"]["defaults"], serviceTier=None)
+    ident = random.choice("abcdefghijklmnopqrstuvwxyz") + "".join(random.choice("abcdefghijklmnopqrstuvwxyz0123456789") for _ in range(23))
+    api("POST", f"/v0/agents/{q(agent)}/send", {"id": ident, "text": text, "delivery": "steer", "mode": mode})
+
+
+def seed_sidebar():
+    """Stories on (story rows), and the sidebar's other tasks with their statuses."""
+    api("PUT", "/v0/user-settings/happy-desktop.experiments.stories", {"value": True})
+    tasks = {task["name"]: task for task in api("GET", "/v0/tasks")["tasks"]}
+    for name, status in SIDEBAR.items():
+        task = tasks.get(name) or api("POST", "/v0/tasks", {"name": name})["task"]
+        if status and ((task["agent"].get("statusLine") or {}).get("text") != status):
+            send(task["agent"]["id"], f"status {status}")
+            time.sleep(1)
+
+
+def post_story(title, log):
+    """A story posted live to the ring of the task titled `title`, as SHIP BOSS's was:
+    an html artifact the agent made, as its one frame."""
+    agent = next(task["agent"]["id"] for task in api("GET", "/v0/tasks")["tasks"] if task["name"] == title)
+    made = lambda: [a for a in api("GET", "/v0/artifacts")["artifacts"] if (a.get("createdBy") or {}).get("agentId") == agent]
+    if not made():
+        send(agent, "tool create_artifact " + json.dumps({"type": "html", "title": "Gym page"}))
+        for _ in range(40):
+            if made():
+                break
+            time.sleep(0.5)
+    artifact = made()[0]["id"]
+    send(agent, "tool post_story " + json.dumps({"caption": "A live story", "frames": [{"artifactId": artifact}]}))
+    log.write(f"GYM_DRIVER posted a story to {title}\n")
+
+
 def cmd_up(args):
     if len(SOCK.encode()) > 100:
         sys.exit(f"gym: {SOCK} is too long for a unix socket; set GYM_WORK to a shorter folder")
@@ -579,6 +649,7 @@ def cmd_up(args):
     start_daemon(args)
     load(fixtures)
     start_daemon(args)
+    seed_sidebar()
     json.dump({"fixtures": fixtures}, open(os.path.join(WORK, "state.json"), "w"))
     say("up:", ", ".join(row["title"] for folder, row in json.load(open(MAP)).items() if folder.startswith(fixtures)))
 
@@ -675,7 +746,7 @@ def forget(udid, title):
         container = subprocess.check_output(["xcrun", "simctl", "get_app_container", udid, BUNDLE, "data"], text=True, stderr=subprocess.DEVNULL).strip()
     except subprocess.CalledProcessError:
         return
-    base = os.path.join(container, "Library", "Application Support", "StemCells")
+    base = os.path.join(container, "Library", "Application Support", "Agents")
     for folder in os.listdir(base) if os.path.isdir(base) else []:
         path = os.path.join(base, folder, "direct.sqlite")
         if os.path.exists(path):
@@ -698,8 +769,10 @@ def run_test(udid, dd, test, label, env, results_dir):
     results, xct, start = [], {}, None
     for line in process.stdout:
         log.write(line)
-        if "STEM_PAIR_READY" in line:
+        if "HAPPY_PAIR_READY" in line:
             threading.Thread(target=pair, args=(udid, log), daemon=True).start()
+        elif line.startswith("GYM_POST_STORY "):
+            threading.Thread(target=post_story, args=(line.split(" ", 1)[1].strip(), log), daemon=True).start()
         elif "GYM_MARK start" in line:
             render, app = processes(udid)
             start = (render, app, cpu_seconds(render), cpu_seconds(app))
@@ -753,8 +826,9 @@ def cmd_run(args):
     if not args.no_prime:
         say("priming: reading the chats back to their first message")
         run_test(udid, dd, "testPrime", label, env, results_dir)
-    out = {"label": label, "date": time.strftime("%Y-%m-%dT%H:%M:%S"), "commit": git("rev-parse", "--short", "HEAD"), "simulator": SIMULATOR,
-           "chats": titles, "workloads": {}}
+    agent = subprocess.run([os.path.join(DAEMON, "happy-agent"), "--version"], capture_output=True, text=True).stdout.strip()
+    out = {"label": label, "date": time.strftime("%Y-%m-%dT%H:%M:%S"), "commit": git("rev-parse", "--short", "HEAD"), "agent": agent,
+           "simulator": SIMULATOR, "chats": titles, "workloads": {}}
     for name in names:
         test, forgets = WORKLOADS[name]
         if forgets:
