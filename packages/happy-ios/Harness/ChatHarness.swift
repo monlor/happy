@@ -27,6 +27,7 @@ final class HarnessAppDelegate: UIResponder, UIApplicationDelegate {
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
+        application.isIdleTimerDisabled = true
         let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
         configuration.delegateClass = HarnessSceneDelegate.self
         return configuration
@@ -55,11 +56,17 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
     private var homeRenderer: HomeRendererHarness?
     private var agent: AgentHarness?
     private var storyRows: StoryRowsHarness?
+    private var agentList: AgentListScrollHarness?
+    private var composerKeyboardProbe: ComposerKeyboardProbe?
     private var realArchive: RealArchiveHarness?
     private var qaProbe: ChatUltraQAProbe?
     private var motionScript: ChatMotionScript?
     private var qaReal: ChatUltraQAReal?
     private var stories: StoriesHarness?
+    private var homeControllerScroll: HomeControllerScrollHarness?
+    private var homeScrollDiagnostic: HomeScrollDiagnosticHarness?
+    private var groupedHome: GroupedHomeHarness?
+    private var chatHeader: ChatHeaderHarness?
     #endif
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
@@ -71,6 +78,17 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.window = window
         let arguments = ProcessInfo.processInfo.arguments
         #if DEBUG || HAPPY_FIXTURES
+        if arguments.contains("-homeScrollDiagnostic") {
+            homeScrollDiagnostic = HomeScrollDiagnosticHarness(window: window, arguments: arguments)
+            return
+        }
+        if arguments.contains("-composerKeyboardProbe") {
+            composerKeyboardProbe = ComposerKeyboardProbe(window: window, arguments: arguments)
+        }
+        if arguments.contains("-fullHomeScroll") {
+            homeControllerScroll = HomeControllerScrollHarness(window: window)
+            return
+        }
         if arguments.contains("-qaRealChat") {
             qaReal = ChatUltraQAReal(window: window)
             return
@@ -89,8 +107,20 @@ final class HarnessSceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "agent",
            let socket = arguments.firstIndex(of: "-agentSocket").map({ arguments[$0 + 1] }),
-           let token = arguments.firstIndex(of: "-agentToken").map({ arguments[$0 + 1] }) {
+           let token = arguments.firstIndex(of: "-agentToken").map({ arguments[$0 + 1] }) ?? ProcessInfo.processInfo.environment["HAPPY_AGENT_FIXTURE_TOKEN"] {
             agent = AgentHarness(window: window, socket: socket, token: token)
+            return
+        }
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "agentList" {
+            agentList = AgentListScrollHarness(window: window, arguments: arguments)
+            return
+        }
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "groupedHome" {
+            groupedHome = GroupedHomeHarness(window: window, arguments: arguments)
+            return
+        }
+        if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "chatHeader" {
+            chatHeader = ChatHeaderHarness(window: window, arguments: arguments)
             return
         }
         if let index = arguments.firstIndex(of: "-screen"), arguments.indices.contains(index + 1), arguments[index + 1] == "storyRows" {

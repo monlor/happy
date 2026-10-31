@@ -18,6 +18,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slopus.happy.AppGraph
 import com.slopus.happy.BuildConfig
 import com.slopus.happy.R
+import com.slopus.happy.ui.connect.EnterTerminalUrlPrompt
+import com.slopus.happy.ui.connect.rememberTerminalConnect
 import com.slopus.happy.model.Session
 import com.slopus.happy.model.SessionListGrouping
 import com.slopus.happy.model.WorkspaceOrigin
@@ -46,6 +48,7 @@ class HomeListScope(
      * phone list for sidebar list keeps the reader's place.
      */
     val listState: LazyListState,
+    val syncing: Boolean = false,
 )
 
 /**
@@ -62,6 +65,7 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
     val settings by graph.settings.settings.collectAsStateWithLifecycle()
     val local by graph.localSettings.values.collectAsStateWithLifecycle()
     val connection by graph.connectionStatus.collectAsStateWithLifecycle()
+    val syncing by graph.isSyncing.collectAsStateWithLifecycle()
     val registry by graph.accountStore.registry.collectAsStateWithLifecycle()
     val updateUrl by services.updateUrl.collectAsStateWithLifecycle()
     val resources = LocalResources.current
@@ -143,7 +147,12 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
             onPressDown = { id -> graph.account.value?.messages?.preload(id) },
         )
     }
-    val actions = remember(navigation, uriHandler) {
+    // Linking from the empty home approves the code with this account, as Settings' scan does (not
+    // Add, which makes a new account); without a scanner it asks for the link instead.
+    val connect = rememberTerminalConnect(graph)
+    var enteringUrl by remember { mutableStateOf(false) }
+    connect.onUnavailable = { enteringUrl = true }
+    val actions = remember(navigation, uriHandler, connect) {
         HomeScreenActions(
             onSettings = navigation.onSettings,
             onNewSession = navigation.onNewSession,
@@ -151,6 +160,7 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
             onOpenUrl = uriHandler::openUri,
             onWhatsNew = navigation.onWhatsNew,
             onSwitchAccount = { id -> graph.open(id) },
+            onLinkComputer = connect::scan,
         )
     }
 
@@ -169,7 +179,7 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
     }
 
     ProvideAvatarSettings(settings) {
-        content(HomeListScope(state, connection, settings.sessionListGrouping, callbacks, actions, update, navigation, dock, listState))
+        content(HomeListScope(state, connection, settings.sessionListGrouping, callbacks, actions, update, navigation, dock, listState, syncing))
     }
     dock?.dialogs?.invoke()
     duplicating?.let { session ->
@@ -180,5 +190,6 @@ fun HomeListHost(graph: AppGraph, navigation: HomeNavigation, withDock: Boolean 
             onDuplicated = onOpenSession,
         )
     }
+    if (enteringUrl) EnterTerminalUrlPrompt(connect, onDismiss = { enteringUrl = false })
     alert?.let { HappyAlert(it, onDismiss = { alert = null }) }
 }

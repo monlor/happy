@@ -99,6 +99,12 @@ class ConversationRowActions(
     val loadMedia: suspend (MediaRef) -> ByteArray,
     /** Opens an artifact; null where this build has no viewer, and its card says where it opens. */
     val onOpenArtifact: ((artifactId: String) -> Unit)? = null,
+    /** Shows one picture full screen. */
+    val onOpenPicture: (bytes: ByteArray, cacheKey: String, name: String?) -> Unit = { _, _, _ -> },
+    /** Opens a presented video or file in whatever on the phone reads it. */
+    val onOpenMedia: ((MediaRef) -> Unit)? = null,
+    /** What that is doing: reading, or why it could not open. */
+    val mediaOpening: (MediaRef) -> MediaOpening? = { null },
 )
 
 /**
@@ -149,7 +155,7 @@ fun ConversationRowView(row: ConversationRow, bubble: BubblePalette, actions: Co
             )
             is ConversationRow.Reasoning -> ReasoningRow(row, content)
             is ConversationRow.Picture -> Box(content.fillMaxWidth().padding(horizontal = ConversationRowSpec.marginHorizontal, vertical = ConversationRowSpec.marginVertical)) {
-                InlinePicture(row.key, row.image)
+                InlinePicture(row.key, row.image, actions)
             }
             is ConversationRow.Media -> MediaRow(row, actions, content)
             is ConversationRow.Artifact -> InfoCard(
@@ -203,7 +209,7 @@ private fun UserRow(row: ConversationRow.User, bubble: BubblePalette, actions: C
                 horizontalArrangement = Arrangement.spacedBy(ConversationRowSpec.pictureGap, Alignment.End),
                 verticalArrangement = Arrangement.spacedBy(ConversationRowSpec.pictureGap),
             ) {
-                row.pictures.forEachIndexed { index, picture -> InlinePicture("${row.key}:$index", picture) }
+                row.pictures.forEachIndexed { index, picture -> InlinePicture("${row.key}:$index", picture, actions) }
             }
         }
         if (row.text.isNotEmpty() || failed != null) {
@@ -217,7 +223,7 @@ private fun UserRow(row: ConversationRow.User, bubble: BubblePalette, actions: C
 }
 
 @Composable
-private fun InlinePicture(key: String, image: Block.Image) {
+private fun InlinePicture(key: String, image: Block.Image, actions: ConversationRowActions) {
     val bytes = remember(key) {
         try {
             Base64.decode(image.data, Base64.DEFAULT)
@@ -240,7 +246,8 @@ private fun InlinePicture(key: String, image: Block.Image) {
             .widthIn(max = ConversationRowSpec.pictureMaxWidth)
             .heightIn(max = ConversationRowSpec.pictureMaxHeight)
             .aspectRatio(1f, matchHeightConstraintsFirst = false)
-            .clip(RoundedCornerShape(ConversationRowSpec.pictureRadius)),
+            .clip(RoundedCornerShape(ConversationRowSpec.pictureRadius))
+            .clickable(role = Role.Button) { actions.onOpenPicture(bytes, "conversation/$key", null) },
     )
 }
 
@@ -284,11 +291,18 @@ private fun MediaRow(row: ConversationRow.Media, actions: ConversationRowActions
             }
         }
         other.forEach { ref ->
+            val opening = actions.mediaOpening(ref)
+            val open = actions.onOpenMedia
             InfoCard(
                 icon = if (ref.item.kind == "video") Ionicon.PlayCircleOutline else Ionicon.DocumentTextOutline,
                 title = ref.item.name,
-                detail = stringResource(if (ref.item.kind == "video") R.string.conversation_video_unavailable else R.string.conversation_file_unavailable),
-                onClick = null,
+                detail = when {
+                    opening is MediaOpening.Failed -> opening.reason
+                    opening is MediaOpening.Reading -> stringResource(R.string.conversation_media_reading)
+                    open == null -> stringResource(if (ref.item.kind == "video") R.string.conversation_video_unavailable else R.string.conversation_file_unavailable)
+                    else -> null
+                },
+                onClick = open?.let { { it(ref) } },
                 modifier = Modifier.testTag(ConversationRowTags.MEDIA_FILE),
                 vertical = 0.dp,
             )
@@ -319,7 +333,9 @@ private fun MediaPicture(ref: MediaRef, actions: ConversationRowActions, single:
             cacheKey = "conversation/media/${ref.key}",
             contentDescription = ref.item.name,
             background = HappyTheme.colors.surfaceHigh,
-            modifier = size.clip(shape),
+            modifier = size
+                .clip(shape)
+                .clickable(role = Role.Button) { actions.onOpenPicture(loaded, "conversation/media/${ref.key}", ref.item.name) },
         )
     } else {
         Box(size.clip(shape).background(HappyTheme.colors.surfaceHigh), contentAlignment = Alignment.Center) {

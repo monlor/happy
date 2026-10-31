@@ -3,8 +3,8 @@ import HappyCore
 import HappyLayout
 import UIKit
 
-/// Home in V2 mode: one paired computer's sidebar, as desktop's
-/// `HappyAgentSpacesSidebar` draws it, under the navigation bar. Nothing is
+/// Home: one paired computer's sidebar, as desktop's classic sidebar
+/// (`SidebarRows`) draws it, under the navigation bar. Nothing is
 /// typed here: compose in the bar (`compose()`) opens new work, an empty
 /// conversation whose first message makes it. Desktop's Search and Create
 /// rows aren't drawn: search and compose are the bar's.
@@ -23,16 +23,12 @@ final class HomeViewController: UIViewController {
     private let banner = BannerView()
     private let empty = EmptyView()
     private var session: Session?
-    private var watch: Watch?
     private var accountsObservation: AccountsObservation?
-    private var carryWork: Task<Void, Never>?
     private var snapshot = Snapshot()
     private var agentHome = HomeSnapshot()
     private var connectionWatch: Task<Void, Never>?
-    private var usesSpaces: Bool { agentHome.usesSpaces && session?.snapshot.availability != .unsupported }
-    /// New work on its way to the screen, by the store's ask: a second tap
-    /// meanwhile gets the same and opens nothing more.
-    private var opening: Set<UUID> = []
+    /// A new task on its way to the screen: a second tap meanwhile opens nothing more.
+    private var opening = false
     /// Stories, in a band under the bar: open above the list, or put away.
     /// Nothing at all while Stories are off.
     private lazy var stories = StoriesHomeController(host: self)
@@ -72,11 +68,14 @@ final class HomeViewController: UIViewController {
     var list: UIScrollView { sidebar }
 
     /// Search's results over home, while something answers.
-    var resultsList: UIScrollView? { resultsView.showsResults ? resultsView.list : nil }
+    var resultsList: UIScrollView? { search != nil ? resultsView.list : nil }
 
     /// The bar home lays its content under.
     var contentInsets = HomeContentInsets(safeArea: .zero, dock: 0) {
         didSet { if contentInsets != oldValue { view.setNeedsLayout() } }
+    }
+    var searchContentInsets: HomeContentInsets? {
+        didSet { if searchContentInsets != oldValue { view.setNeedsLayout() } }
     }
 
     init(context: AppContext, computer: String? = nil) {
@@ -89,8 +88,10 @@ final class HomeViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        // The conversation's own ground, light and dark.
-        view.backgroundColor = UIColor(Palette.surface)
+        // The conversation's own ground, light and dark; the list on it is
+        // grouped, a quiet card per section, Happy's own card first.
+        view.backgroundColor = UIColor(Palette.groupedGround)
+        sidebar.style = .grouped
         view.addSubview(sidebar)
         view.addSubview(storiesBand)
         stories.install(in: storiesBand)
@@ -98,7 +99,9 @@ final class HomeViewController: UIViewController {
         view.addSubview(banner)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         resultsView.isHidden = true
+        resultsView.alpha = 0
         resultsView.list.onSelect = { [weak self] row in self?.open(row) }
+        resultsView.onDismiss = { [weak self] in self?.endSearch() }
         resultsView.list.onIntent = { [weak self] row in
             guard let agentId = row.agentId, row.targetKind != "surface" else { return }
             self?.session?.warm.intent(agentId)
@@ -109,14 +112,8 @@ final class HomeViewController: UIViewController {
             guard let agentId = row.agentId, row.targetKind != "surface" else { return }
             self?.session?.warm.intent(agentId)
         }
-        sidebar.onFold = { [weak self] row in self?.fold(row) }
-        sidebar.onAdd = { [weak self] row in self?.makeNewWork(in: self?.usesSpaces == true ? row.nodeId : nil) }
-        sidebar.menu = { [weak self] row in self?.menu(for: row) }
         sidebar.preview = { [weak self] row in self?.preview(for: row) }
         sidebar.onOpenPreview = { [weak self] row in self?.open(row, animated: false) }
-        sidebar.beginDrag = { [weak self] row in self?.beginDrag(row) }
-        sidebar.onDrop = { [weak self] drag, to in self?.drop(drag, to: to) }
-        sidebar.onDragging = { [weak self] active in self?.dragging(active) }
         sidebar.delegate = self
         stories.onInsetChange = { [weak self] change in self?.storiesMoved(change) }
         // Agent stories turn the conversations' rows into story rows.
@@ -138,12 +135,6 @@ final class HomeViewController: UIViewController {
         super.viewWillAppear(animated)
         attach()
         if let store = session?.store { Task { await store.attentionVisibleUpdate(true) } }
-    }
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        // A row lifted from its menu goes back before another screen covers it.
-        sidebar.disarm(animated: false)
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -172,7 +163,6 @@ final class HomeViewController: UIViewController {
         guard id != session?.accountID else { return }
         // Another computer's sidebar: what was searched was the last one's.
         endSearch(animated: false)
-        watch?.invalidate(); watch = nil
         connectionWatch?.cancel(); connectionWatch = nil
         session = id.flatMap { Session.session(for: $0, context: context) }
         stories.attach(session)
@@ -182,13 +172,10 @@ final class HomeViewController: UIViewController {
         snapshot = Snapshot()
         agentHome = HomeSnapshot()
         if let session {
-            watch = session.watch { [weak self] snapshot in self?.apply(snapshot) }
             connectionWatch = Task { [weak self, engine = session.engine] in
                 for await snapshot in await engine.snapshots() {
                     guard !Task.isCancelled, let self else { return }
-                    self.agentHome = snapshot
-                    if self.usesSpaces { self.apply(session.snapshot) }
-                    else { self.applyClassic() }
+                    self.applyConnection(snapshot)
                 }
             }
             // New work opens on the computer's models: read ahead of compose.
@@ -197,20 +184,10 @@ final class HomeViewController: UIViewController {
         applyChrome()
     }
 
-    private func apply(_ snapshot: Snapshot) {
-        guard usesSpaces else { applyClassic(); return }
-        let previous = self.snapshot
-        self.snapshot = snapshot
-        onSnapshot?(snapshot)
-        if previous.rows != snapshot.rows { showRows() }
-        if search != nil, previous.allRows != snapshot.allRows { showResults() }
-        warmUp()
-        if previous.availability != snapshot.availability || previous.error != snapshot.error || previous.creationError != snapshot.creationError {
-            applyChrome()
-        }
-    }
-
-    private func applyClassic() {
+    /// Connection snapshots may change the notice over the list. Its
+    /// arrival never changes the rows' inset or screen positions.
+    func applyConnection(_ home: HomeSnapshot) {
+        agentHome = home
         let previous = snapshot.rows
         snapshot = Snapshot()
         snapshot.availability = agentHome.loaded ? .available : .loading
@@ -233,16 +210,10 @@ final class HomeViewController: UIViewController {
         sidebar.isHidden = !empty.isHidden
         stories.isSuppressed = sidebar.isHidden
         let reason = { (text: String) in text.isEmpty ? Strings.unanswered : text }
-        let notice = snapshot.creationError.map { Strings.newWorkFailed(reason($0)) } ?? snapshot.error.map(reason)
+        let notice = snapshot.error.map(reason)
         // Prioritizing being off is Settings' business: home says nothing of it.
         banner.configure(notice: notice)
         view.setNeedsLayout()
-    }
-
-    /// The rows a phone draws: all but Search and Create, which stay in the
-    /// document for desktop.
-    static func drawn(_ rows: [Row]) -> [Row] {
-        rows.filter { $0.kind != .search && $0.kind != .create }
     }
 
     // MARK: Search
@@ -254,40 +225,61 @@ final class HomeViewController: UIViewController {
         showResults()
     }
 
-    /// The bar's field opened. Home stays exactly as it is; the results
-    /// show over it once something is typed.
+    /// The bar's field opened. Home stays exactly as it is, and so does the
+    /// header; the results fade in over home, the conversations last active
+    /// until something is typed.
     func beginSearch() {
         guard session != nil, search == nil, !sidebar.isHidden else { return }
-        sidebar.disarm()
         search = Search()
         resultsView.clear()
+        showResults()
         resultsView.isHidden = false
+        UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
+            self.resultsView.alpha = 1
+        }
     }
 
-    /// The field closed: the results go, and home is as it was.
+    /// The field closed: the results fade away, and home is as it was.
     func endSearch(animated: Bool = true) {
         guard search != nil else { return }
         search = nil
-        resultsView.clear()
-        resultsView.isHidden = true
+        let gone = { [weak self] in
+            // Search opened again while it faded: it stays.
+            guard let self, search == nil else { return }
+            resultsView.clear()
+            resultsView.isHidden = true
+        }
+        if animated {
+            UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
+                self.resultsView.alpha = 0
+            } completion: { _ in gone() }
+        } else {
+            resultsView.alpha = 0
+            gone()
+        }
         onSearchEnded?()
     }
 
-    /// Home's own rows: the document's, with the stories' rings.
+    /// Home's own rows, with the stories' rings.
     private func showRows() {
-        let drawn = usesSpaces ? Self.drawn(snapshot.rows) : snapshot.rows
-        sidebar.apply(Rows.withStories(drawn, rings: stories.rings))
+        sidebar.apply(shownRows)
+    }
+
+    /// The rows the list draws: the list with the stories' rings, its tree kept.
+    private var shownRows: [Row] {
+        SidebarRows.withStories(snapshot.rows, rings: stories.rings)
     }
 
     /// What answers the query, in the results over home: the rows that
-    /// answer it, then the quick actions and settings that do.
+    /// answer it, then the quick actions and settings that do. Nothing
+    /// typed: the conversations last active.
     private func showResults() {
         guard var search else { return }
         let query = search.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             search.results = [:]
             self.search = search
-            resultsView.clear()
+            resultsView.show(HappyCore.Search.recent(snapshot.allRows), query: "")
             return
         }
         let found = results(for: query)
@@ -375,13 +367,18 @@ final class HomeViewController: UIViewController {
         let bannerHeight = banner.isEmpty ? 0 : banner.sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
         // Search's results keep clear of the keyboard; home's list never
         // changes for them.
-        resultsView.frame = bounds
-        resultsView.insets = UIEdgeInsets(top: contentInsets.contentTop, left: 0, bottom: view.safeAreaInsets.bottom, right: 0)
-        let layout = HomeLayout(size: bounds.size, contentTop: contentInsets.contentTop, chromeTop: contentInsets.chromeTop, listBottom: contentInsets.listBottom, bannerHeight: bannerHeight, storiesHeight: sidebar.isHidden ? 0 : stories.inset)
+        // On a wide window the list, the stories, what search finds and the
+        // empty state all hold to `ContentWidth.maxWidth` and sit in the
+        // middle; a phone is as wide as it ever was.
+        let layout = HomeLayout(size: bounds.size, contentTop: contentInsets.contentTop, chromeTop: contentInsets.chromeTop, listBottom: contentInsets.listBottom, bannerHeight: bannerHeight, storiesHeight: sidebar.isHidden ? 0 : stories.inset, maxWidth: ContentWidth.maxWidth, bannerOverlaysList: true)
+        resultsView.frame = layout.content
+        // The results start right at the bar's foot, with no gap of home's.
+        let searchInsets = searchContentInsets ?? contentInsets
+        resultsView.insets = UIEdgeInsets(top: searchInsets.chromeTop, left: 0, bottom: searchInsets.listBottom, right: 0)
         banner.frame = layout.banner
-        storiesBand.frame = CGRect(x: 0, y: contentInsets.chromeTop, width: bounds.width, height: max(0, bounds.height - contentInsets.chromeTop))
-        sidebar.frame = bounds
-        session?.warm.layOut(width: bounds.width, environment: traitCollection.textEnvironment)
+        storiesBand.frame = CGRect(x: layout.content.minX, y: contentInsets.chromeTop, width: layout.content.width, height: max(0, bounds.height - contentInsets.chromeTop))
+        sidebar.frame = layout.content
+        session?.warm.layOut(width: layout.content.width, environment: traitCollection.textEnvironment)
         let insets = UIEdgeInsets(layout.listInsets)
         if sidebar.contentInset != insets {
             let atTop = sidebar.contentOffset.y <= -sidebar.contentInset.top + 1
@@ -438,7 +435,8 @@ final class HomeViewController: UIViewController {
         }
         switch row.kind {
         case .space where row.targetKind == "project" || row.targetKind == "workspace":
-            fold(row)
+            // A folder opens nothing: its sessions are listed under it.
+            break
         case .space where row.targetKind == "artifacts":
             navigationController?.pushViewController(ArtifactsViewController(session: session), animated: animated)
         case .search:
@@ -483,168 +481,31 @@ final class HomeViewController: UIViewController {
         return nil
     }
 
-    private func fold(_ row: Row) {
-        if !usesSpaces, let engine = session?.engine {
-            Task { try? await engine.fold(row.id) }
-            return
-        }
-        guard let store = session?.store else { return }
-        Haptics.play(.fold)
-        // A row with subtasks the sidebar doesn't hold yet brings them, open.
-        if row.hasHiddenSessions {
-            Task { await store.attentionInput(); await store.revealSessions(row.nodeId, sessions: row.sessions) }
-            return
-        }
-        Task { await store.attentionInput(); await store.fold(row.nodeId) }
-    }
-
     /// The bar's compose: new work.
     func compose() {
-        sidebar.disarm()
         makeNewWork()
     }
 
-    /// New work, right below Happy: the row and its empty conversation exist
-    /// at once, and the conversation is pushed with the keyboard coming up,
-    /// or, for a picture, the "+" sheet over it. Leaving new work never
-    /// closes it, so new work already standing empty is opened instead,
-    /// where it is (desktop's rule): from the bar any, newest first; from a
-    /// heading's "+" only one under that heading.
-    func makeNewWork(in sectionId: String? = nil, library: Bool = false) {
-        guard let session, navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
+    /// A new task: its empty conversation is pushed with the keyboard
+    /// coming up, or, for a picture, the "+" sheet over it. Nothing is made
+    /// on the computer and no row shows until its first message is sent,
+    /// so leaving it leaves nothing behind; compose again before then opens
+    /// the same one, with what was typed in it.
+    func makeNewWork(library: Bool = false) {
+        guard let session, !opening, navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
+        opening = true
         let store = session.store
         Task { @MainActor in
-            let going = await store.goToNewWork(under: sectionId)
-            guard opening.insert(going.id).inserted else { return }
-            Haptics.play(.newWork)
-            let creation = await going.work.value
-            opening.remove(going.id)
-            // Another ask got to the screen first.
+            defer { opening = false }
+            let task = await store.newTask()
+            // Gone from the screen meanwhile: nothing is pushed over another.
             guard navigationController?.topViewController === parent || navigationController?.topViewController === self else { return }
-            sidebar.selectedRowId = "space:\(creation.spaceId)"
-            let chat = NewWork.chat(session, creation: creation, library: library)
+            Haptics.play(.newWork)
+            let chat = NewWork.chat(session, task: task, library: library)
             guard let navigation = navigationController else { return }
             navigation.pushViewController(chat, animated: true)
             // Over the screen it goes to, as that screen comes in.
             if library { chat.presentAttach(from: navigation) }
-        }
-    }
-
-    // MARK: Menus
-
-    /// What a hold on `row` offers: renaming it, moving it, and putting it
-    /// away (leaving or archiving, a section's heading deleted), each run
-    /// once the preview has gone (a rename needs the keyboard).
-    private func menu(for row: Row) -> [[MenuItem]]? {
-        // Searching, a hold has nothing to rename or move among what was found.
-        guard usesSpaces, search == nil else { return nil }
-        guard let session, [.space, .session, .section].contains(row.kind) else { return nil }
-        let store = session.store
-        var first: [MenuItem] = []
-        if let rename = renaming(row) { first.append(MenuItem(title: rename.title, icon: "pencil", run: rename.begin)) }
-        if beginDrag(row) != nil {
-            first.append(MenuItem(title: Strings.reorder, icon: "reorder") { [weak self] in self?.sidebar.armReorder(row.id) })
-        }
-        // HappyAgentSpacesSidebar's menus: new work closes from here and
-        // only from here; other work is left or archived.
-        var leaving = closing(row).map { act in
-            MenuItem(title: act.title, icon: act.icon, destructive: act.destructive) {
-                Haptics.play(.putAway)
-                act.run()
-            }
-        }
-        if row.kind == .section {
-            // Only the heading goes: its rows join the block above.
-            leaving.append(MenuItem(title: Strings.deleteSection, icon: "trash", destructive: true) {
-                Haptics.play(.putAway)
-                Task { await store.attentionInput(); await store.removeSection(row.nodeId) }
-            })
-        }
-        let groups = [first, leaving].filter { !$0.isEmpty }
-        return groups.isEmpty ? nil : groups
-    }
-
-    /// A row's rename, when it has one: a section's heading, a task's or a
-    /// bot's name, never Happy's. It happens in the row itself.
-    private func renaming(_ row: Row) -> (title: String, begin: () -> Void)? {
-        guard let store = session?.store, !row.isHappy else { return nil }
-        switch row.kind {
-        case .section:
-            return (Strings.renameSection, { [weak self] in
-                self?.sidebar.beginRename(row.id, text: row.label) { label in Task { await store.relabel(row.nodeId, label: label) } }
-            })
-        case .space where row.targetKind == "task" || row.targetKind == "bot":
-            guard let spaceId = row.spaceId else { return nil }
-            return (row.targetKind == "bot" ? Strings.renameBot : Strings.renameTask, { [weak self] in
-                let current = row.label == Strings.untitled ? "" : row.label
-                self?.sidebar.beginRename(row.id, text: current) { title in Task { await store.rename(spaceId, title: title) } }
-            })
-        default:
-            return nil
-        }
-    }
-
-    /// How a row's work is put away, as desktop offers it: new work nobody
-    /// named closes; a task is left, and archived too when the person may;
-    /// a bot is archived; a Surface is left. Never Happy.
-    private func closing(_ row: Row) -> [(title: String, icon: String, destructive: Bool, run: () -> Void)] {
-        guard let store = session?.store, !row.isHappy else { return [] }
-        if row.kind == .session, let agentId = row.agentId {
-            return [(Strings.archiveSubtask, "archive", true, { Task { await store.archiveSubtask(agentId, nodeId: row.nodeId) } })]
-        }
-        guard row.kind == .space else { return [] }
-        if row.isUntouchedSeedling, let spaceId = row.spaceId {
-            return [(Strings.closeNewWork, "close", true, { Task { await store.discard(spaceId) } })]
-        }
-        guard let targetId = row.targetId else { return [] }
-        switch row.targetKind {
-        case "task":
-            var acts: [(title: String, icon: String, destructive: Bool, run: () -> Void)] = [
-                (Strings.leaveTask, "close", false, { Task { await store.leave(taskId: targetId, nodeId: row.nodeId) } }),
-            ]
-            if row.canArchive {
-                acts.append((Strings.archiveTask, "archive", true, { Task { await store.archive(kind: "task", id: targetId, nodeId: row.nodeId) } }))
-            }
-            return acts
-        case "bot":
-            return [(Strings.archiveBot, "archive", true, { Task { await store.archive(kind: "bot", id: targetId, nodeId: row.nodeId) } })]
-        case "surface":
-            return [(Strings.leaveSurface, "close", false, { Task { await store.leave(surfaceId: targetId, nodeId: row.nodeId) } })]
-        default:
-            return []
-        }
-    }
-
-    // MARK: Carry
-
-    private func beginDrag(_ row: Row) -> Drag? {
-        guard search == nil, let document = snapshot.document else { return nil }
-        return Drag(holding: row.id, drawn: Self.drawn(snapshot.rows), all: snapshot.allRows, document: document)
-    }
-
-    private func drop(_ drag: Drag, to: Int) {
-        guard let store = session?.store else { return }
-        guard case .some(let after) = drag.after(to: to) else { return }
-        inOrder { await store.move(drag.moving, after: after) }
-    }
-
-    private func dragging(_ active: Bool) {
-        // A carry scrolls the list near its edges: not a pull on the stories.
-        stories.carrying = active
-        guard let store = session?.store else { return }
-        inOrder {
-            if active { await store.attentionInput() }
-            await store.setDragging(active)
-        }
-    }
-
-    /// Runs `work` after what the carry asked of the store before it: a
-    /// drop's move reaches the store ahead of the carry's end.
-    private func inOrder(_ work: @escaping @MainActor () async -> Void) {
-        let previous = carryWork
-        carryWork = Task { @MainActor in
-            await previous?.value
-            await work()
         }
     }
 }

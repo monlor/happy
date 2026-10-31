@@ -82,6 +82,12 @@ architectures comparable (local store, delta sync, crypto layer).
    `HeaderBackButton` renders nothing. Tablet tests use
    `w1280dp-h800dp-xhdpi`; without `ProvideWindowLayout` a composable lays
    out as an unlimited phone.
+   **Moving between screens:** the one NavHost takes `ui/NavMotion`'s four
+   transitions, Material's shared X axis (300 ms, 30 dp whatever the pane's
+   width, mirrored by Back and by right-to-left, none with animations off).
+   Never leave a NavHost on navigation-compose's defaults: those are a 700 ms
+   crossfade. The back gesture keeps the library's predictive animation. An
+   account or agent switch remounts the stack at once; it is not a push.
 4. **The local store is SQLite through the framework API**
    (`SQLiteOpenHelper`, WAL, hand-written SQL in `data/`). Why not a library:
    the schema is a handful of tables whose rows are mostly JSON documents
@@ -461,7 +467,8 @@ graph over the same database and keys for process death.
   chat's composer draft (the session composer's mirror is in the
   database), the chat list's scroll position, the home dock's text and
   focus (`rememberSaveable`), and an open composer or dock picker.
-- Kept through a recreation only: Restore's QR request (a ViewModel).
+- Kept through a recreation only: Restore's QR request (a ViewModel), or
+  its failure with Retry; a recreation never starts a new request.
 - Lost, as in happy-app: pending chats (memory only), open alerts and
   confirmations, an in-flight Resume or Stop spinner, Restore's QR request
   after process death.

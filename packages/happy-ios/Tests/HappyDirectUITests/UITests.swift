@@ -31,6 +31,13 @@ private let skipsQuiescence: Bool = {
 /// (`xcrun simctl privacy <udid> grant photos <bundle>`).
 @MainActor
 final class UITests: XCTestCase {
+    /// The transcript, whichever renderer drew it: the agents' chat draws
+    /// on UltraList, which is not a scroll view, so it is found by its
+    /// identifier rather than by kind.
+    var transcriptElement: XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "transcript").firstMatch
+    }
+
     private let app = XCUIApplication()
 
     override func setUp() {
@@ -80,6 +87,7 @@ final class UITests: XCTestCase {
                 withVelocity: .slow, thenHoldForDuration: 0.4
             )
             pause(0.8)
+            if abs(element.frame.midY - y) < 1, element.isHittable { break }
         }
     }
 
@@ -523,9 +531,9 @@ final class UITests: XCTestCase {
         XCTAssertTrue(menu.exists, "no menu under the preview")
         XCTAssertEqual(menu.frame.minY, preview.frame.maxY + 10, accuracy: 0.5)
         XCTAssertEqual(menu.frame.maxX, preview.frame.maxX, accuracy: 0.5)
-        // Only what changes the row: its name, its place, putting it away.
+        // Only what changes the row: its name, putting it away.
         XCTAssertTrue(menu.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Rename")).count == 1, "no Rename in the menu")
-        XCTAssertTrue(menu.buttons["Reorder"].exists, "no Reorder in the menu")
+        XCTAssertFalse(menu.buttons["Reorder"].exists, "the menu still offers Reorder")
         for gone in ["Open", "Show subtasks", "Hide subtasks", "Collapse", "Expand", "Mark as read", "Mark as unread"] {
             XCTAssertFalse(menu.buttons[gone].exists, "the menu still offers \(gone)")
         }
@@ -586,164 +594,6 @@ final class UITests: XCTestCase {
             capture("hold-archived")
         } else {
             XCTFail("no Hold Me bot to archive")
-        }
-    }
-
-    /// A hold lifts a row with its menu; moving carries it (the menu goes),
-    /// its peers glide aside, and the drop lands where the gap was. A
-    /// section carries its rows.
-    func testReorder() {
-        home()
-        pause(1)
-        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "row:space:"))
-        func order() -> [String] {
-            // Rows named alike (two "Trip notes") can't be told apart by name: left out.
-            let ids = shownRows("row:space:").sorted { $0.frame.minY < $1.frame.minY }.map { $0.identifier }
-            return ids.filter { id in ids.filter { $0 == id }.count == 1 }
-        }
-        // A task a few rows down, carried up two rows.
-        let all = order()
-        guard all.count > 5 else { return XCTFail("too few rows to reorder: \(all)") }
-        let moving = app.descendants(matching: .any)[all[4]]
-        let target = app.descendants(matching: .any)[all[2]]
-        _ = (moving.frame, target.frame)
-        capture("reorder-before")
-        // Held: the menu shows first.
-        moving.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2, thenDragTo: target.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)), withVelocity: .slow, thenHoldForDuration: 0.8)
-        pause(2)
-        capture("reorder-after")
-        let after = order()
-        // Just over the row it was let go on (a section heading may stand between).
-        let landed = after.firstIndex(of: all[4]) ?? -1
-        XCTAssertTrue(landed < after.firstIndex(of: all[2])! && landed > after.firstIndex(of: all[0])!, "the row did not land over \(all[2]): \(after)")
-        // Released without moving: the preview and menu stay open.
-        moving.press(forDuration: 1.2)
-        XCTAssertTrue(app.descendants(matching: .any)["hold-menu"].waitForExistence(timeout: 2), "the menu did not stay")
-        pause(1)
-        capture("reorder-menu-stays")
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).tap()
-        pause(1)
-        // A section, carried with its rows to the top.
-        let sections = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "row:section:"))
-        // A section, carried over the section above it (past its whole block,
-        // as desktop asks: a neighbour is passed by half its height).
-        // Twice desktop's size, two open sections rarely share the screen:
-        // the upper one folded brings the lower up under it.
-        let heads = sections.allElementsBoundByIndex.filter { $0.frame.height > 0 }.sorted { $0.frame.minY < $1.frame.minY }
-        if heads.count > 1 {
-            // By identifier: an element bound by index is another row once the order changes.
-            let section = app.descendants(matching: .any)[heads[heads.count - 1].identifier]
-            let top = app.descendants(matching: .any)[heads[heads.count - 2].identifier]
-            bringIntoView(top)
-            pause(1)
-            let folded = rowUnder(top)?.identifier != section.identifier
-            if folded { tapChevron(top); pause(1.5) }
-            bringIntoView(section)
-            pause(1)
-            capture("reorder-section-before")
-            section.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 1.2, thenDragTo: top.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)), withVelocity: .slow, thenHoldForDuration: 0.8)
-            capture("reorder-section-held")
-            pause(1)
-            // Checked at once: Prioritizing may tidy the sidebar again after.
-            capture("reorder-section")
-            XCTAssertLessThan(section.frame.minY, top.frame.minY, "the section did not land over the one above")
-            // Opened again, as the run found it.
-            if folded { tapChevron(top); pause(1) }
-        } else {
-            XCTFail("no two sections")
-        }
-    }
-
-    /// Reorder from the menu: the menu goes and the row stays lifted where
-    /// it was; a finger put down anywhere then carries it, and where it's
-    /// let go it stays. A tap instead puts it back.
-    func testReorderFromMenu() {
-        home()
-        pause(1)
-        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "row:space:"))
-        func order() -> [String] {
-            let screen = app.frame.height
-            let ids = shownRows("row:space:").filter { $0.frame.minY > screen * 0.12 && $0.frame.maxY < screen * 0.8 }.sorted { $0.frame.minY < $1.frame.minY }.map { $0.identifier }
-            return ids.filter { id in ids.filter { $0 == id }.count == 1 }
-        }
-        let all = order()
-        guard all.count > 4 else { return XCTFail("too few rows to reorder: \(all)") }
-        let moving = app.descendants(matching: .any)[all[3]]
-        let target = app.descendants(matching: .any)[all[1]]
-        let from = moving.frame
-        let to = target.frame
-
-        // A tap puts it back where it was.
-        moving.press(forDuration: 1.0)
-        let reorder = app.buttons["Reorder"]
-        XCTAssertTrue(reorder.waitForExistence(timeout: 3), "no Reorder in the menu")
-        reorder.tap()
-        XCTAssertTrue(until(2) { !app.descendants(matching: .any)["hold-menu"].exists }, "the menu stayed")
-        XCTAssertTrue(app.descendants(matching: .any)["lifted"].waitForExistence(timeout: 2), "Reorder lifted nothing")
-        pause(0.8)
-        capture("reorder-armed")
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: from.midX, dy: from.midY)).tap()
-        pause(1)
-        XCTAssertEqual(order(), all, "a tap moved the lifted row")
-
-        // Lifted again: a finger down on it, moved up two rows, let go.
-        moving.press(forDuration: 1.0)
-        XCTAssertTrue(reorder.waitForExistence(timeout: 3))
-        reorder.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["lifted"].waitForExistence(timeout: 2), "Reorder lifted nothing")
-        pause(1)
-        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: from.midX, dy: from.midY))
-        let end = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: to.midX, dy: to.minY + to.height * 0.2))
-        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.5)
-        pause(2)
-        capture("reorder-menu-dropped")
-        let after = order()
-        let landed = after.firstIndex(of: all[3]) ?? -1
-        XCTAssertTrue(landed >= 0 && landed < (after.firstIndex(of: all[1]) ?? -1) && landed > (after.firstIndex(of: all[0]) ?? -1), "the row didn't stay where it was let go: \(after)")
-        pause(3)
-        XCTAssertEqual(order().firstIndex(of: all[3]), landed, "the row went back")
-    }
-
-    /// A section's "+" makes new work right under its heading.
-    func testSectionAdd() {
-        home()
-        pause(1)
-        let sections = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "row:section:"))
-        guard let shown = sections.allElementsBoundByIndex.filter({ $0.frame.height > 0 }).min(by: { $0.frame.minY < $1.frame.minY }) else {
-            return XCTFail("no section")
-        }
-        let section = app.descendants(matching: .any)[shown.identifier]
-        bringIntoView(section)
-        pause(1)
-        // Open, so what's made under it shows.
-        if let under = rowUnder(section), under.identifier.hasPrefix("row:section:") || under.frame.minY > section.frame.maxY + 40 { tapChevron(section); pause(1) }
-        capture("section-add-before")
-        // The "+" stands one square before the chevron: its centre 70 in from the row's end.
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: section.frame.maxX - 70, dy: section.frame.midY)).tap()
-        XCTAssertTrue(app.textViews["composer"].waitForExistence(timeout: 6), "the + opened no new work")
-        pause(1)
-        capture("section-add-opened")
-        app.tapBack()
-        pause(1.5)
-        let made = rowUnder(section)
-        XCTAssertEqual(made?.identifier, "row:space:New", "the new work isn't right under its section")
-        capture("section-add-made")
-        // The same "+" again opens that one: no second empty one under it.
-        let untitled = app.descendants(matching: .any).matching(identifier: "row:space:New")
-        let count = untitled.count
-        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: section.frame.maxX - 70, dy: section.frame.midY)).tap()
-        XCTAssertTrue(app.textViews["composer"].waitForExistence(timeout: 6), "the + opened nothing the second time")
-        pause(1)
-        app.tapBack()
-        pause(1.5)
-        XCTAssertEqual(untitled.count, count, "the + made a second empty new work under its section")
-        // Put away again.
-        if let made {
-            made.press(forDuration: 1.0)
-            let close = app.buttons["Close new work"]
-            XCTAssertTrue(close.waitForExistence(timeout: 3), "new work offered no close")
-            close.tap()
-            pause(2)
         }
     }
 
@@ -1082,7 +932,7 @@ final class UITests: XCTestCase {
             let target = row("space", label).firstMatch
             guard target.exists, target.isHittable else { continue }
             target.tap()
-            let transcript = app.scrollViews["transcript"]
+            let transcript = transcriptElement
             XCTAssertTrue(transcript.waitForExistence(timeout: 8), "\(label) didn't open")
             var value = ""
             let deadline = Date().addingTimeInterval(10)
@@ -1111,7 +961,7 @@ final class UITests: XCTestCase {
         // One left a moment ago comes back drawn too.
         if warm, let first = opened.first {
             row("space", first).firstMatch.tap()
-            let transcript = app.scrollViews["transcript"]
+            let transcript = transcriptElement
             XCTAssertTrue(transcript.waitForExistence(timeout: 8))
             var value = ""
             for _ in 0..<100 where value.isEmpty {
@@ -1376,7 +1226,7 @@ final class UITests: XCTestCase {
         send(composer, "stream 40 30")
         let working = app.descendants(matching: .any)["working"]
         XCTAssertTrue(working.waitForExistence(timeout: 15), "the reply never started")
-        let transcript = app.scrollViews["transcript"]
+        let transcript = transcriptElement
         // Long enough to scroll before the pulls.
         pause(8)
         dismissKeyboard()
@@ -1407,18 +1257,45 @@ final class UITests: XCTestCase {
         while Date() < deadline, working.exists { pause(1) }
     }
 
-    /// Desktop's send lift, step by step against a streaming reply: an idle
-    /// send by a reader at the end is lifted to 30% down the transcript
-    /// with room held under it; the reply grows into that room without
-    /// moving the send, then, once it outgrows it, is followed at its end;
-    /// a send mid-turn waits at the end, lifted by nothing; another send
-    /// once idle is lifted again; and one sent by a reader scrolled up into
-    /// history moves nothing. Needs `fakellm.py` as above.
-    func testSendLiftMatchesDesktop() {
+    /// Uses the same paired synthetic conversation as the streaming checks.
+    func checkComposerTracksHeldKeyboardDrag() {
+        XCUIDevice.shared.orientation = .portrait
         let composer = openStreamLab(probe: "watch")
-        let transcript = app.scrollViews["transcript"]
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        pause(1.5)
+        let input = app.descendants(matching: .any)["input"]
+        let keyboard = app.keyboards.firstMatch.frame
+        print("HAPPY_KEYBOARD before input=\(input.frame) keyboard=\(keyboard) probe=\(transcriptElement.value ?? "")")
+        let start = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.midX, dy: input.frame.minY - 40))
+        let end = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: app.frame.midX, dy: keyboard.minY + 110))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: 160, thenHoldForDuration: 2)
+        pause(1)
+        let value = transcriptElement.value as? String ?? ""
+        print("HAPPY_KEYBOARD after \(value)")
+        capture("keyboard-held-drag")
+        let fields = Dictionary(uniqueKeysWithValues: value.split(separator: " ").compactMap { item -> (String, Double)? in
+            let pair = item.split(separator: "=")
+            guard pair.count == 2, let number = Double(pair[1]) else { return nil }
+            return (String(pair[0]), number)
+        })
+        XCTAssertGreaterThan(fields["keyboardFrames"] ?? 0, 20, "the keyboard was never held partially dismissed")
+        XCTAssertLessThan(fields["keyboardGap"] ?? 999, 2, "the composer left the keyboard while the finger held it")
+    }
+
+    /// A send against a streaming reply, step by step: a send by a reader
+    /// at the end lands at the foot, over the composer, and nothing is
+    /// held under it; the turns above it move up by what the send is tall
+    /// and no further; a send mid-turn does the same; and a send made
+    /// while reading history moves nothing at all, with a way back to the
+    /// newest. This is where the transcript used to lift a send 30% down
+    /// the viewport, which read as the chat jumping away on send
+    /// (`SendFollow`). Needs `fakellm.py` as above.
+    func testASendLandsAtTheFootAndLiftsNothing() throws {
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let composer = openStreamLab(probe: "watch")
+        let transcript = transcriptElement
         let messages = app.descendants(matching: .any).matching(identifier: "message")
-        let working = app.descendants(matching: .any)["working"]
         let input = app.descendants(matching: .any)["input"]
         // Each run's sends are its own: the conversation keeps the last run's.
         let run = String(Int(Date().timeIntervalSince1970) % 100_000)
@@ -1426,79 +1303,348 @@ final class UITests: XCTestCase {
             send(composer, "\(text) \(run)")
             return app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@", "message", "\(text) \(run)")).firstMatch
         }
-        func idle() {
-            let deadline = Date().addingTimeInterval(180)
-            while Date() < deadline, working.exists { pause(0.5) }
-            XCTAssertFalse(working.exists, "the turn never ended")
-            pause(1)
-        }
-        idle()
-        // 1. Idle, at the end: lifted, room held.
-        // The reply waits a moment before its first word: the lift is seen
-        // before the reply grows into the room.
-        let first = say("stream 4 120 wait 1500 first")
-        XCTAssertTrue(first.waitForExistence(timeout: 5))
-        pause(0.3)
-        let counts = probeCounts(transcript)
-        let top = CGFloat(counts["top"] ?? 0)
-        let viewport = input.frame.minY - 8 - top
-        let line = (viewport * 0.3).rounded()
-        capture("lift-1-sent")
-        XCTAssertEqual(first.frame.minY - top, line, accuracy: 1.5, "the send isn't lifted to the line (viewport \(viewport))")
-        XCTAssertGreaterThan(input.frame.minY - first.frame.maxY, viewport / 3, "no room held for the reply")
-        // 2. The reply grows into the room, the send held, then followed.
-        let liftedAt = first.frame.minY
-        var held = 0
-        var followed = false
-        let deadline = Date().addingTimeInterval(60)
-        while Date() < deadline, working.exists {
-            let now = first.frame.minY
-            if abs(now - liftedAt) < 1 {
-                held += 1
-            } else {
-                XCTAssertLessThan(now, liftedAt, "the send moved down")
-                pause(0.3)
-                let end = max(messages.element(boundBy: messages.count - 1).frame.maxY, working.frame.maxY)
-                XCTAssertEqual(end, input.frame.minY - 8, accuracy: 4, "outgrown, the reply's end isn't followed")
-                followed = true
-                break
-            }
-            pause(0.3)
-        }
-        capture("lift-2-outgrown")
-        XCTAssertGreaterThan(held, 2, "the room under the send didn't hold")
-        XCTAssertTrue(followed, "the reply never outgrew the room")
-        // 3. Mid-turn: it waits at the end, nothing lifted.
-        let mid = say("stream 2 40 midturn")
-        XCTAssertTrue(mid.waitForExistence(timeout: 5))
-        pause(0.8)
-        capture("lift-3-midturn")
-        XCTAssertGreaterThan(mid.frame.minY - top, line + 40, "a send mid-turn was lifted")
-        XCTAssertLessThan(mid.frame.maxY, input.frame.minY + 1, "a send mid-turn is under the composer")
-        idle()
-        // 4. Idle again: lifted again.
-        let again = say("stream 2 120 wait 1500 again")
-        XCTAssertTrue(again.waitForExistence(timeout: 5))
-        pause(0.3)
-        capture("lift-4-again")
-        XCTAssertEqual(again.frame.minY - top, line, accuracy: 1.5, "the next idle send isn't lifted")
-        idle()
-        // 5. Scrolled up into history: a send moves nothing.
-        // The drag that puts the keyboard away takes the reader up too.
-        dismissKeyboard()
-        pause(1)
-        let anchor = mid
-        let parked = anchor.frame.minY
-        XCTAssertTrue(transcript.frame.contains(CGPoint(x: anchor.frame.midX, y: parked)), "the anchor isn't on screen")
         composer.tap()
         pause(1)
-        let parkedNow = anchor.frame.minY
-        _ = say("stream 1 40 parked")
+        func assertKeyboardDock(file: StaticString = #filePath, line: UInt = #line) {
+            // XCUI's keyboard frame can exclude the 44pt prediction strip.
+            // The UIKit keyboard notification includes it; the card sits
+            // eight points above that full frame in either orientation.
+            let gap = app.keyboards.firstMatch.frame.minY - input.frame.maxY
+            XCTAssertTrue(abs(gap - 8) <= 2 || abs(gap - 52) <= 2,
+                          "the composer does not ride the full keyboard (XCUI gap \(gap))", file: file, line: line)
+        }
+        assertKeyboardDock()
+        // Leave enough time for XCUI's screenshot and repeated accessibility
+        // reads before the first reply word; those reads take seconds.
+        let first = say("stream 1 20 wait 10000 first")
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        pause(0.2)
+        let top = app.navigationBars.firstMatch.frame.maxY
+        let viewport = input.frame.minY - 8 - top
+        let firstID = (first.value as? String)?.components(separatedBy: ",").first
+        let firstY = first.frame.minY
+        print("HAPPY_SEND initial \(first.value ?? "") frame=\(first.frame)")
+        capture("send-1-landed")
+        XCTAssertLessThan(first.frame.maxY, input.frame.minY + 1, "the send went under the composer")
+        XCTAssertGreaterThan(first.frame.maxY, input.frame.minY - 24, "the send isn't at the foot: \(first.frame)")
+        XCTAssertGreaterThan(first.frame.minY - top, (viewport * 0.3).rounded() + 40,
+                             "the send was lifted towards the old 30% line (viewport \(viewport))")
+        pause(0.5)
+        XCTAssertNotNil(firstID)
+        XCTAssertEqual((first.value as? String)?.components(separatedBy: ",").first, firstID)
+        XCTAssertEqual(first.frame.minY, firstY, accuracy: 1, "accepting the send moved its row before the reply")
+        print("HAPPY_SEND accepted \(first.value ?? "") frame=\(first.frame)")
+        pause(16)
+        capture("send-2-reply")
+        let end = messages.allElementsBoundByIndex.map(\.frame).filter { $0.minY < input.frame.minY && $0.maxY > top }.map(\.maxY).max() ?? 0
+        XCTAssertEqual(end, input.frame.minY - 8, accuracy: 6, "the reply's end isn't followed")
+
+        // A send during a reply is appended at the end too.
+        let mid = say("stream 2 20 midturn")
+        XCTAssertTrue(mid.waitForExistence(timeout: 5))
+        pause(0.8)
+        // Keep the reply out of the screenshot/AX reads: once it arrives,
+        // following it correctly carries this older user row upwards.
+        let second = say("stream 1 5 wait 10000 alsomidturn")
+        XCTAssertTrue(second.waitForExistence(timeout: 5))
+        pause(0.8)
+        capture("send-3-midturn")
+        XCTAssertLessThan(second.frame.maxY, input.frame.minY + 1, "a send mid-turn is under the composer")
+        XCTAssertGreaterThan(second.frame.minY - top, (viewport * 0.3).rounded() + 40, "a send mid-turn was lifted")
+        pause(12)
+        XCUIDevice.shared.orientation = .landscapeLeft
         pause(1.5)
-        capture("lift-5-parked")
-        XCTAssertEqual(anchor.frame.minY, parkedNow, accuracy: 1, "a send from history moved the reader (\(parked) before the keyboard)")
+        capture("send-landscape-keyboard")
+        assertKeyboardDock()
+        let landscapeEnd = messages.allElementsBoundByIndex.map(\.frame).filter { $0.minY < input.frame.minY }.map(\.maxY).max() ?? 0
+        XCTAssertEqual(landscapeEnd, input.frame.minY - 8, accuracy: 6, "rotation put the newest message under the composer")
+        XCUIDevice.shared.orientation = .portrait
+        pause(1.5)
+
+        // Actually move into history. UltraList keeps a window, so retain
+        // a visible row by identity rather than by its index in that window.
+        dismissKeyboard()
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "the transcript did not dismiss the keyboard interactively")
+        for _ in 0..<3 { transcript.swipeDown(velocity: .fast) }
+        composer.tap()
+        pause(1)
+        let visible = messages.allElementsBoundByIndex.filter { $0.frame.maxY > top + 40 && $0.frame.minY < input.frame.minY - 40 }
+        let anchor = try XCTUnwrap(visible.first, "no history row is visible")
+        let anchorLabel = anchor.label
+        let anchorID = (anchor.value as? String)?.components(separatedBy: ",").first
+        XCTAssertNotNil(anchorID)
+        let parked = anchor.frame.minY
+        print("HAPPY_SEND history-before \(anchor.value ?? "") frame=\(anchor.frame)")
+        _ = say("stream 1 5 parked")
+        pause(1.5)
+        capture("send-4-parked")
+        let kept = messages.matching(NSPredicate(format: "label == %@", anchorLabel)).firstMatch
+        XCTAssertTrue(kept.exists, "sending unmounted the history anchor")
+        XCTAssertEqual((kept.value as? String)?.components(separatedBy: ",").first, anchorID)
+        XCTAssertEqual(kept.frame.minY, parked, accuracy: 1, "a send from history moved the reader")
+        print("HAPPY_SEND history-after \(kept.value ?? "") frame=\(kept.frame)")
         XCTAssertTrue(app.descendants(matching: .any)["jump-latest"].exists, "no way back to the newest")
-        idle()
+    }
+
+    /// A phone held sideways with the keyboard up leaves the full card a
+    /// sliver of transcript: the card goes to one row, the chips behind its
+    /// options button, and the navigation bar goes (Steve's OK, 2026-10-30).
+    /// The bar is back as the keyboard goes down and upright, and the draft
+    /// and the keyboard carry across the turns. Actual native swipe-back
+    /// cancellation and completion are covered by `testNativeSwipeBackCancelsAndCompletesWithTheKeyboard`.
+    /// The transcript's room sideways is read off the
+    /// screen (`HAPPY_COMPACT`), empty and with three lines.
+    func testCompactComposerSideways() {
+        // Upright to start, whatever a run before left; back upright however it ends.
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let composer = openStreamLab(probe: "watch")
+        let options = app.buttons["composer-options"]
+        let model = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Model: ")).firstMatch
+        let bar = app.navigationBars.firstMatch
+        func barShows() -> Bool { bar.exists && bar.isHittable && bar.frame.maxY > 0 }
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        // A run before leaves its draft: the caret to its end, then all of it deleted.
+        if let draft = composer.value as? String, !draft.isEmpty, draft != composer.placeholderValue {
+            composer.coordinate(withNormalizedOffset: CGVector(dx: 0.99, dy: 0.95)).tap()
+            composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: draft.count + 2))
+        }
+        pause(1)
+        XCTAssertEqual(composer.value as? String ?? "", composer.placeholderValue ?? "", "the draft wasn't cleared")
+        XCTAssertFalse(options.exists && options.isHittable, "the options button upright")
+        XCTAssertTrue(model.isHittable, "no model chip upright")
+        XCTAssertTrue(barShows(), "no bar upright with the keyboard up")
+        capture("compact-0-portrait-empty")
+
+        /// The transcript's room: from under the bar (or the top, with it
+        /// hidden) to 8 above the card. The card's top is 8 over the text's
+        /// container: one line stands 7 into its 44, a scrolled text 9
+        /// into its 62 (a hairline left out).
+        func room(_ name: String, scrolled: Bool = false) -> CGFloat {
+            let shows = barShows()
+            let top = shows ? bar.frame.maxY : 0
+            let text = composer.frame
+            let cardTop = text.minY - (scrolled ? 9 : 7) - 8
+            let room = cardTop - 8 - top
+            print("HAPPY_COMPACT \(name) window \(app.windows.firstMatch.frame) bar \(shows ? bar.frame : .zero) keyboard \(app.keyboards.firstMatch.frame) "
+                + "composer \(text) options \(options.frame) send \(app.buttons["Send"].frame) cardTop \(cardTop) room \(room)")
+            return room
+        }
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        pause(2.5)
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "the keyboard went with the turn")
+        XCTAssertTrue(options.waitForExistence(timeout: 3) && options.isHittable, "no options button sideways")
+        XCTAssertFalse(model.exists && model.isHittable, "the chips still in the row sideways")
+        XCTAssertTrue(app.buttons["Send"].isHittable)
+        XCTAssertFalse(barShows(), "the bar sideways with the keyboard up")
+        // Under the bar the compact card left 39.67.
+        XCTAssertGreaterThan(room("landscape empty"), 60, "the transcript's room sideways without the bar")
+        capture("compact-1-landscape-empty")
+
+        // Who has the keys, and where the composer stands, with the menu up.
+        func focus(_ name: String) {
+            let keyboard = app.keyboards.firstMatch
+            print("HAPPY_COMPACT_FOCUS \(name) composerFocus \(String(describing: composer.value(forKey: "hasKeyboardFocus"))) "
+                + "keyboard exists \(keyboard.exists) hittable \(keyboard.exists && keyboard.isHittable) frame \(keyboard.exists ? keyboard.frame : .zero) composer \(composer.frame)")
+        }
+        focus("before menu")
+        options.tap()
+        let modelRow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Model: ")).firstMatch
+        XCTAssertTrue(modelRow.waitForExistence(timeout: 3), "the options menu has no model")
+        pause(0.5)
+        focus("menu up")
+        capture("compact-2-options")
+        modelRow.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["picker-models"].waitForExistence(timeout: 5), "the model list didn't open")
+        focus("picker up")
+        capture("compact-3-picker")
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)).tap()
+        pause(1)
+
+        if !app.keyboards.firstMatch.exists { composer.tap() }
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        composer.typeText("first line\nsecond line\nthird line")
+        pause(1.5)
+        XCTAssertTrue(options.isHittable, "no options button with three lines")
+        XCTAssertTrue(app.buttons["Send"].isHittable)
+        XCTAssertGreaterThan(room("landscape three lines", scrolled: true), 40, "the transcript's room sideways with three lines")
+        capture("compact-4-landscape-three-lines")
+
+        // The keyboard down, still sideways: the bar is back.
+        // Dragged down from the transcript, the only room above the card
+        // sideways.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).press(
+            forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)), withVelocity: .slow, thenHoldForDuration: 0.2
+        )
+        pause(1.5)
+        XCTAssertFalse(app.keyboards.firstMatch.exists && app.keyboards.firstMatch.isHittable, "the keyboard stayed up")
+        XCTAssertTrue(barShows(), "no bar sideways with the keyboard down")
+        capture("compact-5-landscape-keyboard-down")
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        pause(1)
+        XCTAssertFalse(barShows(), "the bar again with the keyboard up again")
+
+        XCUIDevice.shared.orientation = .portrait
+        pause(2.5)
+        XCTAssertTrue(barShows(), "no bar upright again")
+        XCTAssertFalse(options.exists && options.isHittable, "the options button upright again")
+        XCTAssertTrue(model.isHittable, "no model chip upright again")
+        XCTAssertEqual(composer.value as? String, "first line\nsecond line\nthird line")
+        capture("compact-6-portrait-again")
+
+    }
+
+    /// Settings is the control; the same native gestures must leave a chat.
+    func testNativeSwipeBack() {
+        XCUIDevice.shared.orientation = .portrait
+        app.terminate()
+        app.launch()
+        home()
+        pause(1.5)
+        let name = ProcessInfo.processInfo.environment["HAPPY_STREAM_ROW"] ?? "Stream Lab"
+        let bot = row("space", name)
+        func mark(_ text: String) { print("HAPPY_NATIVE_POP \(text)") }
+        func swipe(_ from: CGFloat, _ to: CGFloat, y: CGFloat = 0.5) {
+            app.coordinate(withNormalizedOffset: CGVector(dx: from, dy: y)).press(
+                forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: to, dy: y)), withVelocity: .slow, thenHoldForDuration: 0.1
+            )
+            pause(1.5)
+        }
+        func atHome() -> Bool { app.buttons["search"].firstMatch.exists && !app.textViews["composer"].exists }
+        for (label, from) in [("edge", CGFloat(0.005)), ("content", CGFloat(0.3))] {
+            // Settings, the control.
+            app.buttons["settings"].firstMatch.tap()
+            XCTAssertTrue(app.descendants(matching: .any)["settings"].waitForExistence(timeout: 5))
+            pause(1)
+            mark("settings \(label) start")
+            swipe(from, 0.95)
+            let settingsPopped = atHome()
+            mark("settings \(label) popped \(settingsPopped)")
+            XCTAssertTrue(settingsPopped, "Settings must pop with the native \(label) swipe")
+
+            // The agent chat, keyboard down.
+            bot.tap()
+            XCTAssertTrue(app.textViews["composer"].waitForExistence(timeout: 5))
+            pause(2)
+            mark("chat \(label) start")
+            swipe(from, 0.95)
+            let chatPopped = atHome()
+            mark("chat \(label) popped \(chatPopped)")
+            XCTAssertTrue(chatPopped, "Chat must pop with the native \(label) swipe")
+        }
+    }
+
+    /// A short native swipe cancels without losing focus; a full one pops,
+    /// including the sideways chat whose standard bar is hidden by the keyboard.
+    func testNativeSwipeBackCancelsAndCompletesWithTheKeyboard() {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        app.terminate()
+        app.launchEnvironment["HAPPY_CHAT_PROBE"] = "native-pop"
+        app.launch()
+        home()
+        let bot = row("space", ProcessInfo.processInfo.environment["HAPPY_STREAM_ROW"] ?? "Stream Lab")
+        let composer = app.textViews["composer"]
+        bot.tap()
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        composer.tap()
+        composer.typeText("Swipe verification draft")
+        app.buttons["Back"].tap()
+        XCTAssertTrue(app.buttons["search"].firstMatch.waitForExistence(timeout: 5))
+        func probe() -> [String: String] {
+            let value = app.descendants(matching: .any)["transcript"].value as? String ?? ""
+            return Dictionary(value.split(separator: " ").compactMap { token -> (String, String)? in
+                let pair = token.split(separator: "=", maxSplits: 1)
+                return pair.count == 2 ? (String(pair[0]), String(pair[1])) : nil
+            }, uniquingKeysWith: { _, last in last })
+        }
+        for (orientationName, orientation) in [("portrait", UIDeviceOrientation.portrait), ("landscape", .landscapeLeft)] {
+            XCUIDevice.shared.orientation = orientation
+            pause(1.5)
+            for keyboardUp in [false, true] {
+                for (kind, from) in [("edge", CGFloat(0.005)), ("content", CGFloat(0.3))] {
+                    let label = "\(orientationName)-keyboard-\(keyboardUp)-\(kind)"
+                    if let focus = ProcessInfo.processInfo.environment["HAPPY_POP_FOCUS"], !label.hasPrefix(focus) { continue }
+                    bot.tap()
+                    XCTAssertTrue(composer.waitForExistence(timeout: 5))
+                    pause(1)
+                    if keyboardUp {
+                        composer.tap()
+                        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+                        pause(1)
+                    } else {
+                        XCTAssertFalse(app.keyboards.firstMatch.exists)
+                    }
+                    let bar = app.navigationBars.firstMatch
+                    let showsBar = bar.exists && bar.isHittable && bar.frame.maxY > 0
+                    XCTAssertEqual(showsBar, orientationName != "landscape" || !keyboardUp)
+                    let top = showsBar ? bar.frame.maxY : 0
+                    let bottom = composer.frame.minY - 24
+                    var y = (top + bottom) / 2 / app.frame.height
+                    if ProcessInfo.processInfo.environment["HAPPY_POP_REQUIRE_FITTING"] == "1" {
+                        let fitting = (probe()["hFit"] ?? "").split(separator: ",").compactMap { Double($0) }
+                        XCTAssertEqual(fitting.count, 7, "a real visible fitting table must be under the finger")
+                        guard fitting.count == 7 else { return }
+                        XCTAssertLessThanOrEqual(fitting[5], fitting[6] + 1)
+                        y = (fitting[1] + fitting[3] / 2) / app.frame.height
+                        print("HAPPY_NATIVE_POP fitting \(label) \(fitting)")
+                    }
+                    let keyboardFrame = keyboardUp ? app.keyboards.firstMatch.frame : .zero
+                    print("HAPPY_NATIVE_POP geometry \(label) y \(y) bar \(showsBar ? bar.frame : .zero) composer \(composer.frame) keyboard \(keyboardFrame)")
+                    capture("pop-\(label)-before")
+                    func drag(to x: CGFloat, hold: TimeInterval) {
+                        app.coordinate(withNormalizedOffset: CGVector(dx: from, dy: y)).press(
+                            forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: x, dy: y)),
+                            withVelocity: .slow, thenHoldForDuration: hold
+                        )
+                        pause(1.5)
+                    }
+                    let before = probe()
+                    let draft = composer.value as? String
+                    XCTAssertTrue(draft?.contains("Swipe verification draft") == true)
+                    // Content recognition has a larger activation distance than
+                    // the edge. Travel remains below half of the window, then
+                    // hold still so releasing cancels rather than flings home.
+                    let cancellationTravel = kind == "content" ? min(0.32, 134 / app.frame.width) : 0.08
+                    drag(to: from + cancellationTravel, hold: 0.4)
+                    XCTAssertTrue(composer.exists, "\(label): cancelled swipe left chat")
+                    XCTAssertEqual(app.keyboards.firstMatch.exists, keyboardUp, "\(label): cancelled swipe changed keyboard")
+                    XCTAssertEqual(composer.value as? String, draft, "\(label): cancellation changed the draft")
+                    let after = probe()
+                    let sampleKey = kind == "content" ? "popContent" : "popEdge"
+                    let translationKey = sampleKey + "X"
+                    XCTAssertGreaterThan(Double(after[sampleKey] ?? "") ?? -1, Double(before[sampleKey] ?? "") ?? 0,
+                                         "\(label): cancellation must follow observed native motion during UIKit's interactive transition")
+                    XCTAssertGreaterThan(Double(after[translationKey] ?? "") ?? 0, 0)
+                    print("HAPPY_NATIVE_POP observed \(label) \(sampleKey)=\(after[sampleKey] ?? "missing") translation=\(after[translationKey] ?? "missing")")
+                    print("HAPPY_NATIVE_POP \(label) cancelled")
+                    capture("pop-\(label)-cancelled")
+                    if !keyboardUp, kind == "content" {
+                        let visible = CGRect(x: 0, y: top, width: app.frame.width, height: bottom - top)
+                        let messages = app.descendants(matching: .any).matching(identifier: "message")
+                        let row = messages.allElementsBoundByIndex.first { !$0.label.isEmpty && $0.frame.intersects(visible) }
+                        XCTAssertNotNil(row, "no message to check vertical scrolling")
+                        if let row {
+                            let anchor = messages.matching(NSPredicate(format: "label == %@", row.label)).firstMatch
+                            let before = anchor.frame.minY
+                            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: y))
+                            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 90)), withVelocity: .slow, thenHoldForDuration: 0.2)
+                            pause(1)
+                            XCTAssertTrue(composer.exists, "vertical scroll popped chat")
+                            XCTAssertTrue(!anchor.exists || abs(anchor.frame.minY - before) > 10, "native pop priority blocked vertical scrolling")
+                            print("HAPPY_NATIVE_POP \(label) vertical scroll moved \(anchor.exists ? anchor.frame.minY - before : .infinity)")
+                        }
+                    }
+                    drag(to: 0.95, hold: 0.1)
+                    XCTAssertTrue(app.buttons["search"].firstMatch.waitForExistence(timeout: 4), "\(label): full swipe did not return home")
+                    XCTAssertFalse(composer.exists, "\(label): full swipe left chat mounted")
+                    print("HAPPY_NATIVE_POP \(label) completed")
+                }
+            }
+        }
     }
 
     /// Stream Lab's conversation, with the transcript's probe on.
@@ -1514,7 +1660,7 @@ final class UITests: XCTestCase {
         bot.tap()
         let composer = app.textViews["composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.scrollViews["transcript"].waitForExistence(timeout: 5))
+        XCTAssertTrue(transcriptElement.waitForExistence(timeout: 5))
         pause(2)
         return composer
     }
@@ -1868,16 +2014,16 @@ final class UITests: XCTestCase {
 
         // A photo from the library (the newest: the swatch the run put
         // there with `simctl addmedia`), with a question about it.
-        // "+" is the "+" sheet; its Photos, the shared library sheet.
+        // "+" is the attachment menu, its grid the library.
         openLibrary()
-        let newest = app.descendants(matching: .any)["library-cell:0"]
+        let newest = app.descendants(matching: .any)["attach-photo:0"]
         XCTAssertTrue(newest.waitForExistence(timeout: 10), "the library sheet never showed a photo")
         pause(1)
         capture("media-library")
         // Newest first.
         newest.tap()
         pause(0.8)
-        app.descendants(matching: .any)["library-add"].tap()
+        app.descendants(matching: .any)["attach-add"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["composer-attachment"].waitForExistence(timeout: 8), "the photo didn't attach")
         pause(2)
         capture("media-picked")
@@ -2372,8 +2518,8 @@ final class UITests: XCTestCase {
         closeSettings()
     }
 
-    /// Settings from the picture: the QR sheet and its Scan, Edit name
-    /// renaming the computer in place, Prioritizing's switch, and "+"
+    /// Settings from the picture: the QR sheet and its Scan, the Profile
+    /// row and the agent's two asks, Prioritizing's switch, and "+"
     /// opening the link sheet. Every row, the push and the sheet's
     /// relay and pairing: SettingsUITests.
     func testSettings() {
@@ -2399,24 +2545,15 @@ final class UITests: XCTestCase {
         closeScanner.tap()
         pause(1)
 
-        // Edit name renames the computer in place; Return keeps it.
-        let name = app.descendants(matching: .any)["settings-name"]
-        XCTAssertTrue(name.waitForExistence(timeout: 3))
-        let from = name.label
-        let to = from == "Studio Mac" ? "Mac Studio" : "Studio Mac"
-        app.descendants(matching: .any)["settings:edit-name"].tap()
-        let field = app.textFields["settings-rename"]
-        XCTAssertTrue(field.waitForExistence(timeout: 3))
-        pause(1)
-        capture("settings-edit")
-        field.typeText(to)
-        pause(0.8)
-        field.typeText("\n")
-        XCTAssertTrue(app.descendants(matching: .any)["settings-name"].waitForExistence(timeout: 2))
-        pause(2)
-        XCTAssertEqual(app.descendants(matching: .any)["settings-name"].label, to, "the name went back")
-        capture("settings-renamed")
-        print("HAPPY_RENAMED \(from) -> \(to)")
+        // No rename in place: the agent is asked to change its own name and
+        // picture, and the person's own profile has a page of its own.
+        XCTAssertTrue(app.descendants(matching: .any)["settings-name"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.descendants(matching: .any)["settings:edit-name"].exists, "Edit name is still there")
+        XCTAssertFalse(app.descendants(matching: .any)["settings:change-agent-name"].exists, "Change agent name is still a row")
+        XCTAssertFalse(app.descendants(matching: .any)["settings:status"].exists, "Status is still there")
+        XCTAssertTrue(app.descendants(matching: .any)["settings-agent-menu"].exists, "no agent picture on the page")
+        XCTAssertTrue(app.descendants(matching: .any)["settings:profile"].exists, "no Profile row")
+        capture("settings-asks")
 
         // Prioritizing's switch, off and on again.
         let prioritizing = app.switches["settings-toggle:prioritizing"]
@@ -2447,11 +2584,6 @@ final class UITests: XCTestCase {
         app.descendants(matching: .any)["glass-close"].tap()
         pause(1)
 
-        // Back to the first name, so the next run starts the same.
-        name.tap()
-        XCTAssertTrue(field.waitForExistence(timeout: 3))
-        field.typeText(from + "\n")
-        pause(2)
         closeSettings()
         XCTAssertTrue(app.descendants(matching: .any)["settings-mark"].waitForExistence(timeout: 3))
         capture("settings-closed")
@@ -2568,17 +2700,6 @@ final class UITests: XCTestCase {
         pause(1.5)
         capture("panel-models-opus")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.15)).tap()
-        pause(1)
-        // iOS's own menu, the + sheet's permission, to set these beside.
-        openSheet()
-        app.descendants(matching: .any)["attach-permission"].tap()
-        XCTAssertTrue(menuRow("Read only").waitForExistence(timeout: 5), "no permission menu")
-        pause(1.5)
-        capture("native-menu")
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.1)).tap()
-        let close = app.buttons["attach-close"]
-        XCTAssertTrue(until(3) { !self.menuRow("Read only").exists && close.isHittable }, "the menu stayed")
-        close.tap()
         pause(1)
     }
 
@@ -2844,18 +2965,18 @@ final class UITests: XCTestCase {
         pause(1)
         capture("paste-new-work")
 
-        // The "+" sheet's Photos opens the shared library sheet; a photo picked there waits in the composer.
+        // The "+" menu shows the library in its grid; a photo picked there waits in the composer.
         openLibrary()
-        let library = app.descendants(matching: .any)["library-picker"]
+        let library = app.descendants(matching: .any)["attach-grid"]
         XCTAssertTrue(library.waitForExistence(timeout: 5), "Photos didn't open the library")
         XCTAssertFalse(app.alerts.firstMatch.exists, "+ asked first")
-        let first = app.descendants(matching: .any)["library-cell:0"]
+        let first = app.descendants(matching: .any)["attach-photo:0"]
         XCTAssertTrue(first.waitForExistence(timeout: 5), "the library shows no photo")
         pause(1)
         first.tap()
         pause(0.5)
         capture("paste-plus-library")
-        app.descendants(matching: .any)["library-add"].tap()
+        app.descendants(matching: .any)["attach-add"].tap()
         let attachments = app.descendants(matching: .any).matching(identifier: "composer-attachment")
         XCTAssertTrue(attachments.firstMatch.waitForExistence(timeout: 8), "the picked photo didn't attach")
         pause(1)
@@ -2943,74 +3064,52 @@ final class UITests: XCTestCase {
         }
     }
 
-    /// The composer's "+" is Claude's "Add to session": the dock's opens it
-    /// over new work with the keyboard down; two photos picked in its strip
-    /// attach in order; Paste from clipboard puts text in at the cursor and
-    /// attaches a picture; Add files takes a picture from Files and says a
-    /// text file can't go; Permission sets the mode the next message runs
-    /// with (checked against the daemon after the run).
+    /// The composer's "+" is Telegram's attachment menu: the dock's opens
+    /// it over new work with the keyboard down, the library's newest first
+    /// under a camera cell; two photos picked attach in order through
+    /// "Add 2"; nothing pastes from it; its Files tab takes a picture from
+    /// Files and says a text file can't go; sent, the agent answers.
     func testAttachSheet() {
         home()
         pause(1)
-        UIPasteboard.general.string = "Pasted from the clipboard."
         app.buttons["Add a picture"].tap()
         allowPhotos()
         let sheet = app.descendants(matching: .any)["attach-sheet"]
         XCTAssertTrue(sheet.waitForExistence(timeout: 5), "the dock's + didn't open the + sheet")
         let first = app.descendants(matching: .any)["attach-photo:0"]
-        XCTAssertTrue(first.waitForExistence(timeout: 5), "no photos in the strip")
+        XCTAssertTrue(first.waitForExistence(timeout: 5), "no photos in the grid")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "the keyboard came up under the sheet")
         let camera = app.descendants(matching: .any)["attach-camera"]
-        XCTAssertTrue(camera.exists, "no camera tile")
-        XCTAssertFalse(camera.isEnabled, "a camera on the simulator")
-        for id in ["attach-paste", "attach-files", "attach-permission"] {
-            XCTAssertTrue(app.descendants(matching: .any)[id].exists, "no \(id) row")
+        XCTAssertTrue(camera.exists, "no camera cell")
+        XCTAssertFalse(app.descendants(matching: .any)["attach-paste"].exists, "the menu still pastes")
+        XCTAssertFalse(app.descendants(matching: .any)["attach-no-access"].exists, "full access still asks")
+        for id in ["attach-tab-gallery", "attach-tab-files"] {
+            XCTAssertTrue(app.descendants(matching: .any)[id].exists, "no \(id) tab")
         }
-        let photos = app.buttons["attach-photos"]
-        XCTAssertEqual(photos.label, "Photos")
         pause(1)
         capture("attach-sheet")
 
-        // Two photos, picked in order: Photos turns into Add 2.
+        // Two photos, picked in order: the tabs turn into Add 2.
         first.tap()
         app.descendants(matching: .any)["attach-photo:1"].tap()
-        pause(0.5)
-        XCTAssertEqual(photos.label, "Add 2")
+        let add = app.buttons["attach-add"]
+        XCTAssertTrue(add.waitForExistence(timeout: 3), "picking didn't offer Add")
+        XCTAssertEqual(add.label, "Add 2")
         XCTAssertEqual(first.label, "Photo, picked 1")
         capture("attach-picked")
-        photos.tap()
+        add.tap()
         let attachments = app.descendants(matching: .any).matching(identifier: "composer-attachment")
         XCTAssertTrue(until(8) { attachments.count == 2 }, "the two photos didn't attach")
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 3), "adding didn't bring the keyboard up")
+        XCTAssertTrue(until(3) { !sheet.exists }, "adding didn't close the menu")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 3), "adding didn't bring the keyboard back")
         let composer = app.textViews["composer"]
         if app.buttons["Continue"].exists { app.buttons["Continue"].tap(); pause(0.5) }
 
-        // Text on the clipboard goes in where the cursor is.
-        openSheet()
-        app.descendants(matching: .any)["attach-paste"].tap()
-        allowPaste()
-        XCTAssertTrue(until(5) { (composer.value as? String)?.contains("Pasted from the clipboard.") == true }, "the copied text didn't go in")
-        pause(1)
-        capture("attach-pasted-text")
-
-        // A copied picture attaches.
-        let size = CGSize(width: 240, height: 160)
-        UIPasteboard.general.image = UIGraphicsImageRenderer(size: size).image { context in
-            UIColor.systemTeal.setFill()
-            context.fill(CGRect(origin: .zero, size: size))
-        }
-        openSheet()
-        app.descendants(matching: .any)["attach-paste"].tap()
-        allowPaste()
-        XCTAssertTrue(until(8) { attachments.count == 3 }, "the copied picture didn't attach")
-        pause(1)
-        capture("attach-pasted-picture")
-
         // Files: a picture goes through.
-        openSheet()
+        openFiles()
         app.descendants(matching: .any)["attach-files"].tap()
         XCTAssertTrue(pickInFiles("attach-swatch"), "Files didn't offer the picture")
-        XCTAssertTrue(until(8) { attachments.count == 4 }, "the picture from Files didn't attach")
+        XCTAssertTrue(until(8) { attachments.count == 3 }, "the picture from Files didn't attach")
         pause(1)
         capture("attach-file-picture")
         // The photos start where the text does, as far down from the box's
@@ -3021,14 +3120,14 @@ final class UITests: XCTestCase {
         XCTAssertEqual(photo.minX, text.minX, accuracy: 0.5, "the photos don't start where the text does")
         XCTAssertEqual(photo.minY - box.minY, text.minX - box.minX, accuracy: 0.5, "the photos' top inset isn't the text's left one")
         let removes = app.descendants(matching: .any).matching(identifier: "composer-attachment-remove")
-        XCTAssertEqual(removes.count, 4)
+        XCTAssertEqual(removes.count, 3)
         for index in 0..<removes.count {
             let remove = removes.element(boundBy: index).frame
             XCTAssertTrue(box.contains(remove), "remove button \(index) at \(remove) is cut by \(box)")
             XCTAssertGreaterThan(remove.minY, box.minY)
         }
         // A text file is said, not sent.
-        openSheet()
+        openFiles()
         app.descendants(matching: .any)["attach-files"].tap()
         XCTAssertTrue(pickInFiles("attach-notes"), "Files didn't offer the text file")
         let refused = app.alerts["attach-notes.txt wasn't attached"]
@@ -3038,30 +3137,16 @@ final class UITests: XCTestCase {
         refused.buttons["Done"].tap()
         XCTAssertTrue(until(3) { !refused.exists })
         pause(0.8)
-        XCTAssertEqual(attachments.count, 4)
+        XCTAssertEqual(attachments.count, 3)
 
-        // Permission: Read only for the next message.
+        // Closed with its circle, the keyboard it put down comes back.
         let typing = app.keyboards.firstMatch.exists
         openSheet()
-        let permission = app.descendants(matching: .any)["attach-permission"]
-        let before = permission.value as? String
-        permission.tap()
-        let readOnly = menuRow("Read only")
-        XCTAssertTrue(readOnly.waitForExistence(timeout: 5), "no permission menu")
-        pause(1)
-        capture("attach-permission-picker")
-        XCTAssertFalse(app.keyboards.firstMatch.exists, "the keyboard came up over the sheet with its menu")
-        readOnly.tap()
-        XCTAssertTrue(until(4) { permission.value as? String == "Read only" }, "the row still says \(before ?? "nothing")")
-        XCTAssertTrue(sheet.exists, "picking the permission closed the sheet")
-        pause(1)
-        capture("attach-permission-read-only")
         app.buttons["attach-close"].tap()
         XCTAssertTrue(until(3) { !sheet.exists }, "the close circle didn't close the sheet")
-        // The keyboard the sheet put down comes back with it gone.
         if typing { XCTAssertTrue(until(3) { app.keyboards.firstMatch.exists }, "the keyboard didn't come back") }
 
-        // Sent: the daemon runs it Read only (checked from outside after the run).
+        // Sent: each picture fills its ring as its bytes go, then the agent answers.
         composer.tap()
         composer.typeText(" Say in five words what these pictures show. No tools.")
         app.buttons["Send"].tap()
@@ -3082,39 +3167,24 @@ final class UITests: XCTestCase {
         pause(0.8)
     }
 
-    /// The "+" sheet's Photos: the whole library.
+    /// The menu's Files tab.
+    private func openFiles() {
+        openSheet()
+        app.descendants(matching: .any)["attach-tab-files"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["attach-files"].waitForExistence(timeout: 3), "no Files tab")
+        pause(0.5)
+    }
+
+    /// The "+" menu's library: its grid, newest first.
     private func openLibrary() {
         app.buttons["Add a picture"].tap()
         allowPhotos()
-        let photos = app.buttons["attach-photos"]
-        XCTAssertTrue(photos.waitForExistence(timeout: 5), "+ didn't open its sheet")
-        photos.tap()
-        allowPhotos()
+        XCTAssertTrue(app.descendants(matching: .any)["attach-sheet"].waitForExistence(timeout: 5), "+ didn't open its sheet")
     }
 
     private func allowPhotos() {
         let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow Full Access"]
         if allow.waitForExistence(timeout: 2) { allow.tap() }
-    }
-
-    /// Reading another app's copy is the system's to allow.
-    private func allowPaste() {
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow Paste"]
-        let here = app.buttons["Allow Paste"]
-        let deadline = Date().addingTimeInterval(6)
-        var seen = false
-        while Date() < deadline {
-            let shown = springboard.exists ? springboard : here.exists ? here : nil
-            if let shown {
-                seen = true
-                // Taken only once it has finished coming up.
-                pause(0.6)
-                if shown.exists, shown.isHittable { shown.tap() }
-            } else if seen {
-                return
-            }
-            pause(0.3)
-        }
     }
 
     /// `name` in Files' picker, found in On My iPhone if it isn't already

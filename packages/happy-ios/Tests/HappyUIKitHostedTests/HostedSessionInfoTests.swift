@@ -20,7 +20,7 @@ private struct NoSockets: WebSocketConnector {
     }
 }
 
-/// Session info as the chat's avatar opens it, over a store holding the
+/// Session info as the chat's title opens it, over a store holding the
 /// session, in a window of a real scene: its groups must be on screen, and
 /// a long session's (an agent state of hundreds of requests, megabytes of
 /// raw JSON in Debug) must open without holding the main thread.
@@ -132,8 +132,8 @@ final class HostedSessionInfoTests: XCTestCase {
         return groups
     }
 
-    func testTheAvatarOpensSessionInfoWithItsGroupsOnScreen() async throws {
-        let (controller, _) = try await signedIn(agentState: .object(["controlledByUser": .bool(false)]))
+    func testTheTitleOpensSessionInfoWithItsGroupsOnScreen() async throws {
+        let (controller, account) = try await signedIn(agentState: .object(["controlledByUser": .bool(false)]))
         let context = AppContext(account: controller, variant: .development, version: "test")
         let (window, navigation, root) = try await hosted()
         root.push(.session(id: Self.sessionId), context: context)
@@ -141,13 +141,21 @@ final class HostedSessionInfoTests: XCTestCase {
         let pushed = try await until { navigation.topViewController is LegacyChatViewController }
         XCTAssertTrue(pushed, "the chat was never pushed")
         let chat = try XCTUnwrap(navigation.topViewController as? LegacyChatViewController)
-        var avatar: ChatHeaderAvatarControl? {
-            chat.navigationItem.rightBarButtonItems?.compactMap { $0.customView as? ChatHeaderAvatarControl }.first
+        // The title capsule opens it: in the bar from the push, opening
+        // once the chat's record is in.
+        let title = try XCTUnwrap(chat.navigationItem.titleView as? ChatHeaderView)
+        let shown = try await until { chat.transitionCoordinator == nil && chat.contentInstalled && title.window != nil }
+        XCTAssertTrue(shown, "the title never showed")
+        // Back, the name, and Compose: no More, no debug fixtures.
+        XCTAssertEqual(chat.navigationItem.rightBarButtonItems?.map(\.accessibilityIdentifier), ["compose"])
+        XCTAssertNil(chat.navigationItem.leftBarButtonItems)
+        for (style, name) in [(UIUserInterfaceStyle.light, "light"), (.dark, "dark")] {
+            window.overrideUserInterfaceStyle = style
+            try await Task.sleep(for: .seconds(1))
+            keep(window, "hosted-legacy-chat-header-\(name)")
         }
-        // In the bar once the chat is loaded, shown once its record is in.
-        let shown = try await until { chat.transitionCoordinator == nil && avatar.map { !$0.isHidden && $0.window != nil } == true }
-        XCTAssertTrue(shown, "the avatar never showed")
-        try XCTUnwrap(avatar).sendActions(for: .touchUpInside)
+        window.overrideUserInterfaceStyle = .unspecified
+        title.onOpen?()
         let info = try XCTUnwrap(navigation.topViewController as? SessionInfoViewController)
         let opened = try await until { !self.shownGroups(info, in: window).isEmpty }
         XCTAssertTrue(opened, "session info showed no groups")
@@ -169,7 +177,158 @@ final class HostedSessionInfoTests: XCTestCase {
         XCTAssertTrue(screen.contains(firstFrame.origin), "\(firstFrame)")
         XCTAssertGreaterThanOrEqual(firstFrame.minY, navigation.navigationBar.frame.maxY - 1)
         XCTAssertEqual(info.title, "Session info screen")
+
+        // The chat's permission mode, once in its header's More menu, is a
+        // row here: the current mode as its value, a native menu of all of
+        // them, and a pick kept as the composer keeps one.
+        func permissionRow() -> MenuRowButton? {
+            subviews(MenuRowButton.self, in: info.view).first { $0.accessibilityIdentifier == "profile-permission-mode" }
+        }
+        let rowShown = try await until { permissionRow() != nil }
+        XCTAssertTrue(rowShown, "no permission mode on the session's info")
+        let row = try XCTUnwrap(permissionRow())
+        XCTAssertTrue(row.showsMenuAsPrimaryAction)
+        XCTAssertGreaterThan(row.bounds.height, 40)
+        XCTAssertGreaterThan(row.bounds.width, 300)
+        for (style, name) in [(UIUserInterfaceStyle.light, "light"), (.dark, "dark")] {
+            window.overrideUserInterfaceStyle = style
+            try await Task.sleep(for: .seconds(1))
+            keep(window, "legacy-info-permission-\(name)")
+        }
+        window.overrideUserInterfaceStyle = .unspecified
+        let menu = try XCTUnwrap(row.menuFor?())
+        XCTAssertEqual(menu.identifier.rawValue, "chat-permissions")
+        let actions = menu.children.compactMap { $0 as? UIAction }
+        // Every mode the chat's composer offers, none dropped.
+        let offered = try XCTUnwrap(chat.permissionChoice).menu.sections.flatMap(\.options).map(\.key)
+        XCTAssertEqual(actions.compactMap(\.accessibilityIdentifier), offered)
+        XCTAssertTrue(offered.contains("plan"))
+        let plan = try XCTUnwrap(actions.first { $0.accessibilityIdentifier == "plan" })
+        XCTAssertEqual(plan.state, .off)
+        let button = UIButton(type: .system)
+        button.addAction(plan, for: .touchUpInside)
+        button.sendActions(for: .touchUpInside)
+        let store = account.store
+        let sessionId = Self.sessionId
+        var stored: String?
+        for _ in 0..<300 where stored != "plan" {
+            stored = try await Task.detached { try store.composerState(sessionId: sessionId).values["permissionMode"]?.stringValue }.value
+            if stored != "plan" { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        XCTAssertEqual(stored, "plan", "the pick isn't kept as the composer's")
+        let ticked = try XCTUnwrap(row.menuFor?()).children.compactMap { $0 as? UIAction }.filter { $0.state == .on }.compactMap(\.accessibilityIdentifier)
+        XCTAssertEqual(ticked, ["plan"])
+        XCTAssertEqual(row.accessibilityValue, plan.title, "the row shows the pick")
         await controller.signOut()
+    }
+
+    /// The legacy chat's header is the agent chat's: its name and its
+    /// session's status on one glass capsule, in the bar from the push's
+    /// first layout, nothing measured first; the status is nowhere else.
+    func testTheLegacyChatHasItsCapsuleFromThePushesFirstLayout() async throws {
+        let (controller, account) = try await signedIn(agentState: .object(["controlledByUser": .bool(false)]))
+        let context = AppContext(account: controller, variant: .development, version: "test")
+        for (style, name) in [(UIUserInterfaceStyle.light, "light"), (.dark, "dark")] {
+            let (window, navigation, _) = try await hosted()
+            window.overrideUserInterfaceStyle = style
+            let chat = LegacyChatViewController(context: context, session: account, sessionId: Self.sessionId)
+            navigation.pushViewController(chat, animated: true)
+            window.layoutIfNeeded()
+            // The first layout pass of the push.
+            let header = try XCTUnwrap(chat.navigationItem.titleView as? ChatHeaderView, "a plain title at the push's start")
+            XCTAssertNotNil(header.window, "the capsule isn't in the bar as the push starts")
+            XCTAssertTrue(header.capsule.effect is UIGlassEffect)
+            XCTAssertGreaterThan(header.capsule.bounds.width, 100)
+            XCTAssertEqual(header.titleView.text, "Session info screen")
+            let status = try XCTUnwrap(Self.allViews(UILabel.self, in: header.capsule.contentView).first { $0.accessibilityIdentifier == "chat-status" })
+            XCTAssertEqual(status.text, Strings.Composer.online, "the status isn't the capsule's subtitle")
+            // Dynamic colours are never equal as objects: compare them resolved.
+            let traits = header.traitCollection
+            XCTAssertEqual(header.statusColor.resolvedColor(with: traits), UIColor(Palette.sessionStatusOnline).resolvedColor(with: traits))
+            // Mid-push: the capsule is already there.
+            try await Task.sleep(for: .milliseconds(150))
+            keep(window, "legacy-chat-mid-push-\(name)", afterUpdates: false)
+            let settled = try await until { chat.transitionCoordinator == nil && chat.contentInstalled }
+            XCTAssertTrue(settled)
+            XCTAssertTrue(chat.navigationItem.titleView === header, "the capsule was swapped once the chat was built")
+            try await Task.sleep(for: .milliseconds(600))
+            XCTAssertEqual(status.text, Strings.Composer.online)
+            // Not over the composer as well: the status is the header's.
+            let elsewhere = Self.allViews(UILabel.self, in: chat.view).filter {
+                !$0.isHidden && $0.alpha > 0 && $0.window != nil && $0.text == Strings.Composer.online
+            }
+            XCTAssertEqual(elsewhere, [], "the status still shows outside the capsule")
+            keep(window, "legacy-chat-header-\(name)")
+            window.isHidden = true
+        }
+        await controller.signOut()
+    }
+
+    /// Every legacy screen goes back with the chevron alone in its glass
+    /// circle: never "Back" nor the screen behind's title.
+    func testEveryLegacyScreenGoesBackWithTheChevronAlone() async throws {
+        let (controller, account) = try await signedIn(agentState: .object(["controlledByUser": .bool(false)]))
+        let context = AppContext(account: controller, variant: .development, version: "test")
+        let scene = try await hostedActiveScene()
+        let hostWindow = scene.keyWindow
+        let home = LegacyHomeViewController(context: context, session: account)
+        let navigation = UINavigationController(rootViewController: home)
+        AppCoordinator.applyAppearance(to: navigation.navigationBar)
+        let shell = TabletShellViewController(context: context, detail: navigation)
+        let window = hostedKeyWindow(in: scene, root: shell)
+        defer { window.isHidden = true; hostWindow?.makeKey() }
+        window.layoutIfNeeded()
+        let routes: [Route] = [
+            .session(id: Self.sessionId), .sessionInfo(id: Self.sessionId), .sessionChanges(id: Self.sessionId),
+            .machine(id: "test-mac"), .settings, .settingsAppearance, .settingsLanguage, .settingsVoice,
+        ]
+        for route in routes {
+            let top = try XCTUnwrap(navigation.topViewController)
+            let count = navigation.viewControllers.count
+            top.push(route, context: context, animated: false)
+            let pushed = try await until(seconds: 10) { navigation.viewControllers.count == count + 1 && navigation.transitionCoordinator == nil }
+            XCTAssertTrue(pushed, "\(route) was never pushed")
+            try await Task.sleep(for: .milliseconds(300))
+            navigation.navigationBar.layoutIfNeeded()
+            for below in navigation.viewControllers.dropLast() {
+                XCTAssertEqual(below.navigationItem.backButtonDisplayMode, .minimal, "\(type(of: below)) under \(route)")
+                XCTAssertNil(below.navigationItem.backButtonTitle, "\(type(of: below)) under \(route)")
+            }
+            // Words by the chevron, at the bar's leading edge: the top's own
+            // centred title may well be the screen behind's.
+            let behind = navigation.viewControllers.dropLast().last
+            let words = Self.allViews(UILabel.self, in: navigation.navigationBar).filter {
+                !$0.isHidden && $0.alpha > 0 && [Strings.Common.back, behind?.navigationItem.title, behind?.title].contains($0.text)
+                    && $0.text?.isEmpty == false && $0.convert($0.bounds, to: navigation.navigationBar).minX < 100
+            }
+            XCTAssertEqual(words.compactMap(\.text), [], "words by the chevron on \(route)")
+            if case .sessionInfo = route {
+                for (style, name) in [(UIUserInterfaceStyle.light, "light"), (.dark, "dark")] {
+                    window.overrideUserInterfaceStyle = style
+                    try await Task.sleep(for: .seconds(1))
+                    keep(window, "legacy-info-back-\(name)")
+                }
+                window.overrideUserInterfaceStyle = .unspecified
+            }
+        }
+        await controller.signOut()
+    }
+
+    private static func allViews<T: UIView>(_ type: T.Type, in view: UIView) -> [T] {
+        view.subviews.flatMap { child in ((child as? T).map { [$0] } ?? []) + allViews(type, in: child) }
+    }
+
+    private func keep(_ window: UIWindow, _ name: String, afterUpdates: Bool = true) {
+        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+            _ = window.drawHierarchy(in: window.bounds, afterScreenUpdates: afterUpdates)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        if let directory = ProcessInfo.processInfo.environment["HAPPY_PREVIEW_DIR"] {
+            try? image.pngData()?.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(name).png"))
+        }
     }
 
     /// Sync may keep changing visible metadata while the first groups are

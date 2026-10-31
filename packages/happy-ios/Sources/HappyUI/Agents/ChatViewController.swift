@@ -2,7 +2,6 @@
 import AVKit
 import HappyCore
 import HappyLayout
-import Photos
 import QuickLook
 import UIKit
 import UniformTypeIdentifiers
@@ -42,10 +41,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
     private var keyboardOwed = false
     /// The keyboard new work opens with, not yet asked for.
     private var focusPending = false
-    /// New work on its way to the screen from this one's compose.
-    private var composing: UUID?
+    /// The ask a screen opened this conversation with (Settings' rename
+    /// and avatar), put in the composer unsent once the draft it already
+    /// had has arrived.
+    private let prefill: ChatPrefill?
+    /// The ask has been put in: it goes in once, however many drafts
+    /// arrive afterwards.
+    private var prefilled = false
+    /// A new task on its way to the screen from this one's compose.
+    private var composing = false
     private let previewing: Bool
-    private let previewPill = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+    private let previewPill = GlassCapsuleView()
     /// The card's ground over the messages above the list, fading out under the capsule.
     private let previewFade = PreviewFadeView()
     private let previewTitle = UILabel()
@@ -56,6 +62,13 @@ final class ChatViewController: UIViewController, ComposeHosting {
     private var acceptingSend = false
 
     private let scrollView = UIScrollView()
+    /// The transcript on UltraList, where the renderer says so
+    /// (`LocalSettings.chatListRenderer`): the same rows, the same plans,
+    /// kept near the screen by the library instead of by hand. A preview
+    /// keeps the scroll view it fills itself, whose offset its fade and
+    /// its title measure.
+    private let ultra: AgentChatUltraList?
+    private lazy var transcriptHeaderScrim = HeaderScrimView()
     private let introView = IntroView()
     /// The rows near the screen, the only ones that are views
     /// (`ChatMountedRows`), by plan id.
@@ -129,10 +142,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
     }
     private var watch: Watch?
     private var modelsWatch: Watch?
+    private var headerWatch: Watch?
+    private var headerState: Strings.HeaderStatus.State = .connecting
     private var copied: (id: String, until: Task<Void, Never>)?
     /// The newest row is in view: what arrives keeps it there.
     private var followsNewest = true {
-        didSet { if followsNewest != oldValue { tellReadsNewest(moving: scrollView.isTracking || gliding) } }
+        didSet {
+            if followsNewest != oldValue {
+                let moving = ultra.map { $0.list.isTracking || $0.list.isDecelerating } ?? (scrollView.isTracking || gliding)
+                tellReadsNewest(moving: moving)
+            }
+        }
     }
     /// What the conversation was last told by `tellReadsNewest`.
     private var toldReadsNewest: Bool?
@@ -151,39 +171,34 @@ final class ChatViewController: UIViewController, ComposeHosting {
     private var showingDraft = false
     /// The last keystroke's stamp, never going back.
     private var lastDraftEdit: Double = 0
-    /// A message sent while the agent was idle, not yet drawn: as it lands
-    /// it is lifted to desktop's line (`SendLift`).
-    private var liftPending: String?
-    /// The lifted send and its line, while the reply hasn't filled the room
-    /// under it; `viewport` as it was lifted in, and whether it has been
-    /// another height since (`SendLift.releases`).
-    private var lift: (id: String, line: CGFloat, viewport: CGFloat, resized: Bool)?
     /// A content height laid out while a finger, or a bounce, holds the
     /// transcript's scroll (`ChatScrollHold`).
     private var scrollHold = ChatScrollHold()
     #if DEBUG
     private var probe: ScrollProbe?
     #endif
-    /// Where the transcript's rows end, as last laid out; nil while they
-    /// stand off the top (a short one resting on its composer), where
-    /// dropping a lift would move them.
-    private var rowsEnd: CGFloat?
     /// The computer was reachable when last heard: pictures that failed
     /// while it wasn't are asked for again when it is back.
     private var live = true
     private var preview: FilePreview?
-    /// The title in the navigation bar: the name, and the agent's status.
+    /// The title in the navigation bar: the name, and the agent's status,
+    /// on a glass capsule between the bar's own glass buttons.
     private let header = ChatHeaderView()
     private var titleView: ChatTitleView { header.titleView }
 
-    init(session: Session, agentId: String, title: String, spaceId: String?, seedling intro: Intro?, creation: Creation? = nil, previewing: Bool = false) {
+    init(session: Session, agentId: String, title: String, spaceId: String?, seedling intro: Intro?, newTask: NewTask? = nil, prefill: ChatPrefill? = nil, previewing: Bool = false) {
         self.session = session
         self.spaceId = spaceId
         self.intro = intro
         self.previewing = previewing
-        opensFocused = creation != nil
-        focusPending = creation != nil
-        if creation == nil {
+        self.prefill = previewing ? nil : prefill
+        ultra = previewing || session.localSettings.chatListRenderer == .collectionView ? nil : AgentChatUltraList()
+        self.newTask = newTask
+        opensFocused = newTask != nil
+        // An ask typed in for the person brings the keyboard up too, so
+        // they only have to finish the sentence.
+        focusPending = newTask != nil || (prefill != nil && !previewing)
+        if newTask == nil {
             let held = session.warm.hold(agentId)
             warm = held
             conversation = held.chat.conversation
@@ -192,7 +207,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
             planner = previewing ? ChatPlanner(syntax: session.syntax) : held.chat.planner
         } else {
             warm = nil
-            conversation = Conversation(client: session.client, store: session.store, agentId: agentId, creation: creation?.created, mode: session.models.newWorkMode, persistence: session.engine)
+            conversation = Conversation(client: session.client, store: session.store, agentId: agentId, newTask: newTask, mode: session.models.newWorkMode, persistence: session.engine)
             planner = ChatPlanner(syntax: session.syntax)
         }
         tappedAt = previewing ? nil : session.warm.takeTap(agentId)
@@ -206,13 +221,21 @@ final class ChatViewController: UIViewController, ComposeHosting {
         header.resize()
         navigationItem.titleView = header
         navigationItem.largeTitleDisplayMode = .never
-        // New work's media is under the ID the daemon gives it.
-        if let created = creation?.created {
+        // A new task's media is under the ID the computer gives it, once
+        // its first message has made it; from then on its row on home
+        // names this screen, as the task names itself.
+        if let newTask {
             creating = true
-            Task { [weak self] in
-                guard let id = try? await created.value else { return }
+            made = Task { [weak self, engine = session.engine] in
+                guard let id = try? await newTask.made() else { return }
                 self?.media.agentId = id
                 self?.creating = false
+                for await home in await engine.snapshots() {
+                    guard let self, !Task.isCancelled else { return }
+                    guard let row = home.allRows.first(where: { $0.agentId == id && $0.depth == 0 }) else { continue }
+                    rowName = (row.label, true)
+                    applyTitle()
+                }
             }
         }
     }
@@ -222,21 +245,39 @@ final class ChatViewController: UIViewController, ComposeHosting {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(Palette.surface)
-        scrollView.alwaysBounceVertical = true
-        scrollView.keyboardDismissMode = .interactive
-        scrollView.contentInsetAdjustmentBehavior = .never
-        // The indicator insets set below are all of them; UIKit would add the safe area again.
-        scrollView.automaticallyAdjustsScrollIndicatorInsets = false
-        scrollView.delegate = self
-        view.addSubview(scrollView)
-        scrollView.addSubview(introView)
         working.isHidden = true
-        scrollView.addSubview(working)
         introView.accessibilityIdentifier = "intro"
-        HeaderBar.edge(scrollView, in: self)
-        if let host = self as UIViewController as? ComposeHosting {
-            navigationItem.rightBarButtonItems = HeaderBar.trailing([.compose: HeaderBar.composeItem { [weak host] in host?.compose() }])
+        if let ultra {
+            ultra.host = self
+            ultra.onReachedOldest = { [weak self] in self?.loadOlder() }
+            view.addSubview(ultra)
+        } else {
+            scrollView.alwaysBounceVertical = true
+            scrollView.keyboardDismissMode = .interactive
+            scrollView.contentInsetAdjustmentBehavior = .never
+            // The indicator insets set below are all of them; UIKit would add the safe area again.
+            scrollView.automaticallyAdjustsScrollIndicatorInsets = false
+            scrollView.delegate = self
+            view.addSubview(scrollView)
+            scrollView.addSubview(introView)
+            scrollView.addSubview(working)
+            HeaderBar.edge(scrollView, in: self)
+            // The screen's own scrim is the edge, as over UltraList.
+            scrollView.topEdgeEffect.isHidden = true
         }
+        if !previewing {
+            // The ground behind the bar and a short feather under it: the
+            // name's capsule never has words to read through it.
+            transcriptHeaderScrim.ramp = ChatScreenLayout.Metrics.headerRamp
+            transcriptHeaderScrim.peak = ChatScreenLayout.Metrics.headerPeak
+            transcriptHeaderScrim.presence = 0
+            view.addSubview(transcriptHeaderScrim)
+        }
+        // Back, the title, and Compose alone, a glass circle as Back is:
+        // the permission mode is on the detail the title opens.
+        navigationItem.rightBarButtonItems = HeaderBar.trailing([
+            .compose: HeaderBar.composeItem { [weak self] in self?.compose() },
+        ])
         // New work asks what it is; a conversation already going asks for the next message.
         if case .seedling = intro { card.configuration.placeholder = Strings.composerPlaceholder }
         card.configuration.showsAdd = true
@@ -279,8 +320,9 @@ final class ChatViewController: UIViewController, ComposeHosting {
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
         tap.cancelsTouchesInView = false
-        scrollView.addGestureRecognizer(tap)
-        scrollView.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(held(_:))))
+        let scroller: UIView = ultra ?? scrollView
+        scroller.addGestureRecognizer(tap)
+        scroller.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(held(_:))))
 
         if previewing { setUpPreview() }
         #if DEBUG
@@ -289,6 +331,11 @@ final class ChatViewController: UIViewController, ComposeHosting {
         applyIntro()
         proposals.onChange = { [weak self] in self?.replan() }
         watch = session.watch { [weak self] snapshot in self?.follow(snapshot) }
+        headerWatch = session.watchHeader { [weak self] state in
+            guard let self else { return }
+            headerState = state
+            updateHeaderStatus()
+        }
         if let warm {
             // Read ahead: what it has shows on the first frame.
             session.warm.watch(warm.chat, token: warm.token) { [weak self] snapshot in self?.apply(snapshot) }
@@ -323,6 +370,8 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // went unheard: down, unless it is still this composer's.
         fingerOnKeyboard = false
         if !card.textView.isFirstResponder { keyboardTop = .greatestFiniteMagnitude }
+        // Back from a screen over this one, or a swipe back let go of.
+        updateBar(animated: animated)
         let conversation = conversation
         Task { await conversation.setVisible(true) }
         toldReadsNewest = nil
@@ -339,15 +388,13 @@ final class ChatViewController: UIViewController, ComposeHosting {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        #if DEBUG
+        probe?.observePop()
+        #endif
         // Leaving keeps a name being typed, as a tap away does.
         titleView.finishEditing()
         picker?.close(animated: false)
-        // Left holding something, new work isn't offered again as empty.
-        if isMovingFromParent, !previewing, let spaceId {
-            let holding = !composerIsEmpty
-            let store = session.store
-            Task { await store.leftHolding(spaceId, holding) }
-        }
+        giveBarBack(animated: animated)
         if !previewing {
             let conversation = conversation
             Task { await conversation.flushDraft() }
@@ -360,13 +407,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
         Task { await conversation.setVisible(false) }
         if isMovingFromParent || navigationController == nil {
             following?.cancel()
+            made?.cancel()
             #if DEBUG
             probe?.link.invalidate()
             #endif
             planning?.cancel()
             watch?.invalidate()
             modelsWatch?.invalidate()
+            headerWatch?.invalidate()
             proposals.stop()
+            // The list lets go of its rows, and of this screen with them.
+            ultra?.deactivate()
             // Read ahead, it stays read for a quick way back.
             if let warm {
                 session.warm.release(warm.chat, token: warm.token, opened: !previewing)
@@ -385,10 +436,26 @@ final class ChatViewController: UIViewController, ComposeHosting {
         let agentId = media.agentId
         card.blur()
         let detail = SessionDetailViewController(session: session, agentId: agentId, title: title ?? "", spaceId: spaceId)
+        detail.permissionChoice = { [weak self] in self?.permissionChoice }
         navigationController?.pushViewController(detail, animated: true)
     }
 
     // MARK: Keyboard
+
+    /// Both transcript renderers follow the layout guide while the finger
+    /// can move the keyboard, until its next frame notification takes over.
+    private func beginKeyboardDrag() {
+        fingerOnKeyboard = true
+        jumping = false
+        tellReadsNewest(moving: true)
+    }
+
+    private func endKeyboardDrag() {
+        // A drag that never moved the keyboard receives no frame notification.
+        if !card.textView.isFirstResponder || abs(keyboardTracker.frame.minY - min(keyboardTop, view.bounds.maxY)) < 1 {
+            fingerOnKeyboard = false
+        }
+    }
 
     /// The composer goes with the keyboard: to the same place, in the same
     /// time, on the same curve.
@@ -401,10 +468,69 @@ final class ChatViewController: UIViewController, ComposeHosting {
         let top = local.minY >= view.bounds.maxY || local.isEmpty ? CGFloat.greatestFiniteMagnitude : local.minY
         keyboardTop = top
         fingerOnKeyboard = false
-        guard duration > 0 else { return view.setNeedsLayout() }
+        guard duration > 0 else {
+            updateBar(animated: false)
+            return view.setNeedsLayout()
+        }
         UIView.animate(withDuration: duration, delay: 0, options: [UIView.AnimationOptions(rawValue: curve << 16), .beginFromCurrentState, .allowUserInteraction]) {
+            // The bar goes or comes back in the keyboard's time, so the
+            // transcript moves once.
+            self.updateBar(animated: false)
             self.view.setNeedsLayout()
             self.view.layoutIfNeeded()
+        }
+    }
+
+    // MARK: The bar sideways
+
+    /// The safe area's top as it is with the bar showing, kept while this
+    /// screen hides it: what the card's shape is decided against, so
+    /// hiding the bar can't change the shape that hid it.
+    private var barSafeTop: CGFloat?
+
+    /// The card's shape for where the keyboard rests (never the finger
+    /// dragging it), from the full card with one line.
+    private var compacts: Bool {
+        var safeArea = LayoutInsets(view.safeAreaInsets)
+        if let barSafeTop { safeArea.top = barSafeTop }
+        return ChatScreenLayout.compacts(size: view.bounds.size, safeArea: safeArea, keyboardTop: keyboardTop) { [card] width in
+            card.restingHeight(fitting: width)
+        }
+    }
+
+    /// Steve's OK, in the conversation of 2026-10-30 (AGENTS.md rule 9):
+    /// a phone held sideways with the keyboard up and the card compact
+    /// hides the navigation bar, which gives the transcript its room back.
+    /// It comes back as the keyboard goes down, the phone turns upright,
+    /// or another screen comes over this one or back from it. The bar is
+    /// the standard one, only hidden; the swipe back stays
+    /// (`PopGestureDelegate`), and the status bar is the system's.
+    private func updateBar(animated: Bool) {
+        guard !previewing, let navigationController, navigationController.topViewController === self else { return }
+        let hides = ChatScreenLayout.hidesBar(
+            compact: compacts,
+            sideways: traitCollection.verticalSizeClass == .compact && traitCollection.userInterfaceIdiom == .phone,
+            keyboardUp: keyboardTop < view.bounds.maxY
+        )
+        guard hides != navigationController.isNavigationBarHidden else { return }
+        if hides { barSafeTop = view.safeAreaInsets.top }
+        navigationController.setNavigationBarHidden(hides, animated: animated)
+        if !hides { barSafeTop = nil }
+    }
+
+    /// The screen under (or over) this one keeps its bar.
+    private func giveBarBack(animated: Bool) {
+        guard barSafeTop != nil else { return }
+        barSafeTop = nil
+        guard let navigationController, navigationController.isNavigationBarHidden else { return }
+        navigationController.setNavigationBarHidden(false, animated: animated)
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        // Turning upright with the keyboard up: the bar is back with the turn.
+        coordinator.animate(alongsideTransition: { [weak self] _ in self?.updateBar(animated: false) }) { [weak self] _ in
+            self?.updateBar(animated: false)
         }
     }
 
@@ -421,28 +547,26 @@ final class ChatViewController: UIViewController, ComposeHosting {
     /// Nothing typed or picked.
     var composerIsEmpty: Bool { card.text.isEmpty && pictures.images.isEmpty }
 
-    /// The bar's compose: new work in this conversation's place, so Back
-    /// still leads home and the stack grows no deeper. New work standing
-    /// empty is opened instead, as from home; when that is this one, it
-    /// only takes the keyboard. What is typed here stays in its draft.
+    /// The bar's compose: a new task in this conversation's place, so Back
+    /// still leads home and the stack grows no deeper. Nothing is made
+    /// until its first message; when the task compose opens is this one,
+    /// it only takes the keyboard. What is typed here stays in its draft.
     func compose() {
-        guard !previewing, composing == nil, let navigationController, navigationController.topViewController === self else { return }
+        guard !previewing, !composing, let navigationController, navigationController.topViewController === self else { return }
+        composing = true
         let store = session.store
         let session = session
         Task { @MainActor in
-            let going = await store.goToNewWork(under: nil)
-            guard composing == nil else { return }
-            composing = going.id
-            defer { composing = nil }
-            Haptics.play(.newWork)
-            let creation = await going.work.value
+            defer { composing = false }
+            let task = await store.newTask()
             guard self.navigationController?.topViewController === self else { return }
-            if creation.spaceId == spaceId {
+            Haptics.play(.newWork)
+            if task === newTask {
                 card.focus()
                 return
             }
             card.blur()
-            ComposeNavigation.replace(self, with: NewWork.chat(session, creation: creation))
+            ComposeNavigation.replace(self, with: NewWork.chat(session, task: task))
         }
     }
 
@@ -511,8 +635,13 @@ final class ChatViewController: UIViewController, ComposeHosting {
         introView.isHidden = intro == nil || reading(chat) || (!chat.items.isEmpty && !planShown)
     }
 
-    /// New work the daemon hasn't made yet: it has no detail to open.
+    /// A task its first message makes, which hasn't been sent yet: it has
+    /// no detail to open.
     private var creating = false
+    /// The task this conversation's first message makes, when it is one.
+    private let newTask: NewTask?
+    /// Waits for it to be made, then names this screen after its row.
+    private var made: Task<Void, Never>?
 
     /// A plan has been shown, if only an empty one.
     private var planShown = false
@@ -536,8 +665,9 @@ final class ChatViewController: UIViewController, ComposeHosting {
             // Typed here since, on its way to the conversation: that stands.
             if snapshot.draftUpdatedAt >= lastDraftEdit { showDraft(snapshot.draft) }
         }
+        if snapshot.localDraftLoaded { showPrefill() }
         proposals.want(snapshot.items.flatMap(\.proposalIds))
-        header.status = Self.status(snapshot.activity)
+        updateHeaderStatus()
         if wasSettled != settled(snapshot), let intro { introView.configure(intro, settled: settled(snapshot)) }
         showIntro()
         updatePrimary()
@@ -555,10 +685,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
     }
     /// A pick made here, until the conversation's own mode says it back.
     private var picked: AgentWire.Mode?
-    /// The "+" sheet while it is up: its permission menu follows the mode.
+    /// The "+" menu while it is up.
     private weak var attachSheet: AttachSheetViewController?
     /// The model or effort list while it is open.
     private var picker: PickerPresenter?
+    /// The permission modes for the detail over this screen, a pick going
+    /// the way the header's More menu sent it (`choose`); nil until the
+    /// catalog is in.
+    var permissionChoice: PermissionModeChoice? {
+        guard let menus else { return nil }
+        return PermissionModeChoice(menu: ModelPickers.permissionMenu(menus)) { [weak self] key in self?.choose(key) }
+    }
 
     private var menus: ModelMenus? {
         session.models.catalog.flatMap { catalog in mode.map { ModelMenus(catalog: catalog, selection: $0) } }
@@ -572,47 +709,45 @@ final class ChatViewController: UIViewController, ComposeHosting {
             ModelPickers.configure(card, menus: menus)
             picker?.update(menus: menus, usage: session.models.usage)
         }
-        if let attachSheet {
-            attachSheet.permission = permissionName
-            attachSheet.permissionMenu = permissionMenu
-        }
     }
 
-    /// The "+" sheet's permission menu; nil until the models are read.
-    private var permissionMenu: UIMenu? {
-        menus.map { menus in
-            UIMenu(ModelPickers.permissionMenu(menus)) { [weak self] key in self?.choose(key) }
-        }
-    }
-
-    /// The "+" sheet over `host`: new work for a picture opens it over this screen as
-    /// the screen comes in. What it adds waits in the composer, which then
-    /// takes the keyboard.
+    /// The "+" menu over `host`: new work for a picture opens it over this
+    /// screen as the screen comes in. As Telegram's attachment menu, it
+    /// takes the keyboard down while it is up; the draft and what already
+    /// waits in the composer stay. What it adds waits in the composer,
+    /// which then takes the keyboard, as does closing it with nothing.
     func presentAttach(from host: UIViewController) {
-        let sheet = AttachSheetViewController(limit: ComposerAttachmentRules.remaining(selected: pictures.images.count), permission: permissionName)
-        sheet.permissionMenu = permissionMenu
+        guard attachSheet == nil else { return }
+        let sheet = AttachSheetViewController(limit: ComposerAttachmentRules.remaining(selected: pictures.images.count))
         if session.models.catalog == nil { session.models.load() }
+        let library = sheet.library
         sheet.onAction = { [weak self] action in
             guard let self else { return }
             switch action {
-            case .photos: presentLibrary()
+            case .photos: presentSystemPhotos()
             case .camera: presentCamera()
-            case .add(let ids): add(assets: ids)
-            case .paste: pasteFromClipboard()
+            case .add(let ids): add(ids, from: library)
             case .files: presentFiles()
-            // Its menu waits for the models, read as the sheet opened.
-            case .permission: session.models.load()
             }
         }
-        // The keyboard goes while the sheet is up: a menu over the sheet
-        // gives the keys back to the composer as it opens, which would put
-        // the keyboard over the sheet. It comes back once the sheet is
-        // closed, or once what was chosen there is done.
-        keyboardOwed = card.textView.isFirstResponder
-        card.blur()
         sheet.onGone = { [weak self] in self?.settleFocus(added: false) }
+        sheet.source = { [weak self, weak sheet] in
+            guard let self, let sheet, sheet.isViewLoaded else { return nil }
+            return card.addControl.convert(card.addControl.bounds, to: sheet.view)
+        }
+        keyboardOwed = keyboardOwed || card.textView.isFirstResponder
         attachSheet = sheet
-        host.present(sheet, animated: true)
+        let show = { [weak host, weak self] in
+            guard let host, let self, attachSheet === sheet else { return }
+            card.textView.resignFirstResponder()
+            host.present(sheet, animated: false)
+        }
+        // New work opens it as its screen comes in: once that screen is in.
+        if let transition = host.transitionCoordinator {
+            transition.animate(alongsideTransition: nil) { _ in show() }
+        } else {
+            show()
+        }
     }
 
     /// The mode the next message runs with, by its name.
@@ -620,45 +755,36 @@ final class ChatViewController: UIViewController, ComposeHosting {
         Strings.permissionName(mode?.permissionMode ?? session.models.catalog?.defaultPermissionMode ?? "auto")
     }
 
-    /// Photos and videos from the whole library, uploaded through the
-    /// direct connection: in the library sheet when the person has let the
-    /// app read their library, else in the system's picker, which asks
-    /// nothing.
-    private func presentLibrary() {
+    /// Photos and videos in the system's picker, which runs outside the app
+    /// and needs no access: the way in when the library is refused, and
+    /// the Files tab's "Select Photos or Videos".
+    private func presentSystemPhotos() {
         let room = pictures.room()
         guard room > 0 else { return settleFocus(added: false) }
         let options = LibraryPicker.Options(limit: room)
-        let onPick: ([LibraryPick]) -> Void = { [weak self] picks in
+        LibrarySystemPicker.present(from: self, options: options) { [weak self] picks in
             guard let self else { return LibraryPicker.discard(picks) }
             take(picks)
-        }
-        if AttachSheetViewController.mayReadLibrary {
-            LibraryPicker.present(from: self, options: options, onPick: onPick).onCancel = { [weak self] in self?.settleFocus(added: false) }
-        } else {
-            LibrarySystemPicker.present(from: self, options: options, onPick: onPick).onCancel = { [weak self] in self?.settleFocus(added: false) }
-        }
+        }.onCancel = { [weak self] in self?.settleFocus(added: false) }
     }
 
-    /// Photos and videos picked in the sheet's strip, read in full off the main thread.
-    private func add(assets ids: [String]) {
+    /// Photos and videos picked in the menu's grid, read in full.
+    private func add(_ ids: [String], from library: AttachLibrary) {
         Task { [weak self] in
-            let found = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-            let byID = Dictionary((0..<found.count).map { (found.object(at: $0).localIdentifier, found.object(at: $0)) }, uniquingKeysWith: { a, _ in a })
-            var picks: [LibraryPick] = []
-            for id in ids {
-                guard let asset = byID[id], let pick = await LibraryPicker.read(asset) else { continue }
-                picks.append(pick)
-            }
+            let picks = await library.read(ids)
             guard let self else { return LibraryPicker.discard(picks) }
             take(picks)
         }
     }
 
+    /// A photo or a video, as Telegram's camera takes either.
     private func presentCamera() {
         guard UIImagePickerController.isSourceTypeAvailable(.camera), pictures.room() > 0 else { return settleFocus(added: false) }
         let camera = UIImagePickerController()
         camera.sourceType = .camera
-        camera.mediaTypes = [UTType.image.identifier]
+        let available = UIImagePickerController.availableMediaTypes(for: .camera) ?? []
+        camera.mediaTypes = [UTType.image.identifier, UTType.movie.identifier].filter(available.contains)
+        camera.videoQuality = .typeHigh
         camera.delegate = self
         present(camera, animated: true)
     }
@@ -669,66 +795,6 @@ final class ChatViewController: UIViewController, ComposeHosting {
         files.allowsMultipleSelection = true
         files.delegate = self
         present(files, animated: true)
-    }
-
-    /// The clipboard, read as the system allows: a picture attaches, text
-    /// goes in where the cursor is, anything else is said, not sent. What
-    /// it holds is asked without a prompt; reading it may prompt, and a
-    /// prompt waits on the thread that reads, so that is never this one.
-    private func pasteFromClipboard() {
-        let board = UIPasteboard.general
-        let picture = board.hasImages
-        guard picture || board.hasStrings || board.hasURLs else { return nothingToPaste() }
-        Task { [weak self] in
-            let clip = await Task.detached(priority: .userInitiated) { Self.readClipboard(picture: picture) }.value
-            guard let self else { return }
-            switch clip {
-            case .picture(let data):
-                guard pictures.room() > 0 else { return settleFocus(added: false) }
-                pictures.add(pictures: [data])
-                settleFocus(added: true)
-            case .text(let text):
-                focusesAfterPick = false
-                keyboardOwed = false
-                card.focus()
-                card.textView.insertText(text)
-            case .other:
-                nothingToPaste()
-            case nil:
-                // Refused, or gone since it was asked about.
-                settleFocus(added: false)
-            }
-        }
-    }
-
-    private enum Clip: Sendable {
-        case picture(Data)
-        case text(String)
-        /// A file copied in Files, say: its name is not what was meant.
-        case other
-    }
-
-    /// The picture as it was copied (so its orientation comes along), else
-    /// re-encoded; else the text. Nil when the paste was refused.
-    nonisolated private static func readClipboard(picture: Bool) -> Clip? {
-        let board = UIPasteboard.general
-        if picture {
-            for type in board.types {
-                guard let uti = UTType(type), uti.conforms(to: .image), let data = board.data(forPasteboardType: type), !data.isEmpty else { continue }
-                return .picture(data)
-            }
-            if let data = board.image?.pngData() { return .picture(data) }
-        }
-        if board.types.contains(UTType.fileURL.identifier) { return .other }
-        guard let text = board.string ?? board.url?.absoluteString, !text.isEmpty else { return nil }
-        return .text(text)
-    }
-
-    /// Said, then the keyboard as it was, once it is read.
-    private func nothingToPaste() {
-        let alert = UIAlertController(title: Strings.nothingToPaste, message: Strings.filesNotSentDetail, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: Strings.done, style: .default) { [weak self] _ in self?.settleFocus(added: false) })
-        present(alert, animated: true)
     }
 
     /// Preserve the library's order and copy every file before its temporary
@@ -983,6 +1049,10 @@ final class ChatViewController: UIViewController, ComposeHosting {
     /// row's chunks near the screen included. Its cards stay over its chunks.
     private func reads(_ row: ChatPlanView, _ plan: ChatRowPlan) {
         let id = plan.id
+        #if DEBUG || HAPPY_FIXTURES
+        let evidence = ProcessInfo.processInfo.environment["HAPPY_CHAT_PROBE"] == nil ? nil : "id=\(id),alpha=\(plan.alpha)"
+        row.accessibilityValue = evidence
+        #endif
         let toggles = plan.toggles.map { name in
             [UIAccessibilityCustomAction(name: name) { [weak self] _ in self?.toggle(id); return true }]
         }
@@ -1009,6 +1079,9 @@ final class ChatViewController: UIViewController, ComposeHosting {
             let message = UIAccessibilityElement(accessibilityContainer: row)
             message.accessibilityLabel = label
             message.accessibilityIdentifier = "message"
+            #if DEBUG || HAPPY_FIXTURES
+            message.accessibilityValue = evidence
+            #endif
             message.accessibilityCustomActions = toggles
             message.accessibilityFrameInContainerSpace = plan.items.reduce(CGRect.null) { frame, item in
                 item.wordsFrame.map { frame.union($0) } ?? frame
@@ -1037,13 +1110,8 @@ final class ChatViewController: UIViewController, ComposeHosting {
     }
 
     /// The header's grey line: what the agent is at, in a word, while it is.
-    private static func status(_ activity: Activity?) -> String? {
-        guard let activity else { return nil }
-        return switch activity.phase {
-        case .thinking, .waitingForModel: Strings.phaseThinking
-        case .awaitingAnswer: Strings.phaseAwaitingAnswer
-        default: Strings.phaseWorking
-        }
+    private func updateHeaderStatus() {
+        header.status = Strings.HeaderStatus.text(headerState, activity: chat.activity, loaded: chat.loaded)
     }
 
     // MARK: Layout
@@ -1054,24 +1122,38 @@ final class ChatViewController: UIViewController, ComposeHosting {
         replan()
         if firstFrame == nil {
             firstFrame = drawn
-            scrollView.accessibilityIdentifier = "transcript"
+            // The UI tests find the transcript by this, whichever drew it.
+            (ultra?.list ?? scrollView).accessibilityIdentifier = "transcript"
         }
         timeShown()
         header.maxWidth = ChatTitleLayout.maxWidth(barWidth: view.bounds.width)
+        // From where the keyboard rests, not the finger dragging it: the
+        // card keeps its shape through a drag and changes once it settles.
+        card.configuration.compact = compacts
         let screen = ChatScreenLayout(
             size: view.bounds.size, safeArea: LayoutInsets(view.safeAreaInsets),
             keyboardTop: fingerOnKeyboard ? keyboardTracker.frame.minY : keyboardTop
         ) { [card] width in card.height(fitting: width) }
+        transcriptHeaderScrim.setLayoutFrame(screen.headerScrim)
         card.setLayoutFrame(screen.card)
         picker?.follow()
         let foot = ChatFootLayout(size: view.bounds.size, card: screen.card)
         composerScrim.setLayoutFrame(foot.scrim)
         jump.setLayoutFrame(foot.jump)
+        // The transcript starts under the navigation bar and scrolls under it.
+        let insets = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0, bottom: screen.listBottom, right: 0)
+        if let ultra {
+            if ultra.frame != view.bounds { ultra.frame = view.bounds }
+            // The list is inverted: its top edge is the composer's edge.
+            let flipped = UIEdgeInsets(top: insets.bottom, left: 0, bottom: insets.top, right: 0)
+            ultra.setViewport(size: view.bounds.size, insets: flipped)
+            layoutTranscript()
+            updateHeaderEdge()
+            return
+        }
         // Set again only when it changed: a scroll view given its frame,
         // even the same one, while pulled past an end snaps its offset back.
         if scrollView.frame != view.bounds { scrollView.frame = view.bounds }
-        // The transcript starts under the navigation bar and scrolls under it.
-        let insets = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0, bottom: screen.listBottom, right: 0)
         if scrollView.contentInset != insets {
             #if DEBUG
             probe?.wrote("inset", insets.bottom)
@@ -1080,6 +1162,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
             scrollView.verticalScrollIndicatorInsets = insets
         }
         layoutTranscript()
+        updateHeaderEdge()
     }
 
     // MARK: Preview
@@ -1090,9 +1173,6 @@ final class ChatViewController: UIViewController, ComposeHosting {
         navigationItem.titleView = nil
         scrollView.isUserInteractionEnabled = false
         view.accessibilityIdentifier = "preview"
-        previewPill.layer.cornerRadius = PreviewLayout.Metrics.pillHeight / 2
-        previewPill.layer.cornerCurve = .continuous
-        previewPill.clipsToBounds = true
         previewPill.isAccessibilityElement = true
         previewPill.accessibilityTraits = .header
         previewPill.accessibilityIdentifier = "preview-title"
@@ -1153,6 +1233,20 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // transcript keeps no working line of its own.
         heights.append(0)
         heights += waiting.map(\.size.height)
+        // Steering taken up goes into the transcript above the line, moving
+        // there as the line moves under it.
+        let wasTaken = !queuedShown.subtracting(queuedIds).isEmpty && view.window != nil
+        if let ultra {
+            queuedShown = queuedIds
+            var opening: (view: UIView, height: CGFloat)?
+            if let introLayout {
+                introView.place(introLayout)
+                opening = (view: introView, height: introLayout.size.height)
+            }
+            ultra.apply(settled + waiting, intro: opening, animated: wasTaken)
+            updateJump()
+            return
+        }
         // The intro stays under the bar, as desktop's leading header.
         let pins = introLayout != nil && !previewing
         let first = introLayout == nil ? 0 : 1
@@ -1163,44 +1257,14 @@ final class ChatViewController: UIViewController, ComposeHosting {
         let stackRow = Dictionary(zip(stackedIds, stackRows), uniquingKeysWith: { first, _ in first })
         func row(_ id: String) -> Int? { stackRow[id] }
         func stacked() -> ChatStackLayout {
-            let held = lift.flatMap { lift in row(lift.id).map { ChatStackLayout.Lift(row: $0, line: lift.line) } }
-            return ChatStackLayout(heights: heights, width: width, viewport: viewport, pinsFirst: pins, lift: held)
+            ChatStackLayout(heights: heights, width: width, viewport: viewport, pinsFirst: pins)
         }
-        // The room under a lift taken another height by the keyboard or the
-        // composer may go once it is out of view.
-        if let held = lift, held.viewport != viewport {
-            lift = (held.id, held.line, viewport, true)
-            // Resized with the reader up in history, the room already out of view.
-            if !followsNewest, SendLift.releases(resized: true, viewportBottom: scrollView.contentOffset.y + scrollView.bounds.height - scrollView.contentInset.bottom, rowsEnd: rowsEnd) {
-                lift = nil
-            }
-        }
-        var stack = stacked()
-        if let id = liftPending, let sent = row(id) {
-            liftPending = nil
-            // Where it lands following the end; lifted from there if below the
-            // line. The intro's line counts only while it is on screen there:
-            // scrolled away, the line is desktop's 30%.
-            let shownFrom = max(0, stack.contentHeight - viewport)
-            let introLine = introLayout.flatMap { $0.line.maxY > shownFrom ? $0.line.maxY : nil }
-            let line = SendLift(viewport: viewport, introLine: introLine)
-            if line.lifts(shownAt: stack.frames[sent].minY - shownFrom) {
-                lift = (id, line.line, viewport, false)
-            } else {
-                lift = nil
-            }
-            stack = stacked()
-        }
-        if !stack.holding { lift = nil }
-        rowsEnd = stack.frames.first?.minY == 0 ? stack.frames.last?.maxY : nil
+        let stack = stacked()
         contentTop = stack.frames.first { $0.height > 0 }?.minY ?? 0
         if let introLayout {
             introView.setLayoutFrame(stack.frames[0])
             introView.place(introLayout)
         }
-        // Steering taken up goes into the transcript above the line, moving
-        // there as the line moves under it.
-        let taken = !queuedShown.subtracting(queuedIds).isEmpty && view.window != nil
         queuedShown = queuedIds
         let frames = stackRows.map { stack.frames[$0] }
         if frames != stackedFrames || stackedIds != self.stackedIds { mountedFor = nil }
@@ -1213,7 +1277,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
             }
             self.working.frame = stack.frames[first + settled.count]
         }
-        if taken {
+        if wasTaken {
             UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: place)
         } else {
             place()
@@ -1259,7 +1323,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
             print("HAPPY_OPEN \(warm) first=\(firstFrame) ms=\(ms) rows=\(plans.count)")
             #endif
             timing = "first=\(firstFrame) ms=\(ms) rows=\(plans.count)"
-            scrollView.accessibilityValue = timing
+            (ultra?.list ?? scrollView).accessibilityValue = timing
             #if DEBUG
             probe?.report()
             #endif
@@ -1346,8 +1410,16 @@ final class ChatViewController: UIViewController, ComposeHosting {
     /// shimmers while the working line spins: not on a question to the
     /// person or a scheduled wait, which show still.
     private func updateJump() {
-        let viewport = scrollView.bounds.height - scrollView.contentInset.top - scrollView.contentInset.bottom
-        let away = !previewing && ChatFootLayout.showsJump(distanceFromEnd: newestOffset - scrollView.contentOffset.y, viewport: viewport)
+        let viewport: CGFloat
+        let distance: CGFloat
+        if let ultra {
+            viewport = ultra.viewportHeight
+            distance = ultra.distanceFromNewest
+        } else {
+            viewport = scrollView.bounds.height - scrollView.contentInset.top - scrollView.contentInset.bottom
+            distance = newestOffset - scrollView.contentOffset.y
+        }
+        let away = !previewing && ChatFootLayout.showsJump(distanceFromEnd: distance, viewport: viewport)
         // Hidden, it doesn't sweep.
         jump.working = away && ChatJumpButton.spins(chat.activity)
         guard away != jumpShown else { return }
@@ -1375,6 +1447,12 @@ final class ChatViewController: UIViewController, ComposeHosting {
 
     /// Back to the newest message, following it from there.
     @objc private func jumpToLatest() {
+        if let ultra {
+            followsNewest = true
+            ultra.scrollToNewest(animated: true)
+            tellReadsNewest(moving: false)
+            return
+        }
         // To the end as it is, not as it was held while the scroll moved.
         var scroll = scrollState
         (scroll.tracking, scroll.decelerating) = (false, false)
@@ -1393,6 +1471,12 @@ final class ChatViewController: UIViewController, ComposeHosting {
         )
     }
 
+    /// A send follows the transcript the person is actually reading.
+    var sendFollowsNewest: Bool {
+        let distance = ultra?.distanceFromNewest ?? (newestOffset - scrollView.contentOffset.y)
+        return SendFollow.Send(following: followsNewest, distanceFromEnd: distance).follows
+    }
+
     private func send() {
         guard !acceptingSend else { return }
         let text = card.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1401,13 +1485,13 @@ final class ChatViewController: UIViewController, ComposeHosting {
         guard !text.isEmpty || !picked.isEmpty else { return }
         acceptingSend = true
         Haptics.play(.send)
-        // Idle, a reader at the end sees it lifted; mid-turn it waits under
-        // the reply at the end, which a reader near it follows. One reading
-        // further up stays where they are, as on desktop.
+        // A reader at or near the end follows it there; one reading further
+        // up stays where they are. The transcript is never lifted.
         let id = ClientID.make()
-        let lands = SendLift.Send(working: chat.working, following: followsNewest, distanceFromEnd: newestOffset - scrollView.contentOffset.y)
-        if lands.follows { followsNewest = true }
-        liftPending = lands.lifts ? id : nil
+        if sendFollowsNewest {
+            followsNewest = true
+            ultra?.follow()
+        }
         let conversation = conversation
         let store = session.store
         let staged = pictures
@@ -1421,7 +1505,9 @@ final class ChatViewController: UIViewController, ComposeHosting {
                 }
                 staged.removeSent(pickedIDs)
             } else {
-                let alert = UIAlertController(title: Strings.Common.error, message: "The message could not be saved. Your text and attachments are still here.", preferredStyle: .alert)
+                let refusal = await conversation.sendRefusal
+                let message = refusal.map(Strings.newTaskFailed) ?? "The message could not be saved. Your text and attachments are still here."
+                let alert = UIAlertController(title: Strings.Common.error, message: message, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
                 present(alert, animated: true)
             }
@@ -1463,7 +1549,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
         var pictures = Picture.all(in: chat.items)
         if !pictures.contains(where: { $0.key == key }) {
             let presented = media.media(key)
-            pictures = [Picture(key: key, thumbhash: presented?.item.thumbhash, label: presented?.item.name ?? Strings.picture)]
+            pictures = [presented.map(Picture.init) ?? Picture(key: key, thumbhash: nil, label: Strings.picture)]
         }
         let index = pictures.firstIndex { $0.key == key } ?? 0
         present(PictureViewController(source: media, pictures: pictures, index: index), animated: true)
@@ -1483,6 +1569,26 @@ final class ChatViewController: UIViewController, ComposeHosting {
         updatePrimary()
     }
 
+    /// The ask Settings opened this conversation with, once the draft it
+    /// already had is in the composer: the words go above that draft, two
+    /// lines over it, with the caret after them and the keyboard up, so
+    /// the person finishes the sentence and sends it themselves.
+    ///
+    /// It goes in once. Nothing is sent, and the conversation's stored
+    /// draft is not written by opening: only typing does that, as
+    /// anywhere else, so an ask left untouched is not kept.
+    private func showPrefill() {
+        guard let prefill, !prefilled, !previewing else { return }
+        prefilled = true
+        let shown = prefill.applied(to: card.text)
+        showingDraft = true
+        card.setText(shown.text, selection: NSRange(location: shown.caret, length: 0), animatesHeight: false)
+        showingDraft = false
+        updatePrimary()
+        // On screen already: the keyboard now. Still arriving: with it.
+        if view.window != nil, !focusPending { card.focus() }
+    }
+
     private func showFileUnavailable() {
         let alert = UIAlertController(title: nil, message: Strings.fileUnavailable, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
@@ -1495,38 +1601,11 @@ final class ChatViewController: UIViewController, ComposeHosting {
             titleView.finishEditing()
             return
         }
-        for (id, row) in rowViews {
+        for row in rowViews.values {
             let point = recognizer.location(in: row)
             guard row.bounds.contains(point) else { continue }
-            if let link = row.link(at: point), let reference = HappyReferences.reference(link: link) {
-                open(reference)
-                return
-            }
-            if let link = row.link(at: point), let url = URL(string: link) {
-                UIApplication.shared.open(url)
-                return
-            }
-            switch row.action(at: point) {
-            case .copyMessage(_, let text):
-                UIPasteboard.general.string = text
-                showCopied(id)
-            case .retry(let localId):
-                // A failure card's action names its service message.
-                if let item = chat.items.first(where: { $0.id == localId }), case .failure(let failure) = item.role {
-                    resolveFailure(failure)
-                    return
-                }
-                let conversation = conversation
-                Task { await conversation.retry(localId) }
-            case .openMedia(let key):
-                open(key)
-            case .openArtifact(let artifact):
-                navigationController?.pushViewController(ArtifactViewController(session: session, artifact: artifact), animated: true)
-            case .toggleTool(let messageId):
-                toggle(messageId)
-            default:
-                break
-            }
+            if let link = row.link(at: point) { open(link: link); return }
+            if let action = row.action(at: point) { act(action) }
             return
         }
     }
@@ -1575,16 +1654,63 @@ final class ChatViewController: UIViewController, ComposeHosting {
         for row in rowViews.values {
             let point = recognizer.location(in: row)
             guard row.bounds.contains(point), let hit = row.hold(at: point) else { continue }
-            switch hit.action {
-            case .copyMenu(let text), .selectable(let text):
-                UIPasteboard.general.string = text
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            case .markdownSelectable(_, let markdown):
-                navigationController?.pushViewController(TextSelectionViewController(text: markdown), animated: true)
-            default:
-                break
-            }
+            hold(hit.action)
             return
+        }
+    }
+
+    private func loadOlder() {
+        guard chat.hasMore else { return }
+        let conversation = conversation
+        Task { await conversation.loadOlder() }
+    }
+
+    /// A link in a row: the reference it names, else the web.
+    private func open(link: String) {
+        if let reference = HappyReferences.reference(link: link) { open(reference) }
+        else if let url = URL(string: link) { openBrowser(url, session: session, agentID: media.agentId) }
+    }
+
+    /// What a tap on a row's action does, from either transcript.
+    private func act(_ action: ChatRowAction) {
+        switch action {
+        case .copyMessage(let id, let text):
+            UIPasteboard.general.string = text
+            showCopied(id)
+        case .retry(let localId):
+            // A failure card's action names its service message.
+            if let item = chat.items.first(where: { $0.id == localId }), case .failure(let failure) = item.role {
+                resolveFailure(failure)
+                return
+            }
+            let conversation = conversation
+            Task { await conversation.retry(localId) }
+        case .cancelUpload(let messageId, let piece):
+            // Telegram's cross: that one is taken out, the rest still goes.
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            let conversation = conversation
+            Task { await conversation.removeAttachment(messageId, key: piece) }
+        case .openMedia(let key):
+            open(key)
+        case .openArtifact(let artifact):
+            navigationController?.pushViewController(ArtifactViewController(session: session, artifact: artifact), animated: true)
+        case .toggleTool(let messageId):
+            toggle(messageId)
+        default:
+            break
+        }
+    }
+
+    /// What a long press on a row does, from either transcript.
+    private func hold(_ action: ChatRowAction) {
+        switch action {
+        case .copyMenu(let text), .selectable(let text):
+            UIPasteboard.general.string = text
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .markdownSelectable(_, let markdown):
+            navigationController?.pushViewController(TextSelectionViewController(text: markdown), animated: true)
+        default:
+            break
         }
     }
 
@@ -1661,8 +1787,7 @@ extension ChatViewController: AgentInputCardDelegate {
 
     func agentInputCardDidPressSend(_ card: AgentInputCardView) { send() }
 
-    /// The add button opens the "+" sheet: photos, the clipboard, files
-    /// and the permission the next message runs with.
+    /// The add button opens the "+" menu: the library, the camera and files.
     func agentInputCardDidPressAdd(_ card: AgentInputCardView) {
         presentAttach(from: self)
     }
@@ -1702,8 +1827,18 @@ extension ChatViewController: AgentInputCardDelegate {
 
 extension ChatViewController: UIImagePickerControllerDelegate, UINavigationControllerDelegate, UIDocumentPickerDelegate {
     func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-        let image = info[.originalImage] as? UIImage
         picker.dismiss(animated: true)
+        // A recording: the camera's file is moved in as Files' are.
+        if let movie = info[.mediaURL] as? URL {
+            Task { [weak self] in
+                let pick = await Task.detached(priority: .userInitiated) { LibraryPicker.document(movie, videos: true) }.value
+                guard let self else { return LibraryPicker.discard(pick.map { [$0] } ?? []) }
+                guard let pick else { return settleFocus(added: false) }
+                take([pick])
+            }
+            return
+        }
+        let image = info[.originalImage] as? UIImage
         guard let data = image?.jpegData(compressionQuality: 0.9) else { return settleFocus(added: false) }
         pictures.add(pictures: [data])
         settleFocus(added: true)
@@ -1737,6 +1872,7 @@ extension ChatViewController: ChatMediaProviding {
 
 extension ChatViewController: PageHosting {
     var pageClient: AgentClient { session.client }
+    func page(open url: URL) { openBrowser(url, session: session, agentID: media.agentId) }
 
     func page(_ artifactId: String, measured height: CGFloat) {
         let height = min(max(1, height.rounded(.up)), 4000)
@@ -1764,9 +1900,7 @@ private extension ChatDrawItem {
 
 extension ChatViewController: UIScrollViewDelegate {
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        fingerOnKeyboard = true
-        jumping = false
-        tellReadsNewest(moving: true)
+        beginKeyboardDrag()
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
@@ -1776,8 +1910,7 @@ extension ChatViewController: UIScrollViewDelegate {
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        // No keyboard up, or one the finger never moved: nothing will say where it went.
-        if !card.textView.isFirstResponder || abs(keyboardTracker.frame.minY - min(keyboardTop, view.bounds.maxY)) < 1 { fingerOnKeyboard = false }
+        endKeyboardDrag()
         // Let go to glide or bounce, what is held waits until it is back
         // inside its ends (`scrollViewDidScroll`) or at rest.
         #if DEBUG
@@ -1799,6 +1932,7 @@ extension ChatViewController: UIScrollViewDelegate {
         #endif
         mountRows()
         updateJump()
+        updateHeaderEdge()
         #if DEBUG
         probe?.watch()
         #endif
@@ -1811,16 +1945,7 @@ extension ChatViewController: UIScrollViewDelegate {
         // Back inside its ends after a bounce: what was held is given.
         if scrollHold.held != nil, let height = scrollHold.release(scroll: scrollState) { setContentHeight(height, "size-scroll") }
         guard moving else { return }
-        // The room under a lift stays as the reader scrolls away and back;
-        // taken another height meanwhile, it goes once wholly out of view.
-        if let held = lift, SendLift.releases(resized: held.resized, viewportBottom: scrollView.contentOffset.y + scrollView.bounds.height - scrollView.contentInset.bottom, rowsEnd: rowsEnd) {
-            lift = nil
-            view.setNeedsLayout()
-        }
-        if scrollView.contentOffset.y < 200 - scrollView.contentInset.top, chat.hasMore {
-            let conversation = conversation
-            Task { await conversation.loadOlder() }
-        }
+        if scrollView.contentOffset.y < 200 - scrollView.contentInset.top { loadOlder() }
     }
 }
 
@@ -1843,6 +1968,12 @@ extension ChatViewController {
         private var stretchedFrames = 0
         private var backwards = 0
         private var heldWrites = 0
+        private var keyboardFrames = 0
+        private var keyboardGap: CGFloat = 0
+        private var edgeSamples = 0
+        private var contentSamples = 0
+        private var edgeTranslation: CGFloat = 0
+        private var contentTranslation: CGFloat = 0
         private let started = CACurrentMediaTime()
 
         @MainActor init(_ screen: ChatViewController, relayout: Bool) {
@@ -1859,7 +1990,33 @@ extension ChatViewController {
                 screen.view.setNeedsLayout()
                 screen.view.layoutIfNeeded()
             }
+            let top = screen.keyboardTracker.frame.minY
+            if screen.card.textView.isFirstResponder,
+               top > screen.keyboardTop + 20, top < screen.view.bounds.maxY - 30 {
+                keyboardFrames += 1
+                keyboardGap = max(keyboardGap, abs(top - screen.card.frame.maxY - 8))
+            }
+            observePop()
             watch()
+            report()
+        }
+
+        /// Public recognizer motion while UIKit has an interactive transition.
+        /// A cancelled drag must have entered this state, beyond merely leaving
+        /// the chat visible after a gesture that never started.
+        @MainActor func observePop() {
+            guard let screen, screen.transitionCoordinator?.isInteractive == true,
+                  let navigation = screen.navigationController else { return }
+            var gestures = [(navigation.interactivePopGestureRecognizer, false)]
+            if #available(iOS 26.0, *) { gestures.append((navigation.interactiveContentPopGestureRecognizer, true)) }
+            for (gesture, content) in gestures {
+                guard let pan = gesture as? UIPanGestureRecognizer, pan.state == .began || pan.state == .changed else { continue }
+                let x = pan.translation(in: navigation.view).x
+                let leading = navigation.view.effectiveUserInterfaceLayoutDirection == .rightToLeft ? -x : x
+                guard leading > 0 else { continue }
+                if content { contentSamples += 1; contentTranslation = max(contentTranslation, leading) }
+                else { edgeSamples += 1; edgeTranslation = max(edgeTranslation, leading) }
+            }
         }
 
         @MainActor func wrote(_ what: String, _ value: CGFloat) {
@@ -1892,7 +2049,32 @@ extension ChatViewController {
         @MainActor func report() {
             guard let screen else { return }
             let scroll = screen.scrollView
-            screen.scrollView.accessibilityValue = "\(screen.timing) stretched=\(stretchedFrames) backwards=\(backwards) held=\(heldWrites) top=\(Int(scroll.contentInset.top)) bottom=\(Int(scroll.contentInset.bottom))"
+            let bottom = screen.ultra.map { CGFloat($0.list.contentInsets.top) } ?? scroll.contentInset.bottom
+            (screen.ultra?.list ?? scroll).accessibilityValue = "\(screen.timing) stretched=\(stretchedFrames) backwards=\(backwards) held=\(heldWrites) top=\(Int(scroll.contentInset.top)) bottom=\(bottom) keyboardFrames=\(keyboardFrames) keyboardGap=\(keyboardGap) guide=\(screen.keyboardTracker.frame.minY) cardBottom=\(screen.card.frame.maxY) popEdge=\(edgeSamples) popContent=\(contentSamples) popEdgeX=\(edgeTranslation) popContentX=\(contentTranslation)\(horizontalScrollers())"
+        }
+
+        @MainActor private func horizontalScrollers() -> String {
+            guard let screen, let window = screen.view.window else { return "" }
+            let card = screen.card.convert(screen.card.bounds, to: window)
+            let top = screen.view.convert(CGPoint(x: 0, y: screen.view.safeAreaInsets.top), to: window).y
+            let visible = CGRect(x: 0, y: top, width: window.bounds.width, height: max(0, card.minY - top))
+            var fitting: String?
+            var wide: String?
+            func visit(_ view: UIView) {
+                guard !view.isHidden, view.alpha > 0 else { return }
+                if let scroller = view as? ChatScrollerView, !scroller.vertical {
+                    let frame = scroller.convert(scroller.bounds, to: window).intersection(visible)
+                    if !frame.isNull, frame.width > 20, frame.height > 10 {
+                        let value = String(format: "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f", frame.minX, frame.minY, frame.width, frame.height,
+                                           scroller.contentOffset.x, scroller.contentSize.width, scroller.bounds.width)
+                        if scroller.contentSize.width > scroller.bounds.width + 1 { wide = wide ?? value }
+                        else { fitting = fitting ?? value }
+                    }
+                }
+                for child in view.subviews { visit(child) }
+            }
+            visit(screen.ultra?.list ?? screen.scrollView)
+            return " hFit=\(fitting ?? "none") hWide=\(wide ?? "none")"
         }
     }
 }
@@ -1925,6 +2107,60 @@ final class PreviewFadeView: UIView {
         let ground = UIColor(Palette.surface).resolvedColor(with: traitCollection)
         layer.colors = [ground.cgColor, ground.cgColor, ground.withAlphaComponent(0).cgColor]
         layer.locations = [0, NSNumber(value: Double(clearFrom)), 1]
+    }
+}
+#endif
+
+#if canImport(UIKit)
+/// The transcript on UltraList (`AgentChatUltraList`) asks the screen for
+/// the same things the rows it mounts itself do: what a row shows, and
+/// what a tap or a press on one means.
+extension ChatViewController: AgentChatTranscriptHost {
+    func show(_ plan: ChatRowPlan, in view: ChatPlanView) {
+        configure(view, plan)
+    }
+
+    func placedChunks(of plan: ChatRowPlan, in view: ChatPlanView) {
+        reads(view, plan)
+    }
+
+    func transcriptScrolled() {
+        #if DEBUG || HAPPY_FIXTURES
+        GymFrameMeter.noteScroll()
+        #endif
+        guard let ultra else { return }
+        followsNewest = ultra.followsNewest
+        updateHeaderEdge()
+        updateJump()
+        tellReadsNewest(moving: ultra.list.isTracking || ultra.list.isDecelerating)
+    }
+
+    func transcriptWillBeginDragging() {
+        beginKeyboardDrag()
+    }
+
+    func transcriptDidEndDragging() {
+        endKeyboardDrag()
+    }
+
+    /// The header's scrim, none with nothing under the bar: either
+    /// renderer's distance past its oldest row.
+    private func updateHeaderEdge() {
+        guard !previewing else { return }
+        let under = ultra?.distanceFromOldest ?? scrollView.contentOffset.y + scrollView.contentInset.top
+        transcriptHeaderScrim.presence = HeaderScrim.presence(scrolledUnder: under)
+    }
+
+    func transcriptTapped(_ action: ChatRowAction) {
+        act(action)
+    }
+
+    func transcriptOpened(_ url: String) {
+        open(link: url)
+    }
+
+    func transcriptHeld(_ action: ChatRowAction, in view: UIView, frame: CGRect, at point: CGPoint) {
+        hold(action)
     }
 }
 #endif

@@ -45,23 +45,15 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(result.contentHeight, 233 + 9)
     }
 
-    func testASectionsPlusStandsBeforeItsFold() {
-        let frames = SidebarLayout.layout([.init(kind: .section, hasMark: false, hasAdd: true), .init(kind: .section, hasMark: false)], width: 390).frames
-        XCTAssertEqual(frames[0].chevron, CGRect(x: 344 + 2 * third, y: 16 + 2 * third, width: 27, height: 27))
-        // One square and its gap before the fold; the title keeps clear of it.
-        XCTAssertEqual(frames[0].add, CGRect(x: 305 + 2 * third, y: 16 + 2 * third, width: 27, height: 27))
-        XCTAssertEqual(frames[0].label, CGRect(x: 23, y: 9, width: 276 + 2 * third, height: 42))
-        // Without one, nothing changes.
-        XCTAssertNil(frames[1].add)
-        XCTAssertEqual(frames[1].label.width, 315 + 2 * third)
-    }
-
-    func testTheSidebarIsDesktopsHalfAgain() {
+    func testTheSidebarKeepsItsGeometryAndUsesLegacyHomeTypeSizes() {
         typealias M = Metrics
         XCTAssertEqual(M.phone, 1.5)
         XCTAssertEqual([M.rowHeight, M.sectionHeight, M.separatorHeight, M.rowGap, M.inset], [48, 42, 26, 3, 8])
         XCTAssertEqual([M.mark, M.glyph, M.markGap, M.trailing, M.addGlyph], [30, 24, 12, 27, 21])
-        XCTAssertEqual([M.labelSize, M.sectionLabelSize, M.chevronGlyph, M.questionGlyph, M.clockGlyph], [19.5, 16.5, 18, 22.5, 21])
+        XCTAssertEqual([M.labelSize, M.sectionLabelSize, M.chevronGlyph, M.questionGlyph, M.clockGlyph], [17, 11, 18, 22.5, 21])
+        XCTAssertEqual(M.labelSize, TextStyles.sessionTitle.size)
+        XCTAssertEqual(M.labelSize, TextStyles.projectName.size)
+        XCTAssertEqual(M.sectionLabelSize, TextStyles.projectSection.size)
         // Nesting and its lines aren't scaled: desktop's 28 a level, 1 thick.
         XCTAssertEqual([M.indent, M.line], [28, 1])
     }
@@ -76,7 +68,7 @@ final class LayoutTests: XCTestCase {
             let frames = SidebarLayout.layout([
                 .init(kind: .row, hasFold: true),
                 .init(kind: .row, hasFold: true, foldClosed: true),
-                .init(kind: .section, hasMark: false, hasAdd: true),
+                .init(kind: .section, hasMark: false),
                 .init(kind: .row, depth: 1, hasTrailing: true),
             ], width: width).frames
             for (index, frame) in frames.prefix(2).enumerated() {
@@ -99,10 +91,9 @@ final class LayoutTests: XCTestCase {
                 XCTAssertEqual(frame.label.minX - frame.mark!.maxX, 12)
                 XCTAssertEqual(frame.label.midY, box.midY - M.titleLift)
             }
-            // A section's fold, its "+" and a status mark stand on the same column.
+            // A section's fold and a status mark stand on the same column.
             XCTAssertEqual(frames[2].chevron!.midX, frames[0].chevron!.midX)
             XCTAssertEqual(frames[3].trailing!.midX, frames[0].chevron!.midX)
-            XCTAssertLessThan(frames[2].add!.maxX, frames[2].chevron!.minX)
             // A section's title starts where a top-level glyph's ink does.
             XCTAssertEqual(frames[2].label.minX, frames[2].box.minX + 15)
         }
@@ -205,11 +196,38 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(down.listTop, 103)
         XCTAssertEqual(down.listBottom, 110)
         XCTAssertEqual(down.viewport, 631)
+        XCTAssertEqual(down.headerScrim, CGRect(x: 0, y: 0, width: 390, height: 113))
         // Keyboard up: the card sits 8 above it.
         let up = ChatScreenLayout(size: size, safeArea: safe, keyboardTop: 508) { width in width == 374 ? 92 : 0 }
         XCTAssertEqual(up.card, CGRect(x: 8, y: 408, width: 374, height: 92))
         XCTAssertEqual(up.listBottom, 444)
         XCTAssertEqual(up.viewport, 297)
+        XCTAssertEqual(up.headerScrim, down.headerScrim)
+    }
+
+    /// Under the glass header (iPhone 17 Pro: the bar's 54 under a 62
+    /// status bar, its buttons and the name's capsule 62 to 106) the scrim
+    /// is the ground down past the bar, 10 under its foot, and feathers
+    /// over its last 24: whole behind the name, clear by 126.
+    func testTheHeaderScrimCoversTheBarAndFeathersShortUnderIt() {
+        let size = CGSize(width: 402, height: 874)
+        let safe = LayoutInsets(top: 116, left: 0, bottom: 34, right: 0)
+        let layout = ChatScreenLayout(size: size, safeArea: safe, keyboardTop: 840) { _ in 60 }
+        XCTAssertEqual(layout.headerScrim, CGRect(x: 0, y: 0, width: 402, height: 126))
+        XCTAssertEqual(layout.listTop, 116, "the transcript still starts under the bar")
+        let height = layout.headerScrim.height
+        let stops = HeaderScrim.stops(height: height, ramp: ChatScreenLayout.Metrics.headerRamp)
+        for stop in stops where stop.location * Double(height) <= Double(height - ChatScreenLayout.Metrics.headerRamp) {
+            XCTAssertEqual(stop.alpha, 1, "the ground thins at \(stop.location * Double(height))pt, above the feather")
+        }
+        // The name's capsule ends at 106: still nearly the ground there.
+        let underCapsule = stops.last { $0.location * Double(height) <= 106 }
+        XCTAssertGreaterThan(underCapsule?.alpha ?? 0, 0.9)
+        XCTAssertEqual(stops.last?.alpha, 0)
+        XCTAssertEqual(ChatScreenLayout.Metrics.headerPeak, 1)
+        // Sideways, with no status bar, the bar alone and the same overhang.
+        let sideways = ChatScreenLayout(size: CGSize(width: 874, height: 402), safeArea: LayoutInsets(top: 32, left: 62, bottom: 21, right: 62), keyboardTop: 402) { _ in 60 }
+        XCTAssertEqual(sideways.headerScrim, CGRect(x: 0, y: 0, width: 874, height: 42))
     }
 
     func testShortConversationsRestOnTheComposer() {
@@ -285,86 +303,42 @@ final class LayoutTests: XCTestCase {
         XCTAssertEqual(short.chunks, [.init(items: 0..<2, frame: CGRect(x: 0, y: 0, width: 390, height: 2048))])
     }
 
-    /// A send while the agent is idle goes 30% down the viewport, no
-    /// higher than a pinned intro's line and no lower than half.
-    func testTheSendLiftLineIsDesktopsUnderTheIntro() {
-        XCTAssertEqual(SendLift(viewport: 600, introLine: 116).line, 180)
-        // The keyboard up: 30% is above the intro's line, so the line is the intro's.
-        XCTAssertEqual(SendLift(viewport: 297, introLine: 116).line, 116)
-        XCTAssertEqual(SendLift(viewport: 600).line, 180)
-        XCTAssertEqual(SendLift(viewport: 200, introLine: 160).line, 100)
-        // The first send, right under the intro's line: there already.
-        XCTAssertFalse(SendLift(viewport: 600, introLine: 116).lifts(shownAt: 116))
-        XCTAssertTrue(SendLift(viewport: 600, introLine: 116).lifts(shownAt: 420))
+    /// A send is an appended row and nothing else: the stack is what it is
+    /// with that row on the end, and no room is held for the reply. A short
+    /// conversation resting on the composer does slide up, by exactly the
+    /// row's own height, as any append does. What is gone is the 30% lift,
+    /// which moved the rows much further than they grew.
+    func testASendAppendsARowAndHoldsNoRoom() {
+        // Short: the rows rest on the composer, the send among them.
+        let resting = ChatStackLayout(heights: [80, 60], width: 390, viewport: 600)
+        XCTAssertEqual(resting.frames.map(\.minY), [460, 540])
+        XCTAssertEqual(resting.contentHeight, 600)
+        // A 40pt send lands: the rows above slide up 40, the appended
+        // height, and no further. A lift put the send's top at 180.
+        let sent = ChatStackLayout(heights: [80, 60, 40], width: 390, viewport: 600)
+        XCTAssertEqual(sent.frames.map(\.minY), [420, 500, 560])
+        XCTAssertEqual(sent.contentHeight, 600, "no room is held under it")
+        // Past the viewport, where the reader is: the rows keep the frames
+        // they had and the content is its rows and nothing more.
+        let read = ChatStackLayout(heights: [400, 300], width: 390, viewport: 600)
+        let after = ChatStackLayout(heights: [400, 300, 40], width: 390, viewport: 600)
+        XCTAssertEqual(read.frames.map(\.minY), [0, 400])
+        XCTAssertEqual(after.frames.map(\.minY), [0, 400, 700])
+        XCTAssertEqual(after.contentHeight, read.contentHeight + 40)
     }
 
-    /// A lifted follow-up under a pinned intro: on its line with the room
-    /// under it held, whatever the viewport, until the reply fills it, and
-    /// then where it would rest anyway.
-    func testALiftedSendHoldsItsLineUntilTheReplyFillsTheRoom() {
-        let lift = ChatStackLayout.Lift(row: 3, line: 180)
-        // Intro 116, a send 60, a reply 724, the follow-up 60, working 0.
-        let heights: [CGFloat] = [116, 60, 724, 60, 0]
-        let held = ChatStackLayout(heights: heights, width: 390, viewport: 600, pinsFirst: true, lift: lift)
-        XCTAssertTrue(held.holding)
-        XCTAssertEqual(held.frames[3].minY, 900)
-        XCTAssertEqual(held.contentHeight, 1320)
-        // Following the end, the follow-up stands on the line.
-        XCTAssertEqual(held.frames[3].minY - (held.contentHeight - 600), 180)
-        // The keyboard up: the same line, the room shorter.
-        let up = ChatStackLayout(heights: heights, width: 390, viewport: 297, pinsFirst: true, lift: lift)
-        XCTAssertEqual(up.frames[3].minY - (up.contentHeight - 297), 180)
-        // The reply fills the room: spent, and nothing moves as it goes.
-        let filling = ChatStackLayout(heights: [116, 60, 724, 60, 359], width: 390, viewport: 600, pinsFirst: true, lift: lift)
-        XCTAssertTrue(filling.holding)
-        let full = ChatStackLayout(heights: [116, 60, 724, 60, 360], width: 390, viewport: 600, pinsFirst: true, lift: lift)
-        XCTAssertFalse(full.holding)
-        XCTAssertEqual(full.contentHeight, 1320)
-        XCTAssertEqual(filling.contentHeight, 1320)
-    }
-
-    /// Without an intro a short conversation rests on the composer; a send
-    /// lifted from there stands on its line, and the rest it comes back to
-    /// once the reply is in is that same place.
-    func testALiftWithoutAnIntroComesUpFromTheComposer() {
-        let lift = ChatStackLayout.Lift(row: 0, line: 180)
-        let sent = ChatStackLayout(heights: [80, 0], width: 390, viewport: 600, lift: lift)
-        XCTAssertTrue(sent.holding)
-        XCTAssertEqual(sent.frames[0].minY, 180)
-        XCTAssertEqual(sent.contentHeight, 600)
-        // A reply streaming in stays under it, the send unmoved.
-        let streaming = ChatStackLayout(heights: [80, 200], width: 390, viewport: 600, lift: lift)
-        XCTAssertEqual(streaming.frames[0].minY, 180)
-        XCTAssertEqual(streaming.contentHeight, 600)
-        // The reply fills the room: spent, the same place it rests at.
-        let full = ChatStackLayout(heights: [80, 340], width: 390, viewport: 600, lift: lift)
-        XCTAssertFalse(full.holding)
-        XCTAssertEqual(full.frames[0].minY, 180)
-    }
-
-    /// ConversationView's keys, as MessageList takes them: an idle send by
-    /// a reader at the end is lifted, one by a reader further up moves
-    /// nothing; a send mid-turn is never lifted and carries a reader within
-    /// 80 of the end to it.
-    func testASendLiftsOnlyAReaderAtTheEnd() {
-        func send(_ working: Bool, _ following: Bool, _ distance: CGFloat) -> [Bool] {
-            let send = SendLift.Send(working: working, following: following, distanceFromEnd: distance)
-            return [send.lifts, send.follows]
+    /// A send carries a reader at or near the end to it, and leaves one
+    /// reading up in history where they are.
+    func testASendFollowsOnlyAReaderNearTheEnd() {
+        func follows(_ following: Bool, _ distance: CGFloat) -> Bool {
+            SendFollow.Send(following: following, distanceFromEnd: distance).follows
         }
-        XCTAssertEqual(send(false, true, 0), [true, true])
-        XCTAssertEqual(send(false, false, 40), [false, false])
-        XCTAssertEqual(send(true, true, 0), [false, true])
-        XCTAssertEqual(send(true, false, 80), [false, true])
-        XCTAssertEqual(send(true, false, 81), [false, false])
-    }
-
-    /// The room under a lift stays as the reader scrolls away and back; only
-    /// a viewport taken another height lets it go, once wholly out of view.
-    func testTheRoomUnderALiftGoesOnlyAfterAResizeOutOfView() {
-        XCTAssertFalse(SendLift.releases(resized: false, viewportBottom: 100, rowsEnd: 500))
-        XCTAssertFalse(SendLift.releases(resized: true, viewportBottom: 501, rowsEnd: 500))
-        XCTAssertTrue(SendLift.releases(resized: true, viewportBottom: 500, rowsEnd: 500))
-        XCTAssertFalse(SendLift.releases(resized: true, viewportBottom: 100, rowsEnd: nil))
+        XCTAssertTrue(follows(true, 0))
+        XCTAssertTrue(follows(true, 400), "already following: it stays following")
+        XCTAssertTrue(follows(false, 0))
+        XCTAssertTrue(follows(false, 80), "the threshold itself follows")
+        XCTAssertFalse(follows(false, 81), "reading history: nothing moves")
+        XCTAssertFalse(follows(false, 400))
     }
 
     /// A height laid out while a finger pulls past the end, or the scroll

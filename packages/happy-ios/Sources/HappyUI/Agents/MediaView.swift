@@ -1,4 +1,5 @@
 #if canImport(UIKit)
+import HappyCore
 import HappyIcons
 import HappyLayout
 import UIKit
@@ -17,18 +18,16 @@ protocol ChatMediaProviding: AnyObject {
 protocol ChatMediaSource: AnyObject {
     func cachedImage(_ key: String, pixels: Int) -> UIImage?
     func image(_ key: String, pixels: Int) async -> UIImage?
-    func placeholder(_ thumbhash: String) async -> UIImage?
 }
 
 /// Desktop's MediaImageTile and MediaVideoTile: the thumbhash in
-/// `surface-pressed`, the picture faded in over it (160 ms), a hairline
-/// over the whole tile and corners rounded 8. A recording shows its first
-/// frame under a play button; a tap plays it. A picture that failed keeps
-/// its placeholder under a quiet glyph and is asked for again when the
-/// computer is back (`MediaLoader.retry`).
+/// `surface-pressed` from the first frame, the picture faded in over it
+/// (`ImageFade`), a hairline over the whole tile and corners rounded 8. A
+/// recording shows its first frame under a play button; a tap plays it. A
+/// picture that failed keeps its placeholder under a quiet glyph and is
+/// asked for again when the computer is back (`MediaLoader.retry`).
 final class ChatMediaView: UIView {
-    static let radius: CGFloat = 8
-    static let fade: TimeInterval = 0.16
+    nonisolated static let radius: CGFloat = 8
     static let playIconSize: CGFloat = 22
 
     private let placeholder = UIImageView()
@@ -37,11 +36,19 @@ final class ChatMediaView: UIView {
     private let play = UIView()
     private let playIcon = UIImageView()
     private let failure = UIImageView()
+    /// Still going to the computer: the tile dimmed under its ring.
+    private let dim = UIView()
+    private(set) var ring: UploadRingView?
     private var failed = false
     private var media: ChatMedia?
     private var loadedPixels = 0
     private var task: Task<Void, Never>?
-    private var placeholderTask: Task<Void, Never>?
+
+    /// The thumbhash shown under the picture, for tests.
+    var placeholderImage: UIImage? { placeholder.image }
+    var pictureImage: UIImage? { picture.image }
+    /// What it shows, for tests.
+    var item: ChatMedia? { media }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -71,6 +78,10 @@ final class ChatMediaView: UIView {
         failure.tintColor = UIColor(Palette.mediaFailed)
         failure.isHidden = true
         addSubview(failure)
+        dim.isUserInteractionEnabled = false
+        dim.backgroundColor = UIColor(Palette.uploadDim)
+        dim.isHidden = true
+        addSubview(dim)
         NotificationCenter.default.addObserver(self, selector: #selector(retry(_:)), name: MediaLoader.retry, object: nil)
         outline.isUserInteractionEnabled = false
         outline.layer.cornerRadius = Self.radius
@@ -89,21 +100,89 @@ final class ChatMediaView: UIView {
     /// Nil lets go of the picture.
     func apply(_ media: ChatMedia?) {
         guard media != self.media else { return }
+        // Only how it is sending changed: the picture stays as it is.
+        var same = media
+        same?.upload = self.media?.upload
+        if let media, same == self.media {
+            self.media = media
+            follow(media.upload)
+            return
+        }
         task?.cancel()
         task = nil
-        placeholderTask?.cancel()
-        placeholderTask = nil
         self.media = media
         loadedPixels = 0
         setFailed(false)
-        placeholder.image = nil
+        // Now, not once it is on screen: its first frame shows it.
+        placeholder.image = ThumbHashImages.image(media?.thumbhash)
+        picture.layer.removeAllAnimations()
+        picture.alpha = 1
         picture.image = nil
         play.isHidden = media?.isVideo != true
         accessibilityLabel = media?.label
         accessibilityTraits = media?.isVideo == true ? .button : .image
         accessibilityValue = Strings.mediaLoading
+        follow(media?.upload)
         setNeedsLayout()
         loadIfNeeded()
+    }
+
+    // MARK: Uploading
+
+    /// The board key this tile shows the ring of, if any.
+    private var following: String?
+
+    /// Shows `upload`'s ring and asks `UploadRings` for its frames.
+    private func follow(_ upload: ChatUpload?) {
+        if let following, following != upload?.key { UploadRings.shared.forget(self, key: following) }
+        following = upload?.key
+        guard let upload else {
+            ring?.isHidden = true
+            dim.isHidden = true
+            play.isHidden = media?.isVideo != true
+            return
+        }
+        UploadRings.shared.show(self, key: upload.key)
+        setUpload(UploadRings.shared.phase(upload.key), animated: false)
+    }
+
+    /// Where its bytes are: what `UploadRings` applies, a frame at a time.
+    func setUpload(_ phase: UploadPhase?, animated: Bool) {
+        guard let upload = media?.upload else { return }
+        let ring = self.ring ?? {
+            let ring = UploadRingView()
+            insertSubview(ring, belowSubview: outline)
+            self.ring = ring
+            setNeedsLayout()
+            return ring
+        }()
+        let state: UploadRingView.State
+        if upload.failed { state = .failed }
+        else {
+            switch phase {
+            case nil, .preparing: state = .waiting
+            case .uploading(let share): state = .progress(share)
+            case .done: state = .done
+            }
+        }
+        ring.set(state, animated: animated)
+        let going = state != .done
+        play.isHidden = true
+        if going { dim.isHidden = false; dim.alpha = 1 }
+        else if animated, !dim.isHidden {
+            UIView.animate(withDuration: 0.25) { self.dim.alpha = 0 } completion: { _ in
+                if self.ring?.state == .done { self.dim.isHidden = true; self.play.isHidden = self.media?.isVideo != true }
+            }
+        } else {
+            dim.isHidden = true
+            play.isHidden = media?.isVideo != true
+        }
+        switch state {
+        case .waiting: accessibilityValue = Strings.Upload.waiting
+        case .progress(let share): accessibilityValue = Strings.Upload.uploading(Int((share * 100).rounded(.down)))
+        case .failed: accessibilityValue = Strings.Upload.failed
+        case .done: accessibilityValue = picture.image == nil ? Strings.mediaLoading : Strings.mediaLoaded
+        }
     }
 
     override func didMoveToWindow() {
@@ -119,6 +198,8 @@ final class ChatMediaView: UIView {
         play.frame = MediaFlow.playButton(in: bounds.size)
         failure.frame = play.frame
         playIcon.frame = play.bounds
+        dim.frame = bounds
+        ring?.frame = UploadRingLayout.disc(in: bounds.size)
         loadIfNeeded()
     }
 
@@ -132,13 +213,6 @@ final class ChatMediaView: UIView {
 
     private func loadIfNeeded() {
         guard window != nil, let media, bounds.width > 0, let source = source() else { return }
-        if placeholderTask == nil, placeholder.image == nil, picture.image == nil, let thumbhash = media.thumbhash {
-            placeholderTask = Task { @MainActor [weak self] in
-                let image = await source.placeholder(thumbhash)
-                guard !Task.isCancelled, let self, self.media == media, self.picture.image == nil else { return }
-                self.placeholder.image = image
-            }
-        }
         let pixels = pixels
         guard task == nil, pixels > loadedPixels else { return }
         if let image = source.cachedImage(media.key, pixels: pixels) {
@@ -182,11 +256,9 @@ final class ChatMediaView: UIView {
             placeholder.image = nil
             return
         }
-        picture.alpha = 0
-        UIView.animate(withDuration: Self.fade) {
-            self.picture.alpha = 1
-        } completion: { _ in
-            if self.picture.image != nil { self.placeholder.image = nil }
+        ImageFade.fadeIn(picture) { [weak self] in
+            guard let self, self.picture.image === image else { return }
+            self.placeholder.image = nil
         }
     }
 

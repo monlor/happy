@@ -29,10 +29,22 @@ final class HomeRendererHarness {
         let grouping = option("-grouping") ?? "flat"
         let sessionCount = Int(option("-sessionCount") ?? "0") ?? 0
         let archiveCount = Int(option("-archiveCount") ?? "0") ?? 0
+        let secondMachine = arguments.contains("-secondMachine")
         Task {
             let controller = AccountController(serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/home-renderer-harness", credentialStore: InMemoryCredentialStore(), storeDirectory: nil, rnServerImport: { .confirmed(ServerConfig.defaultServerURL) }, localSettingsFactory: { UserDefaultsStore(suiteName: "home-renderer-harness.\($0)") }, transport: HomeHarnessOffline(), connector: HomeHarnessNoSocket())
             do {
+                // `-accountMix`: the switcher lists one of each kind, an
+                // account made for a computer, this legacy one and an agent
+                // connection, none with a picture of its own.
+                if arguments.contains("-accountMix") {
+                    try await controller.signIn(Credentials(token: "home-harness-made", secret: Data(repeating: 23, count: 32)), origin: .madeForComputer)
+                }
                 try await controller.signIn(Credentials(token: "home-harness", secret: Data(repeating: 19, count: 32)))
+                if arguments.contains("-accountMix") {
+                    await controller.agentConnections.setForeground(false)
+                    let credentials = try JSONDecoder().decode(AgentConnectionCredentials.self, from: Data(#"{"address":"account-mix","port":1,"deviceID":"account-mix","deviceToken":"fixture"}"#.utf8))
+                    _ = try await controller.agentConnections.add(credentials, name: "Studio Mac")
+                }
                 guard let session = controller.session else { fatalError("Home harness missing session") }
                 self.account = controller
                 if !restoreRenderer {
@@ -52,6 +64,23 @@ final class HomeRendererHarness {
                             return row
                         })
                     }
+                    // A second computer with a project of its own: each
+                    // computer heads its rows.
+                    if secondMachine, var machine = try store.machines().first, let template = try store.sessions().first {
+                        machine.id = "studio-mac"
+                        var metadata = machine.metadata?.objectValue ?? [:]
+                        metadata["displayName"] = .string("Studio Mac")
+                        machine.metadata = .object(metadata)
+                        try store.upsertMachine(machine)
+                        var row = template
+                        row.id = "studio-site"; row.active = true
+                        var fields = row.metadata?.objectValue ?? [:]
+                        fields["machineId"] = .string("studio-mac")
+                        fields["path"] = .string("/Users/harness/Developer/site")
+                        fields["summary"] = .object(["text": .string("Landing page")])
+                        row.metadata = .object(fields)
+                        try store.upsertSessions([row])
+                    }
                     if sessionCount > 0, let template = try store.sessions().first {
                         try store.upsertSessions((0..<sessionCount).map { index in
                             var row = template
@@ -64,7 +93,7 @@ final class HomeRendererHarness {
                             return row
                         })
                     }
-                    try store.addPendingSettings(["sessionListGrouping": .string(grouping), "hideInactiveSessions": .bool(archiveCount > 0)])
+                    try store.addPendingSettings(["sessionListGrouping": .string(grouping), "hideInactiveSessions": .bool(archiveCount > 0 && !arguments.contains("-showArchive"))])
                 }.value
                 let context = AppContext(account: controller, variant: .development, version: "home-harness")
                 let home = LegacyHomeViewController(context: context, session: session)

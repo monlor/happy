@@ -3,16 +3,19 @@ import HappyCore
 import HappyLayout
 import UIKit
 
-/// Search's results, a component of their own over home: home's list stays
-/// as it was under them, its rows, scroll and insets untouched. Nothing
-/// shows while nothing is typed; once something answers, its own list
-/// covers home under the bar; when nothing does, a small capsule says so
-/// over home, and home still takes touches around it.
+/// Search owns the whole content surface, including an empty query, which
+/// shows the conversations last active. Its scrolling and dismissal never
+/// move the home list underneath: pulled down from its top, the list
+/// bounces as any list does, the keyboard goes, and let go far enough,
+/// search closes.
 final class HomeSearchResultsView: UIView {
     /// The results, on their own ground: never home's list.
     let list = SidebarView()
     private let pill = UIVisualEffectView(effect: UIGlassEffect())
     private let nothingFound = UILabel()
+    /// The pan began with the list at its top, pulling down.
+    private var pulling = false
+    var onDismiss: (() -> Void)?
 
     /// Where the results start (the bar's foot) and the room under them.
     var insets = UIEdgeInsets.zero {
@@ -22,16 +25,18 @@ final class HomeSearchResultsView: UIView {
         didSet { if keyboardTop != oldValue { setNeedsLayout() } }
     }
 
-    /// Something answers, so the results cover home.
-    var showsResults: Bool { !list.isHidden }
+    /// Search is open, so the results cover home.
+    var showsResults: Bool { !isHidden }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         accessibilityIdentifier = "search-results"
-        list.backgroundColor = UIColor(Palette.surface)
-        list.keyboardDismissMode = .onDrag
+        backgroundColor = UIColor(Palette.groupedGround)
+        // Grouped as home is: each section a quiet card.
+        list.style = .grouped
+        list.keyboardDismissMode = .interactive
+        list.panGestureRecognizer.addTarget(self, action: #selector(panned(_:)))
         list.accessibilityIdentifier = "search-results-list"
-        list.isHidden = true
         addSubview(list)
         nothingFound.text = Strings.nothingFound
         nothingFound.font = Fonts.ui(.regular, size: 15)
@@ -48,16 +53,13 @@ final class HomeSearchResultsView: UIView {
 
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
-    /// Empty `query`: nothing shows. Otherwise `rows`, or the capsule when
-    /// there are none.
+    /// `rows`; for a typed `query` that nothing answers, the capsule.
     func show(_ rows: [Row], query: String) {
         let typed = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let found = typed && !rows.isEmpty
-        let wasShown = !list.isHidden
-        list.isHidden = !found
-        pill.isHidden = !typed || found
-        list.apply(found ? rows : [])
-        if found, !wasShown || list.rows.map(\.id) != rows.map(\.id) {
+        let previous = list.rows.map(\.id)
+        pill.isHidden = !typed || !rows.isEmpty
+        list.apply(rows)
+        if !rows.isEmpty, previous != rows.map(\.id) {
             list.layoutIfNeeded()
             list.contentOffset.y = -list.contentInset.top
         }
@@ -65,6 +67,7 @@ final class HomeSearchResultsView: UIView {
     }
 
     func clear() {
+        endPull()
         show([], query: "")
     }
 
@@ -82,10 +85,33 @@ final class HomeSearchResultsView: UIView {
         nothingFound.setLayoutFrame(layout.nothingFound.offsetBy(dx: -layout.nothingFoundPill.minX, dy: -layout.nothingFoundPill.minY))
     }
 
-    /// Touches off the results and the capsule reach home.
-    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-        let hit = super.hitTest(point, with: event)
-        return hit === self ? nil : hit
+    /// A pull from the top closes search, so the keyboard goes as it starts.
+    /// Left to follow the finger, the keyboard takes the touch once the
+    /// finger reaches it, and UIKit springs the pulled list back to its top
+    /// under the finger.
+    @objc private func panned(_ gesture: UIPanGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            pulling = list.contentOffset.y <= -list.adjustedContentInset.top + 1 && gesture.velocity(in: self).y > 0
+            if pulling {
+                list.keyboardDismissMode = .none
+                window?.endEditing(true)
+            }
+        case .ended:
+            let distance = gesture.translation(in: self).y
+            let dismiss = pulling && HomeSearchPresentationLayout.shouldDismiss(distance: distance, velocity: gesture.velocity(in: self).y)
+            endPull()
+            if dismiss { onDismiss?() }
+        case .cancelled, .failed:
+            endPull()
+        default:
+            break
+        }
+    }
+
+    private func endPull() {
+        pulling = false
+        list.keyboardDismissMode = .interactive
     }
 }
 #endif

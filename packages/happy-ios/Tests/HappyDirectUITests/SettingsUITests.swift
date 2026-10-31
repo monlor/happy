@@ -177,22 +177,17 @@ final class SettingsUITests: XCTestCase {
 
         // Every row of the computer's page.
         openSettings()
-        let name = element("settings-name")
-        let before = name.label
-        row("edit-name").tap()
-        let field = app.textFields["settings-rename"]
-        XCTAssertTrue(field.waitForExistence(timeout: 3), "Edit name didn't open the field")
-        let renamed = before == "Settings Mac" ? "Settings Studio" : "Settings Mac"
-        field.typeText(renamed + "\n")
+        // The agent is asked to change its own name and picture; nothing
+        // renames in place, the heading included.
         XCTAssertTrue(element("settings-name").waitForExistence(timeout: 3))
-        XCTAssertEqual(element("settings-name").label, renamed, "the name didn't change")
-        // The name itself starts it too.
+        XCTAssertFalse(element("settings:edit-name").exists, "Edit name is still there")
+        XCTAssertFalse(element("settings:change-agent-name").exists, "Change agent name is still a row")
+        XCTAssertFalse(element("settings:status").exists, "Status is still there")
+        XCTAssertTrue(element("settings-agent-menu").exists, "no agent picture on the page")
+        XCTAssertTrue(row("profile").exists, "no Profile row")
         element("settings-name").tap()
-        XCTAssertTrue(field.waitForExistence(timeout: 3), "tapping the name didn't open the field")
-        capture("settings-rename")
-        field.typeText("\n")
-        pause(0.5)
-        XCTAssertTrue(element("settings:status").exists, "no status row")
+        XCTAssertFalse(app.textFields["settings-rename"].waitForExistence(timeout: 1), "tapping the name still renames in place")
+        capture("settings-asks")
 
         let prioritizing = app.switches["settings-toggle:prioritizing"]
         XCTAssertTrue(prioritizing.waitForExistence(timeout: 10), "no Prioritizing switch")
@@ -223,12 +218,11 @@ final class SettingsUITests: XCTestCase {
         capture("settings-row-add-account")
         goBack("Welcome")
 
-        // About is a page.
-        row("about").tap()
-        XCTAssertTrue(row("version").waitForExistence(timeout: 3), "About has no version row")
+        // About's rows live directly in Settings.
+        XCTAssertFalse(element("settings:about").exists)
+        XCTAssertTrue(row("version").waitForExistence(timeout: 3), "Settings has no version row")
         assertPushes("whats-new", "What's new")
         for link in ["github-repo", "report-issue", "privacy", "terms", "eula"] { assertOpensLink(link) }
-        goBack("About")
         XCTAssertTrue(row("disconnect").exists, "no Disconnect")
         scrollToTop()
 

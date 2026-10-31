@@ -30,6 +30,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.slopus.happy.R
 import com.slopus.happy.chat.AgentQuestionOption
@@ -70,7 +71,8 @@ object ConversationQuestionSpec {
 /**
  * The question a run waits on, over the composer. Spec: 8 in from the
  * sides and 8 above the composer, a surfaceHigh card, radius 16, padding
- * 12, at most 360 high and scrolling inside. "Question", "Permission
+ * 12, at most 360 high (less on a short screen, see [ConversationScreen])
+ * and scrolling inside. "Question", "Permission
  * request" or "<server> asks for permission" (13/18 semibold,
  * textSecondary), then the agent's context in Markdown. Prompts that all
  * offer options use the legacy choice form (InlineQuestionForm); a prompt
@@ -78,25 +80,32 @@ object ConversationQuestionSpec {
  * (surface, radius 8, padding 12/10, at least 44 high) and Answer at the
  * end (14 semibold on surfaceHighest, radius 8, padding 20/12, 0.5 until
  * every prompt has text, a spinner while it goes). A question asking for
- * a secret can't be answered here and says where to answer it.
+ * a secret is answered by [SecretRequestForm], which scrolls only its
+ * fields and keeps Cancel and Save below them; where this build can't make
+ * secrets, it says where to answer it.
  */
 @Composable
-fun ConversationQuestionCard(question: Question, onAnswer: suspend (Map<String, List<String>>) -> Unit, modifier: Modifier = Modifier) {
+fun ConversationQuestionCard(
+    question: Question,
+    onAnswer: suspend (Map<String, List<String>>) -> Unit,
+    modifier: Modifier = Modifier,
+    /** How a secret request is made and answered; null where this build cannot. */
+    secrets: SecretRequestActions? = null,
+    /** The card's height cap: [ConversationQuestionSpec.maxHeight], or less where the screen is short. */
+    maxHeight: Dp = ConversationQuestionSpec.maxHeight,
+) {
     val colors = HappyTheme.colors
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .contentMaxWidth(LocalWindowLayout.current)
-            .padding(horizontal = ConversationQuestionSpec.marginHorizontal)
-            .padding(bottom = ConversationQuestionSpec.marginBottom)
-            .testTag(ConversationQuestionTags.CARD)
-            .clip(RoundedCornerShape(ConversationQuestionSpec.radius))
-            .background(colors.surfaceHigh)
-            .heightIn(max = ConversationQuestionSpec.maxHeight)
-            .verticalScroll(rememberScrollState())
-            .padding(ConversationQuestionSpec.padding),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
+    val secret = question.secret
+    val card = modifier
+        .fillMaxWidth()
+        .contentMaxWidth(LocalWindowLayout.current)
+        .padding(horizontal = ConversationQuestionSpec.marginHorizontal)
+        .padding(bottom = ConversationQuestionSpec.marginBottom)
+        .testTag(ConversationQuestionTags.CARD)
+        .clip(RoundedCornerShape(ConversationQuestionSpec.radius))
+        .background(colors.surfaceHigh)
+        .heightIn(max = maxHeight)
+    val header: @Composable () -> Unit = {
         val title = when {
             question.permissionFrom != null -> stringResource(R.string.conversation_permission_from, question.permissionFrom)
             question.isPermission -> stringResource(R.string.conversation_permission)
@@ -104,8 +113,26 @@ fun ConversationQuestionCard(question: Question, onAnswer: suspend (Map<String, 
         }
         Text(title, style = ConversationQuestionSpec.title, color = colors.textSecondary, modifier = Modifier.testTag(ConversationQuestionTags.TITLE))
         question.context?.let { context -> MarkdownView(remember(context) { parseMarkdown(context) }) }
+    }
+    if (secret != null && secrets != null) {
+        // The secret form scrolls its own fields under this header and keeps its buttons below them.
+        Box(card) {
+            SecretRequestForm(secret, secrets, header) { secretId ->
+                // The answer is the secret's id under the prompt that asked, never a value.
+                onAnswer(mapOf((question.prompts.singleOrNull()?.id ?: "secret") to listOf(secretId)))
+            }
+        }
+        return
+    }
+    Column(
+        modifier = card
+            .verticalScroll(rememberScrollState())
+            .padding(ConversationQuestionSpec.padding),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        header()
         when {
-            !question.answerable -> Text(
+            secret != null -> Text(
                 stringResource(R.string.conversation_secret_unavailable),
                 style = ConversationQuestionSpec.field,
                 color = colors.textSecondary,

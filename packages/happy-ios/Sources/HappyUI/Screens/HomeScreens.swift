@@ -59,7 +59,7 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = UIColor(Palette.groupedBackground)
-        showsBackTitle()
+        minimalBackButton()
         switcher = AccountSwitcher(context: context, controller: self)
         let pipeline = ApplyPipeline<HomeDerivation.Input, HomeDerivation.Applied, HomeUpdate>(
             input: HomeDerivation.Input(
@@ -138,10 +138,17 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         rendererChanged()
         // The server may have changed on a screen pushed from here.
         updateNavigation(animated: animated)
+        HomeToolbar.show(for: self, animated: animated)
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        HomeToolbar.leave(self, animated: animated)
     }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        switcher?.layout()
         applyInsets(HomeContentInsets(underBar: LayoutInsets(view.safeAreaInsets), dock: 0))
     }
 
@@ -285,13 +292,24 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
         content?.view.isHidden = blank
         if floating {
             // The account's name is the bar's title; the connection hangs under it.
-            switcher?.subtitle = blank || !HomeConnectionStatus.shows(status) ? nil : Strings.Home.connectionStatus(status)
-            navigationItem.leftBarButtonItem = blank ? nil : switcher?.barItem
-            var items: [HeaderBar.Trailing: UIBarButtonItem] = [.filter: filterItem, .settings: settingsItem]
-            if canCompose, let host = self as UIViewController as? ComposeHosting {
-                items[.compose] = composeItem(host)
+            let headerState: Strings.HeaderStatus.State = switch status {
+            case .connected: .online
+            case .connecting: .connecting
+            case .disconnected, .error: .offline
             }
+            switcher?.subtitle = Strings.HeaderStatus.text(headerState)
+            // Beside the sidebar home draws nothing, but the bar is over
+            // the sidebar too: the switcher stays, or a tablet has no way
+            // to the accounts at all.
+            navigationItem.leftBarButtonItem = switcher?.barItem
+            let items: [HeaderBar.Trailing: UIBarButtonItem] = [.filter: filterItem, .settings: settingsItem]
+            if canCompose, let host = self as UIViewController as? ComposeHosting {
+                let compose = composeItem(host)
+                compose.sharesBackground = false
+                toolbarItems = [.flexibleSpace(), compose]
+            } else { toolbarItems = nil }
             navigationItem.rightBarButtonItems = blank ? nil : HeaderBar.trailing(items)
+            if navigationController?.topViewController === self { HomeToolbar.show(for: self, animated: animated) }
         }
         view.setNeedsLayout()
     }
@@ -332,7 +350,8 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     }
 
     /// The connection, under "Sessions" while it isn't connected.
-    private var status: RealtimeStatus = HomeConnectionStatus.initial {
+    /// Not private, so a test can flip it.
+    var status: RealtimeStatus = HomeConnectionStatus.initial {
         didSet { if status != oldValue { updateNavigation(animated: false) } }
     }
 
@@ -345,6 +364,9 @@ public final class LegacyHomeViewController: UIViewController, ComposeHosting {
     private lazy var filterItem: UIBarButtonItem = {
         let item = UIBarButtonItem(image: .icon(.ionicons("filter"), size: 22), menu: filterMenu())
         item.accessibilityLabel = Strings.Home.filterTitle
+        // As `HeaderBar`'s own items are named, so a test finds it without
+        // depending on the label's language.
+        item.accessibilityIdentifier = "filter"
         item.preferredMenuElementOrder = .fixed
         return item
     }()
@@ -407,8 +429,8 @@ final class TroubleshootViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = Strings.Troubleshoot.title
-        guide.onOpenWebsite = {
-            UIApplication.shared.open(Strings.Onboarding.desktopURL)
+        guide.onOpenWebsite = { [weak self] in
+            self?.openBrowser(Strings.Onboarding.desktopURL)
         }
         prompt.button.onTap = { [weak self] in self?.copyPrompt() }
     }

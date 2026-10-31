@@ -1,7 +1,5 @@
 package com.slopus.happy.ui.home
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
 import com.slopus.happy.model.WorktreeToggle
 import com.slopus.happy.model.ProjectHomeRow
@@ -13,7 +11,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -25,6 +22,7 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isHeading
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
@@ -77,7 +75,7 @@ import java.time.ZoneOffset
  * The phone home screen against happy-app's layout:
  * - The header (AGENTS.md, design decisions): the account menu on the left;
  *   settings, then compose 16 from the edge, 44 squares; no title, only the
- *   status line (11/16, 6 dot) centred while the socket isn't connected.
+ *   status line (11/16, 6 dot) always centred.
  * - FlatSessionRow: 60 avatar at 16, 10 above and below; 12 to the text;
  *   title 17/22, project 15/20, workspace line 1 below at 18 minimum, so a
  *   row is 81; the top-right slot is at least 56 and ends 16 from the edge;
@@ -116,12 +114,14 @@ class HomeLayoutTest {
     )
     private var newSession = 0
     private var whatsNew = 0
+    private var linkComputer = 0
     private val actions = HomeScreenActions(
         onSettings = {},
         onNewSession = { newSession++ },
         onTroubleshoot = {},
         onOpenUrl = {},
         onWhatsNew = { whatsNew++ },
+        onLinkComputer = { linkComputer++ },
     )
 
     private fun cli(id: String, at: Long = noon, active: Boolean = true) = session(
@@ -159,7 +159,8 @@ class HomeLayoutTest {
         val compose = rule.node(HomeTags.COMPOSE).bounds
         assertBox("compose", compose, (PHONE_WIDTH - 16 - 44).dp, 10.dp, 44.dp, 44.dp)
         assertBox("settings", rule.node(HomeTags.SETTINGS).bounds, compose.left - 44.dp, 10.dp, 44.dp, 44.dp)
-        rule.onAllNodesWithTag(HomeTags.STATUS, useUnmergedTree = true).assertCountEquals(0)
+        rule.onAllNodesWithTag(HomeTags.STATUS, useUnmergedTree = true).assertCountEquals(1)
+        rule.onNodeWithText("online", useUnmergedTree = true).assertExists()
     }
 
     @Test
@@ -168,6 +169,36 @@ class HomeLayoutTest {
         val status = rule.node(HomeTags.STATUS).bounds
         assertDp("status centred in the bar", 32, (status.top + status.bottom) / 2)
         assertDp("status centred", (PHONE_WIDTH / 2f).dp, (status.left + status.right) / 2)
+    }
+
+    @Test
+    fun relayStatusAlwaysShowsWhileTheConnectionAndCatchUpChange() {
+        val home = state(listOf(cli("a")))
+        var connection by mutableStateOf(ConnectionStatus.CONNECTED)
+        var syncing by mutableStateOf(false)
+        rule.setHappyContent {
+            HomeScreen(home, connection, home.grouping, callbacks, actions, syncing = syncing)
+        }
+        val first = rule.onAllNodesWithTag(FlatRowTags.ROW, useUnmergedTree = true)[0].bounds
+        for ((status, catchingUp) in listOf(
+            ConnectionStatus.CONNECTING to false, ConnectionStatus.CONNECTED to true,
+            ConnectionStatus.CONNECTED to false, ConnectionStatus.DISCONNECTED to false,
+            ConnectionStatus.ERROR to false, ConnectionStatus.CONNECTING to true,
+            ConnectionStatus.CONNECTED to true, ConnectionStatus.CONNECTED to false,
+        )) {
+            connection = status
+            syncing = catchingUp
+            rule.waitForIdle()
+            val line = rule.node(HomeTags.STATUS).bounds
+            assertDp("status remains centred vertically", 32, (line.top + line.bottom) / 2)
+            assertEquals(first, rule.onAllNodesWithTag(FlatRowTags.ROW, useUnmergedTree = true)[0].bounds)
+            val label = when (status) {
+                ConnectionStatus.CONNECTED -> if (catchingUp) "syncing" else "online"
+                ConnectionStatus.CONNECTING -> "connecting"
+                else -> "offline"
+            }
+            rule.onNodeWithText(label, useUnmergedTree = true).assertExists()
+        }
     }
 
     @Test
@@ -264,7 +295,6 @@ class HomeLayoutTest {
         rule.setHappyContent {
             HomeScreen(
                 current, ConnectionStatus.CONNECTED, SessionListGrouping.Flat, callbacks, actions,
-                linkContent = { Box(Modifier.fillMaxSize()) },
                 offlineContent = { computers, _ -> offlineComputers = computers },
             )
         }
@@ -281,14 +311,24 @@ class HomeLayoutTest {
         rule.waitForIdle()
         assertEquals(listOf("Studio"), offlineComputers)
 
-        // No computer at all: the first-run link page replaces the whole screen, header included.
+        // No computer and nothing to list: the link state is home's empty state, under home's own
+        // header. The account menu, Settings and New chat stay reachable; Scan QR code starts the scan.
         current = state(emptyList(), machines = emptyList())
         rule.waitForIdle()
+        assertEquals(HomeEmptyState.Link, current!!.emptyState)
         rule.node(HomeTags.LINK).assertExists()
-        rule.onAllNodesWithTag(AccountMenuTags.BUTTON, useUnmergedTree = true).assertCountEquals(0)
-        val link = rule.node(HomeTags.LINK).bounds
-        assertDp("link page from the top", 0, link.top)
-        assertDp("link page full width", PHONE_WIDTH, link.right - link.left)
+        rule.node(AccountMenuTags.BUTTON).assertExists()
+        rule.node(HomeTags.SETTINGS).assertExists()
+        rule.node(HomeTags.COMPOSE).assertExists()
+        assertTrue("link state under the header", rule.node(HomeTags.LINK).bounds.top >= rule.node(HomeTags.SETTINGS).bounds.bottom)
+        rule.onNodeWithText("Scan QR code").performClick()
+        assertEquals(1, linkComputer)
+
+        // Sessions cached with no computer linked still list; the link state is only for an empty home.
+        current = state(listOf(cli("a")), machines = emptyList())
+        rule.waitForIdle()
+        rule.node(FlatRowTags.ROW).assertExists()
+        rule.onAllNodesWithTag(HomeTags.LINK, useUnmergedTree = true).assertCountEquals(0)
     }
 
     /**

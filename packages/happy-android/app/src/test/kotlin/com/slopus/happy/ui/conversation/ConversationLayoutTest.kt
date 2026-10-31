@@ -1,8 +1,12 @@
 package com.slopus.happy.ui.conversation
 
 import android.graphics.Bitmap
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -14,6 +18,9 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.slopus.happy.conversation.Activity
 import com.slopus.happy.conversation.AgentInfo
+import com.slopus.happy.conversation.Artifact
+import com.slopus.happy.conversation.ArtifactFile
+import com.slopus.happy.conversation.ArtifactView
 import com.slopus.happy.conversation.Block
 import com.slopus.happy.conversation.ConversationRow
 import com.slopus.happy.conversation.ConversationRowBuilder
@@ -21,6 +28,7 @@ import com.slopus.happy.conversation.ComposerFocus
 import com.slopus.happy.conversation.ConversationState
 import com.slopus.happy.conversation.Delivery
 import com.slopus.happy.conversation.MediaItem
+import com.slopus.happy.conversation.MediaRef
 import com.slopus.happy.conversation.Message
 import com.slopus.happy.conversation.Mode
 import com.slopus.happy.conversation.ModeCatalog
@@ -31,15 +39,22 @@ import com.slopus.happy.chat.markdown.parseMarkdown
 import com.slopus.happy.ui.PHONE
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.chat.MessageCallbacks
 import com.slopus.happy.ui.chat.PrimaryAction
+import com.slopus.happy.ui.chat.userMessageBubblePalette
 import com.slopus.happy.ui.node
+import com.slopus.happy.ui.layout.ProvideWindowLayout
 import com.slopus.happy.ui.setHappyContent
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.height
 import androidx.compose.ui.unit.width
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import androidx.compose.ui.test.onAllNodesWithTag
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -85,12 +100,37 @@ class ConversationLayoutTest {
         rule.setHappyContent(dark) { ConversationScreen(state, connection, actions) }
     }
 
-    @Test fun `a new chat is empty with New chat and only compose in the header`() {
+    @Test
+    @Config(qualifiers = "w900dp-h731dp-xhdpi")
+    fun `at 900 the composer is held to the messages' 800 column and the bar is not`() {
+        val state = ConversationState(created = true, loaded = true, rows = history, agent = agent, mode = mode)
+        rule.setHappyContent { ProvideWindowLayout { ConversationScreen(state, null, ConversationScreenActions()) } }
+        val composer = rule.node(ConversationComposerTags.COMPOSER).bounds
+        assertDp("composer width", 800, composer.width)
+        assertDp("composer centred", 50, composer.left)
+        assertDp("bar full width", 900, rule.node(ConversationScreenTags.BAR).bounds.width)
+    }
+
+    @Test fun `an opened chat has home's name from its first frame, and is never called New chat`() {
+        // The first frame: nothing read yet, the name home showed on the row.
+        show(ConversationState(created = true, loaded = false, knownTitle = "Chief of Staff"))
+        rule.node(ConversationScreenTags.TITLE).assertTextEquals("Chief of Staff")
+        rule.onNodeWithText("New chat").assertDoesNotExist()
+    }
+
+    @Test fun `an opened chat home has no name for is blank until read, not New chat`() {
+        show(ConversationState(created = true, loaded = false))
+        rule.node(ConversationScreenTags.TITLE).assertTextEquals("")
+        rule.onNodeWithText("New chat").assertDoesNotExist()
+    }
+
+    @Test fun `a new chat is empty with compose and overflow in the header`() {
         show(ConversationState(created = false, loaded = true))
         rule.node(ConversationScreenTags.TITLE).assertIsDisplayed()
         rule.onNodeWithText("New chat").assertIsDisplayed()
         rule.node(ConversationScreenTags.EMPTY).assertIsDisplayed()
         rule.node(ConversationScreenTags.COMPOSE).assertIsDisplayed()
+        rule.node(ConversationScreenTags.MORE).assertIsDisplayed()
         rule.node(ConversationScreenTags.DETAILS).assertDoesNotExist()
         // The composer runs edge to edge, 8 in, above the navigation bar.
         val composer = rule.node(ConversationComposerTags.COMPOSER).bounds
@@ -104,7 +144,8 @@ class ConversationLayoutTest {
         rule.onNodeWithText("Fix the login redirect").assertIsDisplayed()
         rule.node(ConversationScreenTags.SUBTITLE).assertIsDisplayed()
         rule.onNodeWithText("Offline").assertIsDisplayed()
-        rule.node(ConversationScreenTags.DETAILS).assertIsDisplayed()
+        rule.node(ConversationScreenTags.DETAILS).assertDoesNotExist()
+        rule.node(ConversationScreenTags.MORE).assertIsDisplayed()
         rule.node(ConversationRowTags.FAILURE).assertIsDisplayed()
         // The header is the standard 64 bar.
         assertDp("header", 64, rule.node(ConversationScreenTags.BAR).bounds.height)
@@ -148,7 +189,8 @@ class ConversationLayoutTest {
         rule.setHappyContent { ConversationScreen(state, null, ConversationScreenActions()) }
         val bar = rule.node(ConversationScreenTags.BAR).bounds
         val list = rule.node(ConversationScreenTags.LIST).bounds
-        rule.node(ConversationScreenTags.SUBTITLE).assertDoesNotExist()
+        rule.node(ConversationScreenTags.SUBTITLE).assertExists()
+        rule.onNodeWithText("online").assertIsDisplayed()
         state = state.copy(working = true, activity = Activity.WaitingForModel)
         rule.waitForIdle()
         // Neither the bar nor the transcript gives up any room for it.
@@ -158,6 +200,47 @@ class ConversationLayoutTest {
         rule.onNodeWithText("Waiting for the model…").assertIsDisplayed()
         rule.node(ConversationScreenTags.SUBTITLE).assertIsDisplayed()
         shot("working-line")
+    }
+
+    @Test fun `the link and the work coming and going move neither the title nor the transcript`() {
+        var state by mutableStateOf(ConversationState(created = true, loaded = true, rows = history, agent = agent))
+        var connection by mutableStateOf<String?>(null)
+        rule.setHappyContent { ConversationScreen(state, connection, ConversationScreenActions()) }
+        val bar = rule.node(ConversationScreenTags.BAR).bounds
+        val title = rule.node(ConversationScreenTags.TITLE).bounds
+        val list = rule.node(ConversationScreenTags.LIST).bounds
+        val idle = state
+        val flips = listOf<Triple<String?, Activity?, Boolean>>(
+            Triple("connecting", null, false), Triple(null, null, false),
+            Triple("offline", Activity.Thinking, false), Triple(null, Activity.Thinking, true),
+            Triple(null, Activity.Thinking, false), Triple(null, Activity.AwaitingAnswer, false),
+            Triple("connecting", Activity.AwaitingAnswer, false), Triple(null, null, false),
+        )
+        for ((link, activity, syncing) in flips) {
+            val at = "${link ?: "live"}, ${activity ?: "idle"}"
+            rule.mainClock.autoAdvance = false
+            connection = link
+            state = idle.copy(working = activity != null, activity = activity, syncing = syncing)
+            Snapshot.sendApplyNotifications()
+            rule.mainClock.advanceTimeByFrame()
+            rule.mainClock.advanceTimeBy(64)
+            assertTrue("the line is on its way, $at", rule.onAllNodesWithTag(ConversationScreenTags.SUBTITLE, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
+            assertEquals("bar, fading to $at", bar, rule.node(ConversationScreenTags.BAR).bounds)
+            assertEquals("title, fading to $at", title, rule.node(ConversationScreenTags.TITLE).bounds)
+            rule.mainClock.autoAdvance = true
+            rule.waitForIdle()
+            assertEquals("bar, $at", bar, rule.node(ConversationScreenTags.BAR).bounds)
+            assertEquals("title, $at", title, rule.node(ConversationScreenTags.TITLE).bounds)
+            assertEquals("transcript, $at", list, rule.node(ConversationScreenTags.LIST).bounds)
+            rule.node(ConversationScreenTags.SUBTITLE).assertExists()
+            val label = link ?: when {
+                syncing -> "syncing"
+                activity == Activity.Thinking -> "Thinking…"
+                activity == Activity.AwaitingAnswer -> "Waiting for your answer"
+                else -> "online"
+            }
+            rule.onNodeWithText(label, useUnmergedTree = true).assertExists()
+        }
     }
 
     @Test fun `a sent message stays in view, and reading older history is left alone`() {
@@ -197,7 +280,7 @@ class ConversationLayoutTest {
     @Test fun `a question shows over the composer and answers`() {
         val question = Question(
             "q1", "pending", "The billing service needs storage.",
-            listOf(Question.Prompt("p1", "Database", "Which database should it use?", false, listOf(Question.Option("PostgreSQL", "Matches the stack."), Question.Option("SQLite", null)), false)),
+            listOf(Question.Prompt("p1", "Database", "Which database should it use?", false, listOf(Question.Option("PostgreSQL", "Matches the stack."), Question.Option("SQLite", null)), null)),
             null, false,
         )
         show(ConversationState(created = true, loaded = true, rows = history, agent = agent, question = question, activity = Activity.AwaitingAnswer))
@@ -263,10 +346,12 @@ class ConversationLayoutTest {
             ConversationState(created = true, loaded = true, rows = history, agent = agent, mode = mode, catalog = catalog),
             actions = ConversationScreenActions(onModeChange = { picks += it }),
         )
-        rule.onNodeWithText("Opus 5 1M").assertIsDisplayed()
-        rule.onNodeWithText("High").assertIsDisplayed()
-        rule.onNodeWithText("Auto").assertIsDisplayed()
-        rule.node(ConversationComposerTags.ATTACH).assertIsDisplayed()
+        // ChatGPT's Work composer: at rest no label; in use, model and effort as one label beside send.
+        rule.node(ConversationModeTags.MODEL).assertDoesNotExist()
+        rule.node(ConversationComposerTags.INPUT).performSemanticsAction(SemanticsActions.RequestFocus)
+        rule.waitForIdle()
+        rule.onNodeWithText("Opus 5 1M", substring = true).assertIsDisplayed()
+        rule.onNodeWithText("High", substring = true).assertIsDisplayed()
         shot("modes")
         rule.node(ConversationModeTags.MODEL).performClick()
         rule.waitForIdle()
@@ -274,14 +359,21 @@ class ConversationLayoutTest {
         rule.onNodeWithText("GPT-5.6 Sol").performClick()
         rule.waitForIdle()
         assertEquals(listOf(Mode("codex", "openai/gpt-5.6-sol", "high", null, "auto")), picks)
+        // [+] is exclusively attachments; permissions live in the header overflow.
+        rule.node(ConversationComposerTags.MORE).performClick()
+        rule.waitForIdle()
+        rule.node(ConversationModeTags.PERMISSION).assertDoesNotExist()
+        rule.node(ConversationComposerTags.ATTACH).assertIsDisplayed()
     }
 
-    @Test fun `the permission sheet lists the four modes`() {
+    @Test fun `the header permission picker lists the four modes`() {
         val picks = ArrayList<Mode>()
         show(
             ConversationState(created = true, loaded = true, rows = history, agent = agent, mode = mode, catalog = ModeCatalog(emptyList(), mode)),
             actions = ConversationScreenActions(onModeChange = { picks += it }),
         )
+        rule.node(ConversationScreenTags.MORE).performClick()
+        rule.waitForIdle()
         rule.node(ConversationModeTags.PERMISSION).performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Workspace write").assertIsDisplayed()
@@ -311,6 +403,125 @@ class ConversationLayoutTest {
         )
         rule.onNodeWithText(prefix + "\n\nkeep me").assertIsDisplayed()
         shot("prefilled")
+    }
+
+    @Test fun `a video is opened by tapping it, and says so when nothing reads it`() {
+        val ref = MediaRef("c3", 1, MediaItem("video", "repro.mp4", "video/mp4"))
+        val opened = ArrayList<String>()
+        fun card(opening: MediaOpening?) = @Composable {
+            ConversationRowView(
+                ConversationRow.Media("m:0", listOf(ref)),
+                userMessageBubblePalette(null, false),
+                ConversationRowActions(
+                    legacy = MessageCallbacks(),
+                    onRetryFailure = {},
+                    loadMedia = { ByteArray(0) },
+                    onOpenMedia = { opened += it.key },
+                    mediaOpening = { opening },
+                ),
+            )
+        }
+        rule.setHappyContent(content = card(null))
+        // No longer a desktop-only card: it is the thing you tap.
+        rule.onNodeWithText("Videos play in Happy Agent on your computer.").assertDoesNotExist()
+        rule.node(ConversationRowTags.MEDIA_FILE).performClick()
+        assertEquals(listOf("c3/1"), opened)
+    }
+
+    @Test fun `a video nothing can read says so on its card`() {
+        val ref = MediaRef("c3", 1, MediaItem("video", "repro.mp4", "video/mp4"))
+        rule.setHappyContent {
+            ConversationRowView(
+                ConversationRow.Media("m:0", listOf(ref)),
+                userMessageBubblePalette(null, false),
+                ConversationRowActions(
+                    legacy = MessageCallbacks(),
+                    onRetryFailure = {},
+                    loadMedia = { ByteArray(0) },
+                    onOpenMedia = {},
+                    mediaOpening = { MediaOpening.Failed("Nothing on this phone opens this kind of file.") },
+                ),
+            )
+        }
+        rule.onNodeWithText("Nothing on this phone opens this kind of file.").assertIsDisplayed()
+        shot("media-no-app")
+    }
+
+    @Test fun `a picture in the transcript opens full screen and closes`() {
+        val png = java.io.ByteArrayOutputStream()
+            .also { Bitmap.createBitmap(40, 30, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.GREEN) }.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            .toByteArray()
+        val data = android.util.Base64.encodeToString(png, android.util.Base64.NO_WRAP)
+        show(ConversationState(created = true, loaded = true, rows = rows(Message("p1", "user", 1, listOf(Block.Image("image/png", data)))), agent = agent))
+        rule.node(ConversationRowTags.PICTURE).performClick()
+        rule.waitForIdle()
+        rule.node(PictureViewerTags.IMAGE).assertIsDisplayed()
+        shot("picture-viewer")
+        rule.node(PictureViewerTags.CLOSE).performClick()
+        rule.waitForIdle()
+        rule.node(PictureViewerTags.VIEWER).assertDoesNotExist()
+    }
+
+    @Test fun `an artifact's words are read here`() {
+        val words = Artifact("r7", "markdown", "Release notes", 2, "index.md", listOf(ArtifactFile("index.md", "text/markdown", 12)), false, false)
+        rule.setHappyContent {
+            ArtifactScreen(ArtifactContent.Ready(words, ArtifactView.Words("# Ready\n\nIt all passed."), emptyMap()), {}, {}, { _, _, _ -> }, {})
+        }
+        rule.onNodeWithText("Release notes").assertIsDisplayed()
+        rule.onNodeWithText("It all passed.").assertIsDisplayed()
+        shot("artifact-words")
+    }
+
+    @Test fun `an artifact kind this build doesn't draw says where it opens`() {
+        val page = Artifact("r8", "html", "Dashboard", 1, "index.html", listOf(ArtifactFile("index.html", "text/html", 40)), false, false)
+        rule.setHappyContent { ArtifactScreen(ArtifactContent.Ready(page, ArtifactView.NotHere("html"), emptyMap()), {}, {}, { _, _, _ -> }, {}) }
+        rule.node(ArtifactTags.NOT_HERE).assertIsDisplayed()
+        rule.onNodeWithText("Happy Agent on your computer", substring = true).assertIsDisplayed()
+        shot("artifact-not-here")
+    }
+
+    @Test fun `an artifact that couldn't be read says why, with Retry`() {
+        var retries = 0
+        rule.setHappyContent { ArtifactScreen(ArtifactContent.Failed("Could not reach the agent."), {}, { retries++ }, { _, _, _ -> }, {}) }
+        rule.onNodeWithText("Could not reach the agent.").assertIsDisplayed()
+        rule.onNodeWithText("Retry").performClick()
+        assertEquals(1, retries)
+        shot("artifact-failed")
+    }
+
+    /** A question long enough to fill any cap, over a chat with history. */
+    private fun tallQuestion() {
+        val question = Question(
+            "q2", "pending", (1..12).joinToString("\n\n") { "Step $it of the migration touches another table." },
+            listOf(Question.Prompt("p1", "Plan", "Which order should the tables move in?", false, emptyList(), null)),
+            null, false,
+        )
+        show(ConversationState(created = true, loaded = true, rows = history, agent = agent, question = question, activity = Activity.AwaitingAnswer))
+    }
+
+    /** The card at most half the screen and 360, with the bar above it and the composer below it, whole. */
+    private fun assertQuestionLeavesRoom(screenHeight: Int, name: String) {
+        val screen = rule.onRoot().bounds
+        val card = rule.node(ConversationQuestionTags.CARD).assertIsDisplayed().bounds
+        val bar = rule.node(ConversationScreenTags.BAR).assertIsDisplayed().bounds
+        val composer = rule.node(ConversationComposerTags.COMPOSER).assertIsDisplayed().bounds
+        // The cap is on the card itself: what the tag reports is the card.
+        assertDp("card height", minOf(360.dp, screenHeight.dp / 2), card.height)
+        assertEquals("bar on screen", true, bar.top >= screen.top && bar.bottom <= card.top)
+        assertEquals("composer on screen", true, composer.top >= card.bottom && composer.bottom <= screen.bottom)
+        shot(name)
+    }
+
+    @Config(qualifiers = "w411dp-h731dp-xxhdpi")
+    @Test fun `on a 731dp phone a long question stays at 360 over the composer`() {
+        tallQuestion()
+        assertQuestionLeavesRoom(731, "question-cap-731")
+    }
+
+    @Config(qualifiers = "w731dp-h411dp-xxhdpi")
+    @Test fun `on a 411dp-tall screen a long question takes half and keeps the composer`() {
+        tallQuestion()
+        assertQuestionLeavesRoom(411, "question-cap-411")
     }
 
     @Test fun `details list the agent and its mode`() {

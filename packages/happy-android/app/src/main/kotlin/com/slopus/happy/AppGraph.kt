@@ -254,6 +254,7 @@ class AppGraph(
             keychainService = AgentConnections.KEYCHAIN_SERVICE,
         ),
         registry = context.getSharedPreferences(AgentConnections.REGISTRY_PREFS, Context.MODE_PRIVATE),
+        pictures = File(context.filesDir, "agent-avatars"),
     )
 
     /**
@@ -301,6 +302,12 @@ class AppGraph(
     val connectionStatus: StateFlow<ConnectionStatus> = accountState
         .flatMapLatest { it?.connectionStatus ?: flowOf(ConnectionStatus.DISCONNECTED) }
         .stateIn(scope, SharingStarted.Eagerly, ConnectionStatus.DISCONNECTED)
+
+    /** The open relay account is catching up its stored state. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val isSyncing: StateFlow<Boolean> = accountState
+        .flatMapLatest { it?.isSyncing ?: flowOf(false) }
+        .stateIn(scope, SharingStarted.Eagerly, false)
 
     init {
         scope.launch {

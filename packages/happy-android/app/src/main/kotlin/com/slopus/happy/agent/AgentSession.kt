@@ -39,6 +39,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /** How an agent connection's live link stands, as its home and chats show it. */
@@ -66,6 +67,7 @@ class AgentSession internal constructor(
 ) {
     private val scope = CoroutineScope(parent.coroutineContext + SupervisorJob(parent.coroutineContext[Job]) + Dispatchers.IO)
     private val linkLock = Mutex()
+    private val snapshotQueued = AtomicBoolean(false)
     private var link: AgentClient.Link? = null
     private val token = MutableStateFlow<String?>(null)
 
@@ -87,6 +89,11 @@ class AgentSession internal constructor(
     private val statusState = MutableStateFlow(AgentLinkStatus.Connecting)
     val status: StateFlow<AgentLinkStatus> = statusState.asStateFlow()
 
+    private val reads = MutableStateFlow(0)
+    /** Bootstrap or a resource whose event version chain broke is being caught up. */
+    val isSyncing: StateFlow<Boolean> = reads.map { it > 0 }
+        .stateIn(scope, SharingStarted.Eagerly, false)
+
     private val eventFlow = MutableSharedFlow<AgentEvent>(extraBufferCapacity = 1024)
 
     /**
@@ -105,6 +112,9 @@ class AgentSession internal constructor(
         .distinctUntilChanged { a, b -> a === b }
         .flowOn(Dispatchers.Default)
         .stateIn(scope, SharingStarted.Eagerly, AgentFeed.derive(catalogState.value))
+
+    /** Bots' pictures, as home's rows draw them. */
+    val pictures = AgentPictures(connectionId) { path -> client.send("GET", path).body }
 
     /** One conversation as the catalog knows it, live; null while unknown. */
     fun agent(agentId: String): Flow<WireAgent?> = catalogState
@@ -189,15 +199,20 @@ class AgentSession internal constructor(
             client.reset() // reads the credentials and makes the link
             linkLock.withLock { link }
         } ?: throw AgentConnectionException(AgentConnectionException.Reason.Revoked)
-        val info = AgentIdentity.refresh(link.transport, link.token, known?.name.orEmpty())
-        if (known != null && (known.name != info.name || (info.thumbhash != null && known.thumbhash != info.thumbhash) || known.revoked)) {
-            connections.update(connectionId) { it.copy(name = info.name, thumbhash = info.thumbhash ?: it.thumbhash, revoked = false) }
+        val info = AgentIdentity.refresh(link.transport, link.token, known?.name.orEmpty(), known?.avatarFile?.let { known.avatarETag })
+        if (known != null) {
+            connections.update(connectionId, info.avatar) { it.copy(name = info.name, thumbhash = info.thumbhash ?: it.thumbhash, revoked = false) }
         }
     }
 
     private suspend fun readSnapshot() {
-        val bootstrap = client.decode<WireDesktopBootstrap>("GET", "/v0/bootstrap/desktop")
-        catalogLock.withLock { catalogState.update { it.withBootstrap(bootstrap) } }
+        reads.update { it + 1 }
+        try {
+            val bootstrap = client.decode<WireDesktopBootstrap>("GET", "/v0/bootstrap/desktop")
+            catalogLock.withLock { catalogState.update { it.withBootstrap(bootstrap) } }
+        } finally {
+            reads.update { it - 1 }
+        }
     }
 
     /** The journal from the catalog's cursor until the stream ends or fails. */
@@ -234,8 +249,26 @@ class AgentSession internal constructor(
         for (resource in stale) scope.launch { reread(resource) }
     }
 
-    /** Reads again one resource whose version chain broke. */
+    /** Reads again one resource whose version chain broke, or the snapshot (once for a burst of Surface events). */
     private suspend fun reread(stale: AgentCatalog.Stale) {
+        if (stale.kind == AgentCatalog.Stale.SNAPSHOT) {
+            if (!snapshotQueued.compareAndSet(false, true)) return
+            try {
+                delay(SNAPSHOT_COALESCE)
+            } finally {
+                // Events from here on queue the next read.
+                snapshotQueued.set(false)
+            }
+            try {
+                readSnapshot()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // The next snapshot (a reconnect after a gap) catches it up.
+            }
+            return
+        }
+        reads.update { it + 1 }
         val (path, key) = when (stale.kind) {
             "project" -> "/v0/projects/${AgentClient.escape(stale.id)}" to "project"
             "workspace" -> "/v0/workspaces/${AgentClient.escape(stale.id)}" to "workspace"
@@ -255,6 +288,8 @@ class AgentSession internal constructor(
             throw e
         } catch (_: Exception) {
             // The next snapshot (a reconnect after a gap) catches it up.
+        } finally {
+            reads.update { it - 1 }
         }
     }
 
@@ -277,6 +312,8 @@ class AgentSession internal constructor(
     }
 
     private companion object {
+        /** Surface events that come together read the snapshot once. */
+        const val SNAPSHOT_COALESCE = 300L
         const val INITIAL_BACKOFF = 1_000L
         const val MAX_BACKOFF = 5_000L
         const val JITTER = 0.5

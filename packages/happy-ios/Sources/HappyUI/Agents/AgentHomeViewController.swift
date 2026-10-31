@@ -7,8 +7,8 @@ import UIKit
 /// list running under it with iOS 26's soft scroll edge as the bar's shade.
 /// At the left, alone, the account switcher (`AccountSwitcher`): the active
 /// account's picture and name, with the connection under it while it isn't
-/// live. At the right, `HeaderBar.Trailing`'s order: search, compose,
-/// settings. Search is the bar's own field (`BarSearch`); what it finds
+/// live. Settings stays at the right. Search and compose are in UIKit's
+/// bottom toolbar; what search finds
 /// shows over home, which stays where it was.
 final class AgentHomeViewController: UIViewController, ComposeHosting {
     private let context: AppContext
@@ -17,7 +17,10 @@ final class AgentHomeViewController: UIViewController, ComposeHosting {
     private(set) lazy var search = BarSearch(host: self, placeholder: Strings.search, fieldIdentifier: "search-field")
     private var observation: AccountsObservation?
     private var switcher: AccountSwitcher?
-    private var live = true
+    private var headerWatch: Watch?
+    var headerState: Strings.HeaderStatus.State = .connecting {
+        didSet { updateTitle() }
+    }
 
     init(context: AppContext, id: String) {
         self.context = context
@@ -38,6 +41,10 @@ final class AgentHomeViewController: UIViewController, ComposeHosting {
         view.addSubview(v2.view)
         v2.didMove(toParent: self)
         navigationItem.largeTitleDisplayMode = .never
+        search.install()
+        let compose = HeaderBar.composeItem { [weak self] in self?.compose() }
+        compose.sharesBackground = false
+        toolbarItems = [navigationItem.searchBarPlacementBarButtonItem, .flexibleSpace(), compose]
         HeaderBar.edge(v2.list, in: self)
         search.onBegin = { [weak self] in self?.v2.beginSearch() }
         search.onChange = { [weak self] query in
@@ -48,37 +55,37 @@ final class AgentHomeViewController: UIViewController, ComposeHosting {
             self?.v2.endSearch()
             self?.updateEdge()
         }
-        search.onActiveChanged = { [weak self] in self?.updateBar() }
         v2.onSearchEnded = { [weak self] in self?.search.end() }
-        v2.onSnapshot = { [weak self] snapshot in
-            guard let self, snapshot.live != live else { return }
-            live = snapshot.live
-            updateTitle()
-        }
         switcher = AccountSwitcher(context: context, controller: self)
+        headerWatch = Session.session(for: id, context: context)?.watchHeader { [weak self] in self?.headerState = $0 }
         observation = context.account.observeAccounts { [weak self] _ in self?.updateTitle() }
         updateTitle()
         updateBar()
     }
 
-    /// The connection, under the account's name until it is live.
+    /// The connection, always under the account's name.
     private func updateTitle() {
-        switcher?.subtitle = live ? nil : Strings.Home.connectionStatus(.connecting)
+        switcher?.subtitle = Strings.HeaderStatus.text(headerState)
     }
 
-    /// The switcher at the left and the actions at the right, or the search
-    /// field while it is open.
+    /// Account and settings stay in the header while search lives below:
+    /// the header never changes for it.
     private func updateBar() {
-        guard !search.applies(to: navigationItem), let switcher else { return }
+        guard let switcher else { return }
         navigationItem.leftBarButtonItem = switcher.barItem
-        var items: [HeaderBar.Trailing: UIBarButtonItem] = [
-            .search: HeaderBar.searchItem { [weak self] in self?.search.begin() },
+        navigationItem.rightBarButtonItems = HeaderBar.trailing([
             .settings: HeaderBar.settingsItem { [weak self] in self?.openSettings() },
-        ]
-        if let host = self as UIViewController as? ComposeHosting {
-            items[.compose] = HeaderBar.composeItem { [weak host] in host?.compose() }
-        }
-        navigationItem.rightBarButtonItems = HeaderBar.trailing(items)
+        ])
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        HomeToolbar.show(for: self, animated: animated)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        HomeToolbar.leave(self, animated: animated)
     }
 
     /// The bar shades whichever list is under it: the results while they
@@ -89,7 +96,14 @@ final class AgentHomeViewController: UIViewController, ComposeHosting {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        v2.contentInsets = HomeContentInsets(underBar: LayoutInsets(view.safeAreaInsets), dock: 0)
+        switcher?.layout()
+        let field = search.bar.searchTextField
+        let control = field.window == view.window && field.bounds.height > 0 ? field.convert(field.bounds, to: view) : nil
+        let bottom = HomeBottomBarLayout(height: view.bounds.height, safeBottom: view.safeAreaInsets.bottom, control: control).bottomInset
+        var insets = HomeContentInsets(underBar: LayoutInsets(view.safeAreaInsets), dock: 0)
+        insets.listBottom = bottom
+        if !search.isActive { v2.contentInsets = insets }
+        v2.searchContentInsets = insets
     }
 
     /// The bar's compose: new work, over home.

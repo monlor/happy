@@ -72,13 +72,13 @@ class AgentHomeTabletTest {
             assertDp("$key is centred", inset, row.left)
         }
         // The rows still keep their kind's exact height out here.
-        assertDp("conversation height", 60, rule.node(AgentHomeTags.row("agent-ab1")).bounds.height)
+        assertDp("conversation height", 48, rule.node(AgentHomeTags.row("agent-ab1")).bounds.height)
 
-        // The account menu and the actions sit inside the capped bar, not out at the glass.
+        // The account menu sits inside the capped bar, and compose floats at its end, not out at the glass.
         val menu = rule.node(AccountMenuTags.BUTTON).bounds
         val compose = rule.node(AgentHomeTags.COMPOSE).bounds
         assertTrue("the menu is inside the bar: $menu vs $bar", menu.left >= bar.left)
-        assertTrue("compose is inside the bar: $compose vs $bar", compose.right <= bar.right)
+        assertTrue("compose stays in the content column: $compose vs $bar", compose.right <= bar.right && compose.right >= bar.right - 16.dp - 0.5.dp)
     }
 
     @Test

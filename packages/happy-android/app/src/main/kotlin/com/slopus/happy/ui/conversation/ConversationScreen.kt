@@ -38,6 +38,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -62,7 +63,21 @@ import com.slopus.happy.ui.components.MaterialSymbols
 import com.slopus.happy.ui.components.StatusDot
 import com.slopus.happy.ui.components.StateArt
 import com.slopus.happy.ui.components.StatePage
+import com.slopus.happy.ui.components.TitleWithStatus
+import com.slopus.happy.ui.layout.LocalWindowLayout
+import com.slopus.happy.ui.layout.contentMaxWidth
 import com.slopus.happy.ui.theme.HappyTheme
+import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import com.slopus.happy.ui.components.GlassSource
+import com.slopus.happy.ui.components.GlassSpec
+import com.slopus.happy.ui.components.glassFade
+import com.slopus.happy.ui.components.glassSource
+import com.slopus.happy.ui.components.rememberGlassBlur
+import com.slopus.happy.ui.components.rememberGlassSource
 import java.io.File
 
 object ConversationScreenTags {
@@ -80,7 +95,12 @@ object ConversationScreenTags {
     const val OLDER_FAILED = "conversation.older.failed"
     const val OLDER_RETRY = "conversation.older.retry"
     const val COMPOSE = "conversation.header.compose"
+    const val COMPOSE_ICON = "conversation.header.compose.icon"
+    const val MORE = "conversation.header.more"
+    const val MENU = "conversation.header.menu"
     const val DETAILS = "conversation.header.details"
+    /** The fade behind the dock. */
+    const val FADE = "conversation.fade"
 }
 
 class ConversationScreenActions(
@@ -107,14 +127,16 @@ class ConversationScreenActions(
     val onOpenArtifact: ((String) -> Unit)? = null,
     /** The newest message is on screen while the app is up: unread clears. */
     val onVisible: (Boolean) -> Unit = {},
+    /** How a secret request is made and answered; null where this build cannot. */
+    val secrets: SecretRequestActions? = null,
 )
 
 /**
  * One conversation with a paired agent, in Android's own forms: a Material 3
  * top app bar in the transcript's surface colour, scrolled or not (back
  * arrow; the chat's title, or "New chat" before its first send, with the
- * connection's state under it while it isn't live, never in the content;
- * new chat, then details once the chat exists), the transcript newest at
+ * connection or activity state always under it, never in the content;
+ * compose, then a three-dot menu for permissions and chat details), the transcript newest at
  * the bottom, and the dock above the keyboard and navigation bar: the open
  * question ([ConversationQuestionCard]), then [ConversationComposer]. A
  * subagent or archived chat has a line saying so instead. Past the oldest
@@ -150,8 +172,18 @@ fun ConversationScreen(
             onDiscard = actions.onDiscardSend,
         )
     }
-    val rowActions = remember(actions, legacy) {
-        ConversationRowActions(legacy, actions.onRetryFailure, actions.loadMedia, actions.onOpenArtifact)
+    val pictures = rememberPictureViewer()
+    val media = rememberMediaOpener()
+    val rowActions = remember(actions, legacy, pictures, media) {
+        ConversationRowActions(
+            legacy = legacy,
+            onRetryFailure = actions.onRetryFailure,
+            loadMedia = actions.loadMedia,
+            onOpenArtifact = actions.onOpenArtifact,
+            onOpenPicture = pictures::show,
+            onOpenMedia = { ref -> media.open(ref.key, ref.item) { actions.loadMedia(ref) } },
+            mediaOpening = { ref -> media.state(ref.key) },
+        )
     }
     val atNewest by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 } }
     val visible by rememberUpdatedState(actions.onVisible)
@@ -160,35 +192,51 @@ fun ConversationScreen(
     Column(modifier.testTag(ConversationScreenTags.SCREEN).fillMaxSize().background(colors.surface)) {
         TopAppBar(
             title = {
-                Column {
-                    Text(
-                        state.title ?: stringResource(if (state.created && state.loaded) R.string.conversation_untitled else R.string.conversation_compose),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.testTag(ConversationScreenTags.TITLE),
-                    )
-                    // One status line, under the title and nowhere else: the
-                    // connection while it isn't live, otherwise what the agent
-                    // is doing. The bar's own height never changes with it, so
-                    // the transcript doesn't move when a send starts the work.
-                    val working = activityLabel(state.activity)
-                    val status = connection ?: working
-                    if (status != null) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier
-                                .testTag(ConversationScreenTags.SUBTITLE)
-                                .semantics { liveRegion = LiveRegionMode.Polite },
-                        ) {
-                            if (connection == null && state.activity != null) {
-                                StatusDot(
-                                    if (state.activity == Activity.AwaitingAnswer) SessionStatusColors.attention else SessionStatusColors.thinking,
-                                    pulsing = true,
-                                )
-                            }
-                            Text(status, style = MaterialTheme.typography.bodySmall, color = colors.textSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
+                // One status line, under the title and nowhere else: the
+                // connection while it isn't live, otherwise what the agent
+                // is doing. Its room is always kept, so neither the title nor
+                // the transcript moves when the link or the work changes.
+                val working = activityLabel(state.activity)
+                val syncing = state.syncing || (state.created && !state.loaded)
+                val dot = when {
+                    connection != null -> null
+                    syncing -> colors.status.connecting
+                    state.activity == null -> colors.status.connected
+                    state.activity == Activity.AwaitingAnswer -> SessionStatusColors.attention
+                    else -> SessionStatusColors.thinking
+                }
+                val style = MaterialTheme.typography.bodySmall
+                TitleWithStatus(
+                    status = BarStatus(
+                        connection ?: if (syncing) stringResource(R.string.status_syncing)
+                        else working ?: stringResource(R.string.status_online),
+                        dot,
+                        connection == null && (syncing || state.activity != null),
+                    ),
+                    statusStyle = style,
+                    title = {
+                        // An existing chat is never "New chat", not even before it's read: blank until then.
+                        Text(
+                            state.title ?: when {
+                                !state.created -> stringResource(R.string.conversation_compose)
+                                state.loaded -> stringResource(R.string.conversation_untitled)
+                                else -> ""
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.testTag(ConversationScreenTags.TITLE),
+                        )
+                    },
+                ) { status ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier
+                            .testTag(ConversationScreenTags.SUBTITLE)
+                            .semantics { liveRegion = LiveRegionMode.Polite },
+                    ) {
+                        status.dot?.let { StatusDot(it, pulsing = status.pulsing) }
+                        Text(status.text, style = style, color = colors.textSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             },
@@ -198,14 +246,7 @@ fun ConversationScreen(
                 }
             },
             actions = {
-                IconButton(onClick = actions.onCompose, modifier = Modifier.testTag(ConversationScreenTags.COMPOSE)) {
-                    Icon(MaterialSymbols.Edit, stringResource(R.string.conversation_compose))
-                }
-                if (state.created) {
-                    IconButton(onClick = actions.onDetails, modifier = Modifier.testTag(ConversationScreenTags.DETAILS)) {
-                        Icon(MaterialSymbols.Info, stringResource(R.string.conversation_details))
-                    }
-                }
+                ConversationHeaderActions(state, actions)
             },
             // One surface with the transcript, light and dark: no tint when it scrolls under.
             colors = TopAppBarDefaults.topAppBarColors(
@@ -217,6 +258,12 @@ fun ConversationScreen(
             ),
             modifier = Modifier.testTag(ConversationScreenTags.BAR),
         )
+        // The dock floats over the transcript, which scrolls on under its glass; the list keeps the
+        // dock's height free at its newest end, so the last message is never left under it.
+        val glass = rememberGlassSource()
+        val blurs = rememberGlassBlur()
+        var dock by remember { mutableIntStateOf(0) }
+        val dockHeight = with(LocalDensity.current) { dock.toDp() }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
                 !state.loaded -> StatePage(
@@ -224,6 +271,7 @@ fun ConversationScreen(
                     body = null,
                     art = StateArt.Waiting,
                     tag = ConversationScreenTags.LOADING,
+                    modifier = Modifier.padding(bottom = dockHeight),
                 )
                 state.error != null && state.rows.isEmpty() -> StatePage(
                     title = stringResource(R.string.conversation_load_failed),
@@ -231,42 +279,70 @@ fun ConversationScreen(
                     icon = Ionicon.CloudOfflineOutline,
                     action = stringResource(R.string.common_retry) to actions.onRetryLoad,
                     tag = ConversationScreenTags.ERROR,
+                    modifier = Modifier.padding(bottom = dockHeight),
                 )
                 state.rows.isEmpty() -> StatePage(
                     title = null,
                     body = stringResource(if (state.created) R.string.conversation_empty else R.string.conversation_empty_new),
                     art = StateArt.Ready,
                     tag = ConversationScreenTags.EMPTY,
+                    modifier = Modifier.padding(bottom = dockHeight),
                 )
-                else -> Transcript(state, listState, bubble, rowActions, actions.onLoadOlder)
+                else -> Transcript(state, listState, bubble, rowActions, actions.onLoadOlder, dockHeight, glass)
             }
-        }
-        Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).imePadding()) {
-            state.question?.let { question ->
-                ConversationQuestionCard(question, onAnswer = { answers -> actions.onAnswer(question.id, answers) })
+            // What scrolls under the dock goes soft and pale over its top 32, Telegram's way, full width.
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(dockHeight + GlassSpec.fade)
+                    .glassFade(glass, colors.surface, blurs)
+                    .testTag(ConversationScreenTags.FADE),
+            )
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .onSizeChanged { dock = it.height }
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .imePadding(),
+            ) {
+                state.question?.let { question ->
+                    ConversationQuestionCard(
+                        question = question,
+                        onAnswer = { answers -> actions.onAnswer(question.id, answers) },
+                        secrets = actions.secrets,
+                        // Half the screen at most, so a short one keeps the bar and the composer in view.
+                        maxHeight = minOf(ConversationQuestionSpec.maxHeight, androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp.dp / 2),
+                    )
+                }
+                if (state.created && !state.canSend) {
+                    Text(
+                        stringResource(if (state.agent?.archivedAt != null) R.string.conversation_archived else R.string.conversation_read_only),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.textSecondary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.contentMaxWidth(LocalWindowLayout.current).padding(16.dp).testTag(ConversationScreenTags.READ_ONLY),
+                    )
+                } else {
+                    ConversationComposer(
+                        state = state,
+                        text = text,
+                        onTextChange = {
+                            text = it
+                            actions.onDraftChange(it)
+                        },
+                        onSend = actions.onSend,
+                        onSent = { text = "" },
+                        onStop = actions.onStop,
+                        onModeChange = actions.onModeChange,
+                        // The same centred column as the messages; the bar above stays full width.
+                        modifier = Modifier.contentMaxWidth(LocalWindowLayout.current),
+                        backdrop = glass,
+                    )
+                }
             }
-            if (state.created && !state.canSend) {
-                Text(
-                    stringResource(if (state.agent?.archivedAt != null) R.string.conversation_archived else R.string.conversation_read_only),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.textSecondary,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(16.dp).testTag(ConversationScreenTags.READ_ONLY),
-                )
-            } else {
-                ConversationComposer(
-                    state = state,
-                    text = text,
-                    onTextChange = {
-                        text = it
-                        actions.onDraftChange(it)
-                    },
-                    onSend = actions.onSend,
-                    onSent = { text = "" },
-                    onStop = actions.onStop,
-                    onModeChange = actions.onModeChange,
-                )
-            }
+            PictureViewerHost(pictures)
         }
     }
 }
@@ -278,6 +354,9 @@ private fun Transcript(
     bubble: com.slopus.happy.ui.chat.BubblePalette,
     actions: ConversationRowActions,
     onLoadOlder: (retry: Boolean) -> Unit,
+    /** The dock's height over the list's newest end, kept clear. */
+    dock: Dp,
+    glass: GlassSource,
 ) {
     val nearOldest by remember {
         derivedStateOf {
@@ -293,8 +372,8 @@ private fun Transcript(
     LazyColumn(
         state = listState,
         reverseLayout = true,
-        contentPadding = PaddingValues(bottom = 8.dp),
-        modifier = Modifier.fillMaxSize().testTag(ConversationScreenTags.LIST),
+        contentPadding = PaddingValues(bottom = dock + 8.dp),
+        modifier = Modifier.fillMaxSize().glassSource(glass).testTag(ConversationScreenTags.LIST),
     ) {
         items(state.rows, key = ConversationRow::key, contentType = { it::class }) { row ->
             ConversationRowView(row, bubble, actions)
@@ -318,6 +397,9 @@ private fun Transcript(
         }
     }
 }
+
+/** The bar's status line: its words, dot and whether the dot pulses. */
+private data class BarStatus(val text: String, val dot: Color?, val pulsing: Boolean)
 
 /** What the agent is doing, as the bar's status line says it. */
 @Composable

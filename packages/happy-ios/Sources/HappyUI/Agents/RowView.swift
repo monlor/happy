@@ -13,17 +13,23 @@ import UIKit
 /// on a 50 disc inside its story ring, the title and the time, the lines its
 /// work changed and the agent's status in up to two lines, the person's
 /// draft or the empty mark on the last line, and one signal in the
-/// bottom-right lane (no shimmer, no trailing mark). It applies the frames
-/// `SidebarLayout` gives it and decides nothing about where
-/// anything goes.
+/// bottom-right lane (no shimmer, no trailing mark). In a grouped list
+/// (`grouped`) a row is a cell of its card: the card's quiet fill, its corners
+/// where the row ends the card, iOS's grey highlight under a finger, and
+/// the hairline under it; a top-level glyph sits on a softly tinted tile;
+/// a heading is a quiet title over the card. It
+/// applies the frames `SidebarLayout` gives it and decides nothing about
+/// where anything goes.
 final class RowView: UIView {
     private let fill = UIView()
+    private let separatorLine = UIView()
     private let seedling = MarkView()
     private let picture = UIImageView()
+    /// A grouped row's glyph sits on this softly tinted square.
+    private let tile = UIView()
     private let label = ShimmerLabel()
     private let trailing = UIImageView()
     private let chevron = UIImageView()
-    private let add = UIImageView()
     private let rule = UIView()
     private let ring = StoryRingView()
     private let subtitle = TopLabel()
@@ -32,6 +38,7 @@ final class RowView: UIView {
     private let empty = EmptyMarkView(frame: .zero)
     private let corner = CornerView()
     private var pictureJob: Task<Void, Never>?
+    private let placeholder = AvatarPlaceholderSlot()
 
     private(set) var row: Row?
     var images: Images?
@@ -47,6 +54,17 @@ final class RowView: UIView {
     /// The row is being carried: it rides above the others.
     var lifted = false {
         didSet { if lifted != oldValue { applyState() } }
+    }
+    /// Drawn as a cell of an inset grouped card (`SidebarLayout.Style.grouped`).
+    var grouped = false {
+        didSet {
+            guard grouped != oldValue, let row else { return }
+            applyMark(row.mark)
+            applyText(row)
+            applyTrailing(row)
+            applyState()
+            setNeedsLayout()
+        }
     }
     /// False while the list has the row scrolled out of sight: its title's
     /// sweep stops until it is back.
@@ -82,10 +100,15 @@ final class RowView: UIView {
         picture.contentMode = .scaleAspectFill
         picture.clipsToBounds = true
         picture.layer.cornerCurve = .continuous
+        placeholder.liveHost = picture
         trailing.contentMode = .center
         chevron.contentMode = .center
-        add.contentMode = .center
         rule.backgroundColor = UIColor(Palette.divider)
+        separatorLine.backgroundColor = UIColor(Palette.groupedSeparator)
+        separatorLine.isUserInteractionEnabled = false
+        separatorLine.isHidden = true
+        tile.isUserInteractionEnabled = false
+        tile.isHidden = true
         subtitle.numberOfLines = StoryRowMetrics.statusLines
         subtitle.lineBreakMode = .byTruncatingTail
         draft.numberOfLines = 1
@@ -97,7 +120,7 @@ final class RowView: UIView {
         time.isHidden = true
         draft.isHidden = true
         empty.isHidden = true
-        for view in [fill, ring, seedling, picture, label, subtitle, draft, empty, time, trailing, chevron, add, rule, corner] { addSubview(view) }
+        for view in [fill, separatorLine, ring, tile, seedling, picture, label, subtitle, draft, empty, time, trailing, chevron, rule, corner] { addSubview(view) }
         isAccessibilityElement = true
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in self.textSizeChanged() }
     }
@@ -114,11 +137,13 @@ final class RowView: UIView {
         guard row != self.row else { return }
         let previous = self.row
         self.row = row
-        if previous?.mark != row.mark || (previous?.story == nil) != (row.story == nil) {
+        if previous?.mark != row.mark || (previous?.story == nil) != (row.story == nil) || previous?.targetKind != row.targetKind || previous?.surfaceType != row.surfaceType {
             applyMark(row.mark)
             if case .seedling(let seed) = previous?.mark, case .clay(let slug) = row.mark, let image = ClayIconImages.image(slug) { hatch(seed: seed, into: image) }
         }
-        applyText(row)
+        // Ordinary titles are applied by applyState with their final weight
+        // and colors. Don't assign and measure the same title twice.
+        if row.kind == .section || row.kind == .separator { applyText(row) }
         applyTrailing(row)
         applyStory(row)
         applyState()
@@ -189,6 +214,7 @@ final class RowView: UIView {
 
     private func applyMark(_ mark: Row.Mark) {
         pictureJob?.cancel(); pictureJob = nil
+        placeholder.cancel()
         seedling.seed = nil
         seedling.isHidden = true
         picture.isHidden = true
@@ -196,9 +222,20 @@ final class RowView: UIView {
         picture.tintColor = nil
         picture.contentMode = .scaleAspectFit
         picture.layer.cornerRadius = 0
+        tileTint = grouped && row?.story == nil ? row.flatMap(Self.tint) : nil
+        tile.isHidden = tileTint == nil
+        if let tileTint {
+            tile.backgroundColor = UIColor(tileTint.fill)
+            tile.layer.cornerRadius = GroupedSidebarMetrics.tileRadius
+            tile.layer.cornerCurve = .continuous
+        }
         switch mark {
         case .none:
             break
+        case .glyph(let name) where tileTint != nil:
+            picture.isHidden = false
+            picture.contentMode = .center
+            picture.image = Glyphs.image(name, size: GroupedSidebarMetrics.tileGlyph)
         case .seedling(let seed):
             seedling.isHidden = false
             seedling.seed = seed
@@ -213,26 +250,63 @@ final class RowView: UIView {
             picture.isHidden = false
             picture.contentMode = .center
             picture.image = Glyphs.image(name, size: Metrics.glyph)
+        case .placeholder(let seed):
+            // Drawn as a picture is, decoded at the size it is drawn.
+            picture.isHidden = false
+            picture.contentMode = .scaleAspectFill
+            picture.layer.cornerRadius = row?.story != nil ? StoryRowMetrics.disc / 2 : grouped ? GroupedSidebarMetrics.tileRadius : Metrics.pictureRadius
+            picture.layer.cornerCurve = .continuous
+            placeholder.show(seed: seed, side: row?.story != nil ? StoryRowMetrics.disc : Metrics.mark) { [weak self] in self?.picture.image = $0 }
         case .image(let path, let thumbhash):
             // A picture is a rounded square; in a story ring, a circle.
             picture.isHidden = false
             picture.contentMode = .scaleAspectFill
-            picture.layer.cornerRadius = row?.story != nil ? StoryRowMetrics.disc / 2 : Metrics.pictureRadius
+            picture.layer.cornerRadius = row?.story != nil ? StoryRowMetrics.disc / 2 : grouped ? GroupedSidebarMetrics.tileRadius : Metrics.pictureRadius
+            picture.layer.cornerCurve = .continuous
             let pixels = Int((row?.story != nil ? StoryRowMetrics.disc : Metrics.mark) * 3)
             if let cached = images?.cachedPicture(path, thumbhash: thumbhash, pixels: pixels) {
                 picture.image = cached
             } else {
-                picture.image = Images.placeholder(thumbhash)
+                picture.image = ThumbHashImages.image(thumbhash)
                 pictureJob = Task { [weak self] in
-                    guard let image = await self?.images?.picture(path, thumbhash: thumbhash, pixels: pixels), !Task.isCancelled else { return }
-                    self?.picture.image = image
+                    guard let image = await self?.images?.picture(path, thumbhash: thumbhash, pixels: pixels), !Task.isCancelled, let self else { return }
+                    ImageFade.show(image, in: picture, fade: true)
                 }
             }
         }
     }
 
+    /// A grouped row's glyph tile: its ink and its fill.
+    private var tileTint: (ink: ColorToken, fill: ColorToken)?
+
+    /// The tile a glyph mark sits on in a grouped list, by what the row
+    /// opens: one tint per kind, a Surface's by its type. Nil for a row
+    /// whose mark is a picture or art, or no mark at all.
+    static func tint(_ row: Row) -> (ink: ColorToken, fill: ColorToken)? {
+        guard case .glyph = row.mark, row.kind == .space || row.kind == .session else { return nil }
+        switch row.targetKind {
+        case "bot": return (Palette.tileIndigo, Palette.tileIndigoFill)
+        case "task": return (Palette.tileOrange, Palette.tileOrangeFill)
+        case "artifacts": return (Palette.tilePurple, Palette.tilePurpleFill)
+        case "surface":
+            switch row.surfaceType {
+            case "todo": return (Palette.tileGreen, Palette.tileGreenFill)
+            case "calendar": return (Palette.tileRed, Palette.tileRedFill)
+            case "system_monitor", "chat": return (Palette.tileTeal, Palette.tileTealFill)
+            default: return (Palette.tileBlue, Palette.tileBlueFill)
+            }
+        default: return (Palette.tileBlue, Palette.tileBlueFill)
+        }
+    }
+
     private func applyText(_ row: Row) {
         switch row.kind {
+        case .section where grouped:
+            // iOS's section header: small capitals in the quiet grey.
+            label.attributedText = NSAttributedString(string: row.label.uppercased(), attributes: [
+                .font: Self.groupedHeadingFont,
+                .kern: GroupedSidebarMetrics.headingSize * Self.groupedHeadingTracking,
+            ])
         case .section:
             let size = Self.headingSize(row)
             label.attributedText = NSAttributedString(string: row.label.uppercased(), attributes: [
@@ -257,10 +331,8 @@ final class RowView: UIView {
         if folds {
             // Closed while folded or while it has subtasks still to show.
             let closed = row.collapsed == true || row.hasHiddenSessions
-            chevron.image = Glyphs.image(closed ? "chevron-right" : "chevron-down", size: row.amongStories ? StoryRowMetrics.headingGlyph : Metrics.chevronGlyph)
-        }
-        if row.kind == .section {
-            add.image = Glyphs.image("add", size: row.amongStories ? StoryRowMetrics.headingGlyph : Metrics.addGlyph)
+            let size = grouped && row.kind == .section ? GroupedSidebarMetrics.headingGlyph : row.amongStories ? StoryRowMetrics.headingGlyph : Metrics.chevronGlyph
+            chevron.image = Glyphs.image(closed ? "chevron-right" : "chevron-down", size: size)
         }
         // A story row's corner says all of this instead.
         guard row.story == nil else { return }
@@ -284,18 +356,26 @@ final class RowView: UIView {
     private func applyState() {
         // A story row's title is always in full ink, as Telegram's are.
         let ink = UIColor(selected || row?.unread == true || row?.isNew == true || row?.story != nil ? Palette.rowTextActive : Palette.rowText)
-        label.textColor = ink
-        label.ground = UIColor(selected ? Palette.rowSelected : Palette.surface)
-        picture.tintColor = picture.contentMode == .center ? ink : nil
-        chevron.tintColor = UIColor(Palette.rowText)
-        add.tintColor = UIColor(Palette.rowText)
+        let heading = grouped && row?.kind == .section
+        label.textColor = heading ? UIColor(Palette.settingsSecondary) : ink
+        picture.tintColor = picture.contentMode == .center ? tileTint.map { UIColor($0.ink) } ?? ink : nil
+        chevron.tintColor = UIColor(heading ? Palette.settingsSecondary : Palette.rowText)
         if let row, row.kind != .section, row.kind != .separator { applyText(row) }
         let carryable = row?.kind != .section && row?.kind != .separator
         // A story card is never tinted as new: its corner dot says so.
         let tinted = row?.isNew == true && row?.story == nil
-        fill.backgroundColor = lifted ? UIColor(Palette.background) : selected ? UIColor(Palette.rowSelected) : pressed && carryable ? UIColor(Palette.rowPressed) : tinted ? UIColor(Palette.rowNew) : .clear
-        let radius = row?.story != nil ? StoryRowMetrics.cornerRadius : Metrics.cornerRadius
-        fill.layer.cornerRadius = radius
+        if grouped {
+            // A cell is the card's own fill until a finger or the open
+            // screen lights it; headings and separators stand on the ground.
+            let highlight = UIColor(Palette.groupedCellHighlight)
+            let rest: UIColor = carryable ? UIColor(Palette.groupedCard) : .clear
+            fill.backgroundColor = lifted ? rest : selected || pressed && carryable ? highlight : tinted ? UIColor(Palette.rowNew) : rest
+            label.ground = selected ? highlight : UIColor(Palette.groupedCard)
+        } else {
+            fill.backgroundColor = lifted ? UIColor(Palette.background) : selected ? UIColor(Palette.rowSelected) : pressed && carryable ? UIColor(Palette.rowPressed) : tinted ? UIColor(Palette.rowNew) : .clear
+            label.ground = UIColor(selected ? Palette.rowSelected : Palette.surface)
+        }
+        applyCorners()
         layer.shadowColor = UIColor.black.cgColor
         layer.shadowOpacity = lifted ? 0.14 : 0
         layer.shadowRadius = 12
@@ -309,6 +389,11 @@ final class RowView: UIView {
         let origin = frames.box.origin
         func local(_ rect: CGRect) -> CGRect { rect.offsetBy(dx: -origin.x, dy: -origin.y) }
         fill.frame = bounds
+        applyCorners()
+        // A hairline that comes (a row below arrived) is there at once, never grown from nothing.
+        let line = frames.cell?.separator.map(local)
+        if separatorLine.isHidden, let line { UIView.performWithoutAnimation { separatorLine.frame = line } } else if let line { separatorLine.frame = line }
+        separatorLine.isHidden = line == nil
         let radius = row?.story != nil ? StoryRowMetrics.cornerRadius : Metrics.cornerRadius
         layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: radius).cgPath
         var mark = frames.mark.map(local) ?? .zero
@@ -327,6 +412,7 @@ final class RowView: UIView {
         }
         seedling.frame = mark
         picture.frame = mark
+        tile.frame = mark
         subtitle.frame = frames.subtitle.map(local) ?? .zero
         draft.frame = frames.draft.map(local) ?? .zero
         empty.frame = frames.empty.map(local) ?? .zero
@@ -336,15 +422,35 @@ final class RowView: UIView {
         field?.frame = label.frame
         trailing.frame = frames.trailing.map(local) ?? .zero
         chevron.frame = frames.chevronGlyph.map(local) ?? .zero
-        add.frame = frames.add.map(local) ?? .zero
-        add.isHidden = frames.add == nil
         rule.frame = frames.rule.map(local) ?? .zero
     }
+
+    /// The fill's corners: a cell rounds its card's where it ends the card
+    /// and is square in the middle, so a highlight is the card's own shape;
+    /// a plain row is rounded all round.
+    private func applyCorners() {
+        guard grouped else {
+            fill.layer.cornerRadius = row?.story != nil ? StoryRowMetrics.cornerRadius : Metrics.cornerRadius
+            fill.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+            return
+        }
+        var corners: CACornerMask = []
+        if frames?.cell?.roundsTop == true { corners.formUnion([.layerMinXMinYCorner, .layerMaxXMinYCorner]) }
+        if frames?.cell?.roundsBottom == true { corners.formUnion([.layerMinXMaxYCorner, .layerMaxXMaxYCorner]) }
+        fill.layer.cornerRadius = corners.isEmpty ? 0 : GroupedSidebarMetrics.radius
+        fill.layer.maskedCorners = corners
+    }
+
+    /// The fill's corners as drawn now, for the hosted tests.
+    var fillCorners: (radius: CGFloat, mask: CACornerMask) { (fill.layer.cornerRadius, fill.layer.maskedCorners) }
+    var fillColor: UIColor? { fill.backgroundColor }
+    var hairlineFrame: CGRect? { separatorLine.isHidden ? nil : separatorLine.frame }
+    var tileColor: UIColor? { tile.isHidden ? nil : tile.backgroundColor }
 
     /// A heading among story rows is desktop's 22 tall; a finger also gets
     /// the gaps around it.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        guard row?.amongStories == true, row?.kind == .section else { return super.point(inside: point, with: event) }
+        guard !grouped, row?.amongStories == true, row?.kind == .section else { return super.point(inside: point, with: event) }
         return bounds.insetBy(dx: 0, dy: -6).contains(point)
     }
 
@@ -352,6 +458,10 @@ final class RowView: UIView {
     static func headingSize(_ row: Row) -> CGFloat {
         row.amongStories ? StoryRowMetrics.headingSize : Metrics.sectionLabelSize
     }
+
+    /// A grouped list's heading (iOS's section header): 13, a little tracked.
+    static let groupedHeadingFont = Fonts.ui(.medium, size: GroupedSidebarMetrics.headingSize)
+    static let groupedHeadingTracking: CGFloat = 0.02
 
     // MARK: New
 
@@ -400,8 +510,13 @@ final class RowView: UIView {
         guard field == nil, let row else { return false }
         let field = RenameField()
         let section = row.kind == .section
-        field.font = section ? Fonts.mono(bold: true, size: Self.headingSize(row)) : row.story != nil ? StoryRowText.titleFont(textScale) : Fonts.ui(.medium, size: Metrics.labelSize)
-        if section { field.defaultTextAttributes[.kern] = Self.headingSize(row) * Metrics.sectionTracking }
+        if section, grouped {
+            field.font = Self.groupedHeadingFont
+            field.defaultTextAttributes[.kern] = GroupedSidebarMetrics.headingSize * Self.groupedHeadingTracking
+        } else {
+            field.font = section ? Fonts.mono(bold: true, size: Self.headingSize(row)) : row.story != nil ? StoryRowText.titleFont(textScale) : Fonts.ui(.medium, size: Metrics.labelSize)
+            if section { field.defaultTextAttributes[.kern] = Self.headingSize(row) * Metrics.sectionTracking }
+        }
         field.textColor = UIColor(Palette.rowTextActive)
         field.tintColor = UIColor(Palette.rowTextActive)
         field.text = text
@@ -525,24 +640,28 @@ final class ShimmerLabel: UIView {
 
     var attributedText: NSAttributedString? {
         didSet {
-            base.attributedText = attributedText
-            highlight.attributedText = attributedText
+            guard attributedText != oldValue else { return }
             applyColors()
             setNeedsLayout()
         }
     }
 
     var textColor: UIColor = .label {
-        didSet { applyColors() }
+        didSet { if textColor != oldValue { applyColors() } }
     }
 
     /// What the band goes toward: the surface behind the text.
     var ground: UIColor = UIColor(Palette.surface) {
-        didSet { applyColors() }
+        didSet { if ground != oldValue { applyColors() } }
     }
 
     var shimmering = false {
-        didSet { if shimmering != oldValue { update() } }
+        didSet {
+            if shimmering != oldValue {
+                setNeedsLayout()
+                update()
+            }
+        }
     }
 
     /// False where whatever holds the text has it scrolled out of sight.
@@ -587,14 +706,17 @@ final class ShimmerLabel: UIView {
     @objc private func foregrounded() { backgrounded = false; update() }
 
     private func applyColors() {
+        guard let text = attributedText, text.length > 0 else {
+            base.attributedText = nil
+            highlight.attributedText = nil
+            return
+        }
         let ink = textColor.resolvedColor(with: traitCollection)
         let pale = Self.mix(ink, into: ground.resolvedColor(with: traitCollection), keeping: Metrics.sheenInk)
-        if let text = attributedText, text.length > 0 {
-            for (label, color) in [(base, ink), (highlight, pale)] {
-                let colored = NSMutableAttributedString(attributedString: text)
-                colored.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: colored.length))
-                label.attributedText = colored
-            }
+        for (label, color) in [(base, ink), (highlight, pale)] {
+            let colored = NSMutableAttributedString(attributedString: text)
+            colored.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: colored.length))
+            label.attributedText = colored
         }
     }
 
@@ -612,6 +734,9 @@ final class ShimmerLabel: UIView {
         super.layoutSubviews()
         base.frame = bounds
         highlight.frame = bounds
+        // Sidebar titles do not shimmer. Measuring text for an invisible
+        // gradient would force synchronous text layout on every title update.
+        guard shimmering else { return }
         let width = max(1, min(bounds.width, base.intrinsicContentSize.width))
         guard width != sweptWidth || band.bounds.height != bounds.height else { return }
         sweptWidth = width

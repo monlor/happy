@@ -15,7 +15,7 @@ class AgentFeedTest {
 
     private val sample = Wire.bootstrap(
         bots = listOf(
-            Wire.bot("b2", "Second", Wire.agent("ab2"), orderKey = "2"),
+            Wire.bot("b2", "Second", Wire.agent("ab2"), orderKey = "2", thumbhash = "1QcSHQRnh493V4dIh4eXh1h4kJUI"),
             Wire.bot("b1", "Happy", Wire.agent("ab1", subtasks = listOf(Wire.agent("as1", title = "Sub", subtask = true, parent = "ab1",
                 subtasks = listOf(Wire.agent("as2", title = "Grandchild", subtask = true, parent = "as1"))))), orderKey = "1"),
             Wire.bot("b3", "Gone", Wire.agent("ab3"), archived = true),
@@ -34,7 +34,12 @@ class AgentFeedTest {
     fun conversationsComeInTheAgentsOwnOrders() {
         val feed = AgentFeed.derive(catalog(sample))
         assertEquals(
-            listOf("section-bots", "agent-ab1", "agent-as1", "agent-as2", "agent-ab2", "section-tasks", "agent-at2", "agent-at1", "section-project-p1", "agent-ap1", "agent-aw1"),
+            listOf(
+                "section-places", "artifacts",
+                "section-bots", "agent-ab1", "agent-as1", "agent-as2", "agent-ab2",
+                "section-tasks", "agent-at2", "agent-at1",
+                "section-projects", "folder-p1", "agent-ap1", "folder-w1", "agent-aw1",
+            ),
             feed.rows.map { it.key },
         )
         val rows = feed.conversations.associateBy { it.agentId }
@@ -44,10 +49,42 @@ class AgentFeedTest {
         assertTrue(rows.getValue("at1").working)
         assertTrue(rows.getValue("at2").unread)
         assertTrue(rows.getValue("aw1").blocked)
-        assertEquals("fix-login", rows.getValue("aw1").detail)
-        assertEquals(2, rows.getValue("ab1").childCount)
-        assertEquals(1, rows.getValue("as1").childCount)
+        // A project's conversations a level under its folder, a worktree's two.
+        assertEquals(1, rows.getValue("ap1").depth)
+        assertEquals(2, rows.getValue("aw1").depth)
         assertEquals("as1", rows.getValue("as2").parentId)
+        assertEquals(listOf("rig" to 0, "fix-login" to 1), feed.rows.filterIsInstance<AgentFeedRow.Folder>().map { it.name to it.depth })
+    }
+
+    @Test
+    fun onlyABotWithAPictureHasOne() {
+        val rows = AgentFeed.derive(catalog(sample)).conversations.associateBy { it.agentId }
+        assertEquals("/v0/bots/b2/avatar", rows.getValue("ab2").picture)
+        assertEquals("1QcSHQRnh493V4dIh4eXh1h4kJUI", rows.getValue("ab2").thumbhash)
+        for (id in listOf("ab1", "as1", "at1", "ap1", "aw1")) assertEquals(id, null, rows.getValue(id).picture)
+    }
+
+    @Test
+    fun aClonedRepoWearsItsPictureAndASubtasksWorktreeIsListedOnce() {
+        val feed = AgentFeed.derive(catalog(Wire.bootstrap(
+            bots = listOf(Wire.bot("b1", "Happy", Wire.agent("ab1", subtasks = listOf(Wire.agent("as1", subtask = true, parent = "ab1", workspaceId = "w2"))))),
+            projects = listOf(
+                Wire.project("p1", "happy", emptyList(), avatarUrl = "/v0/projects/p1/avatar"),
+                Wire.project("p2", "site", emptyList(), orderKey = "2", avatarUrl = "https://example.com/a.png"),
+            ),
+            workspaces = listOf(Wire.workspace("w1", "p1", "feature", emptyList()), Wire.workspace("w2", "p1", "subtask-tree", emptyList(), orderKey = "2")),
+        )))
+        val folders = feed.rows.filterIsInstance<AgentFeedRow.Folder>()
+        assertEquals(listOf("happy", "feature", "site"), folders.map { it.name })
+        assertEquals(listOf("/v0/projects/p1/avatar", null, null), folders.map { it.picture })
+    }
+
+    @Test
+    fun aChatOpenedFromARowGetsThatRowsName() {
+        val feed = AgentFeed.derive(catalog(sample))
+        assertEquals("Happy", feed.title("ab1"))
+        assertEquals(null, feed.title("nobody"))
+        assertEquals(null, AgentFeed.Empty.title("ab1"))
     }
 
     @Test
@@ -123,6 +160,36 @@ class AgentFeedTest {
         assertFalse(AgentFeed.derive(AgentCatalog()).loaded)
         val empty = AgentFeed.derive(catalog(Wire.bootstrap()))
         assertTrue(empty.loaded)
-        assertTrue(empty.rows.isEmpty())
+        // Artifacts is always there, as on desktop; nothing else is.
+        assertEquals(listOf("section-places", "artifacts"), empty.rows.map { it.key })
+    }
+
+    @Test
+    fun theSurfacesThePersonJoinedFollowArtifactsInTheirOrder() {
+        val bootstrap = Wire.bootstrap(
+            surfaces = listOf(
+                Wire.surface("s1", "Groceries", "todo", mapOf("u2" to "0", Wire.USER to "3")),
+                Wire.surface("s2", "Launch plan", "document", mapOf(Wire.USER to "1")),
+                Wire.surface("s3", "Week", "calendar", mapOf(Wire.USER to "2")),
+                Wire.surface("s4", "Not mine", "todo", mapOf("u2" to "1")),
+                Wire.surface("s5", "Old", "todo", archived = true),
+            ),
+            bots = listOf(Wire.bot("b1", "Happy", Wire.agent("ab1"))),
+        )
+        val rows = AgentFeed.derive(catalog(bootstrap)).rows
+        assertEquals(
+            listOf("section-places", "artifacts", "surface-s2", "surface-s3", "surface-s1", "section-bots", "agent-ab1"),
+            rows.map { it.key },
+        )
+        assertEquals(AgentFeedRow.Surface("s3", "Week", "calendar"), rows[3])
+    }
+
+    @Test
+    fun aSurfaceEventReadsTheSnapshotAgain() {
+        val applied = catalog(Wire.bootstrap()).apply(Wire.event("c1", "surface.created", buildJsonObject { put("surfaceId", "s9") }))
+        assertEquals(listOf(AgentCatalog.Stale(AgentCatalog.Stale.SNAPSHOT, "")), applied.stale)
+        assertEquals("c1", applied.catalog.cursor)
+        // A todo inside a list changes nothing home shows.
+        assertTrue(catalog(Wire.bootstrap()).apply(Wire.event("c2", "todo.created", buildJsonObject { put("surfaceId", "s9") })).stale.isEmpty())
     }
 }

@@ -17,12 +17,13 @@ final class MediaLoader: NSObject, ChatMediaSource {
     var agentId: String
     private var tools: [String: Media] = [:]
     private var sent: [String: Data] = [:]
+    /// Files still on their way, read from their copy on this phone.
+    private var local: [String: ChatItem.SentFile] = [:]
     private var streams: [String: MediaStream] = [:]
     /// Each key's largest decode, so eviction drops the size with the picture.
     private let images = NSCache<NSString, Decoded>()
     /// A tool's bytes, so a larger decode doesn't fetch them again.
     private let bytes = NSCache<NSString, NSData>()
-    private let placeholders = NSCache<NSString, UIImage>()
     #if DEBUG
     /// UI tests: every picture fails until the first retry, as a dropped
     /// connection would make it (`V2_MEDIA_FAIL_UNTIL_RETRY`).
@@ -58,6 +59,7 @@ final class MediaLoader: NSObject, ChatMediaSource {
             for piece in item.pieces {
                 switch piece {
                 case .picture(let id, _, let data): sent[Self.sentKey(id)] = data
+                case .sentFile(let file): local[Self.sentKey(file.id)] = file
                 case .gallery(let media, _), .tree(let media, _): for one in media { tools[one.key] = one }
                 case .file(let one): tools[one.key] = one
                 case .text, .artifact, .story, .sidebarProposal: break
@@ -82,6 +84,8 @@ final class MediaLoader: NSObject, ChatMediaSource {
         let image: UIImage?
         if let data = sent[key] {
             image = await Task.detached(priority: .userInitiated) { Images.decode(data, maxPixels: pixels) }.value
+        } else if let file = local[key] {
+            image = await Self.picture(file, pixels: pixels)
         } else if let media = tools[key] {
             image = media.isVideo ? await poster(media, pixels: pixels) : await picture(media, pixels: pixels)
         } else {
@@ -91,15 +95,6 @@ final class MediaLoader: NSObject, ChatMediaSource {
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
             images.setObject(Decoded(pixels: pixels, image: image), forKey: key as NSString, cost: cost)
         }
-        return image
-    }
-
-    func placeholder(_ thumbhash: String) async -> UIImage? {
-        if let kept = placeholders.object(forKey: thumbhash as NSString) { return kept }
-        let image = await Task.detached(priority: .userInitiated) {
-            AccountPictureImages.placeholder(thumbhash)?.picture as? UIImage
-        }.value
-        if let image { placeholders.setObject(image, forKey: thumbhash as NSString) }
         return image
     }
 
@@ -117,6 +112,21 @@ final class MediaLoader: NSObject, ChatMediaSource {
             bytes.setObject(data as NSData, forKey: key, cost: data.count)
         }
         return await Task.detached(priority: .userInitiated) { Images.decode(data, maxPixels: pixels) }.value
+    }
+
+    /// A file on its way: a picture decoded, a video's first frame, off
+    /// the main thread.
+    private nonisolated static func picture(_ file: ChatItem.SentFile, pixels: Int) async -> UIImage? {
+        if file.isVideo {
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: file.file))
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: pixels, height: pixels)
+            guard let frame = try? await generator.image(at: .zero) else { return nil }
+            return UIImage(cgImage: frame.image)
+        }
+        return await Task.detached(priority: .userInitiated) {
+            (try? Data(contentsOf: file.file, options: .mappedIfSafe)).flatMap { Images.decode($0, maxPixels: pixels) }
+        }.value
     }
 
     /// A recording's first frame, read through its stream.
@@ -168,6 +178,7 @@ final class MediaLoader: NSObject, ChatMediaSource {
 
     /// A player for a recording, streamed from the computer as it plays.
     func player(_ key: String) -> AVPlayer? {
+        if let file = local[key], file.isVideo { return AVPlayer(url: file.file) }
         guard let media = tools[key], media.isVideo else { return nil }
         return AVPlayer(playerItem: AVPlayerItem(asset: stream(media).asset()))
     }
@@ -182,7 +193,8 @@ final class MediaLoader: NSObject, ChatMediaSource {
 
 /// A recording's bytes for AVFoundation, which can't send the computer's
 /// token itself: a private URL scheme whose every request is answered here
-/// with `Range` requests over the paired connection.
+/// with `Range` requests over the paired connection, by `fetch`: a tool
+/// call's media, or an artifact's file.
 final class MediaStream: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     static let scheme = "happy-v2-media"
     /// Asked for at a time; a player asks for more as it plays.
@@ -192,25 +204,39 @@ final class MediaStream: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sen
     private static let log = Logger(subsystem: "engineering.happy", category: "media")
     #endif
 
-    private let client: AgentClient
-    private let agentId: String
-    private let media: Media
+    typealias Fetch = @Sendable (ClosedRange<Int>) async throws -> HTTP1Response
+    private let fetch: Fetch
+    private let name: String
+    private let mimeType: String
     private let queue = DispatchQueue(label: "engineering.happy.v2-media")
     /// Touched only on `queue`.
     private var serving: [ObjectIdentifier: Task<Void, Never>] = [:]
     private var total: Int?
+    /// Every range answered, for tests (on `queue`).
+    private(set) var ranges: [ClosedRange<Int>] = []
 
-    init(client: AgentClient, agentId: String, media: Media) {
-        self.client = client
-        self.agentId = agentId
-        self.media = media
-        total = media.item.size.map { Int($0) }
+    /// `name` is the file's, for its extension; `size` its length, if known.
+    init(name: String, mimeType: String, size: Int?, fetch: @escaping Fetch) {
+        self.fetch = fetch
+        self.name = name
+        self.mimeType = mimeType
+        total = size
     }
+
+    convenience init(client: AgentClient, agentId: String, media: Media) {
+        let (toolCallId, index) = (media.toolCallId, media.index)
+        self.init(name: media.item.name, mimeType: media.item.mimeType, size: media.item.size.map { Int($0) }) { range in
+            try await client.media(agentId, toolCallId: toolCallId, index: index, range: range)
+        }
+    }
+
+    /// The ranges read so far.
+    func answered() async -> [ClosedRange<Int>] { await onQueue { self.ranges } }
 
     func asset() -> AVURLAsset {
         // Letters and digits only, so the URL always parses.
-        let name = (media.item.name as NSString).pathExtension.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
-        let url = URL(string: "\(Self.scheme)://media/\(media.index)\(name.isEmpty ? "" : "." + name)")!
+        let name = (name as NSString).pathExtension.filter { $0.isASCII && ($0.isLetter || $0.isNumber) }
+        let url = URL(string: "\(Self.scheme)://media/stream\(name.isEmpty ? "" : "." + name)")!
         let asset = AVURLAsset(url: url)
         asset.resourceLoader.setDelegate(self, queue: queue)
         return asset
@@ -241,7 +267,7 @@ final class MediaStream: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sen
     private func serve(_ box: Request) async {
         do {
             let total = try await size()
-            let type = UTType(mimeType: media.item.mimeType)?.identifier ?? UTType.mpeg4Movie.identifier
+            let type = UTType(mimeType: mimeType)?.identifier ?? UTType.mpeg4Movie.identifier
             let span = await onQueue { () -> Range<Int>? in
                 let request = box.request
                 guard !request.isCancelled else { return nil }
@@ -259,7 +285,9 @@ final class MediaStream: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sen
             var offset = span.lowerBound
             while offset < span.upperBound {
                 try Task.checkCancellation()
-                let response = try await client.media(agentId, toolCallId: media.toolCallId, index: media.index, range: offset...(min(span.upperBound, offset + Self.chunk) - 1))
+                let range = offset...(min(span.upperBound, offset + Self.chunk) - 1)
+                let response = try await fetch(range)
+                await onQueue { self.ranges.append(range) }
                 #if DEBUG
                 Self.log.notice("range \(offset)-\(min(span.upperBound, offset + Self.chunk) - 1) of \(total): \(response.status), \(response.body.count) bytes")
                 #endif
@@ -286,7 +314,7 @@ final class MediaStream: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sen
     /// `Content-Range`, else a whole file's length.
     private func size() async throws -> Int {
         if let total = await onQueue({ self.total }) { return total }
-        let response = try await client.media(agentId, toolCallId: media.toolCallId, index: media.index, range: 0...1)
+        let response = try await fetch(0...1)
         let range = response.headers.first { $0.key.lowercased() == "content-range" }?.value
         guard let size = range.flatMap({ $0.split(separator: "/").last.flatMap { Int($0) } }) ?? (response.status == 200 ? response.body.count : nil) else {
             throw URLError(.cannotParseResponse)

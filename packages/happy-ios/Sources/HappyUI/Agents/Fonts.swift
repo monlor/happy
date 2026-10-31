@@ -95,7 +95,6 @@ enum Glyphs {
         case "eye": .ionicons("eye-outline")
         case "eye-off": .ionicons("eye-off-outline")
         case "more": .materialIcons("more-horiz")
-        case "reorder": .ionicons("swap-vertical-outline")
         case "terminal": .ionicons("terminal-outline")
         default: .ionicons(name)
         }
@@ -103,7 +102,10 @@ enum Glyphs {
 
     /// A template image to tint, `size` points as RN sizes an icon.
     static func image(_ name: String, size: CGFloat = 16) -> UIImage {
-        UIImage.icon(icon(name), size: size)
+        let icon = icon(name)
+        // Centred on its square, not on the pencil sticking out of it.
+        if icon == .ionicons("create-outline") { return .composeIcon(size: size) }
+        return UIImage.icon(icon, size: size)
     }
 }
 #endif

@@ -38,7 +38,6 @@ extension Strings {
     public static func filesNotSent(_ names: [String]) -> String {
         names.count == 1 ? "\(names[0]) wasn't attached" : "\(names.count) files weren't attached"
     }
-    public static let filesNotSentDetail = "A message to an agent carries text and pictures only for now."
     public static let closeNewWork = "Close new work"
     public static let leaveTask = "Leave task"
     /// A Surface's, as desktop's menu says it.
@@ -47,7 +46,6 @@ extension Strings {
     public static let archiveBot = "Archive bot"
     public static let archiveSubtask = "Archive subtask"
     public static let deleteSection = "Delete section"
-    public static let reorder = "Reorder"
 
     // A message from another agent (happy-desktop's AgentMessageActivity).
     public static let agentMessage = "Message"
@@ -58,9 +56,6 @@ extension Strings {
     public static let agentMessageOpenHint = "Shows the message"
     public static let agentMessageCloseHint = "Hides the message"
     /// A section's "+", for VoiceOver.
-    public static func newWorkIn(_ section: String) -> String { "New work in \(section)" }
-    /// Said once a row is lifted from its menu.
-    public static let reorderHint = "Lifted. Drag to move it, or tap to put it back."
     /// The blurred screen behind a held row's menu, for VoiceOver.
     public static let closeMenu = "Close menu"
     public static let cancel = "Cancel"
@@ -86,7 +81,10 @@ extension Strings {
     public static let connecting = "Connecting…"
     public static let offline = "Offline — showing what this phone last saw."
     public static let unanswered = "The computer did not answer."
-    public static func newWorkFailed(_ reason: String) -> String { "New work could not be made. \(reason)" }
+    /// A new task's first message couldn't make the task; nothing was sent.
+    public static func newTaskFailed(_ reason: String) -> String {
+        "The task could not be started.\(reason.isEmpty ? "" : " \(reason)") Your text and attachments are still here."
+    }
 
     // New work (MakeStuffView.tsx).
     public static let introLine = "Say what it is — it’ll find its place."
@@ -218,7 +216,6 @@ extension Strings {
     public static let searchSettings = "Search settings"
     public static let connectAgentTile = "Connect Agent"
     public static let more = "More"
-    public static let status = "Status"
     public static let account = "Account"
     public static let appearance = "Appearance"
     public static let language = "Language"
@@ -226,7 +223,9 @@ extension Strings {
     public static let signOut = "Sign out"
     public static let addHappyAccount = "Add Happy account"
     public static let agentConnection = "Agent"
-    public static let happyAccount = "Happy account"
+    /// A Happy account carried over or restored from elsewhere, with no
+    /// name of its own yet. One made for a computer goes by the computer.
+    public static let legacyAccount = "Legacy Account"
     public static let disconnectTitle = "Disconnect agent?"
     public static let signOutTitle = "Sign out?"
     public static let removeDetail = "This removes the connection and its credentials from this phone."
@@ -265,17 +264,6 @@ extension Strings {
         }
     }
 
-    // The composer's "+" sheet, as Claude's "Add to session".
-    public static let addToMessage = "Add to message"
-    public static let photos = "Photos"
-    public static let camera = "Camera"
-    public static let cameraUnavailable = "No camera on this device"
-    public static let pasteFromClipboard = "Paste from clipboard"
-    public static let addFiles = "Add files"
-    public static func addPhotos(_ count: Int) -> String { "Add \(count)" }
-    public static func photo(picked: Int?) -> String { picked.map { "Photo, picked \($0)" } ?? "Photo" }
-    /// The clipboard held nothing a message can carry.
-    public static let nothingToPaste = "Nothing to paste"
     public static let provider = "Provider"
     public static let effort = "Effort"
     public static let modelsNotConfigured = "Models not configured"

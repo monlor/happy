@@ -59,6 +59,12 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     private var nameField: RenameField?
     private let subtitle = UILabel()
     private let tiles = (0..<3).map { _ in DetailTileView() }
+    /// The chat's permission mode, which its header's More menu used to
+    /// pick, asked of the chat under this screen each layout; nil opened
+    /// from anywhere else. Its modes open as a pull-down from the row.
+    var permissionChoice: (() -> PermissionModeChoice?)?
+    private let controls = SettingsCardView()
+    private let permissionButton = MenuRowButton()
     private let mediaHeading = DetailTileView.heading()
     private let mediaCard = DetailMediaCardView()
     private let linksHeading = DetailTileView.heading()
@@ -123,6 +129,15 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
             tile.accessibilityIdentifier = "detail-tile:\(id)"
             scroll.addSubview(tile)
         }
+        permissionButton.accessibilityIdentifier = "profile-permission-mode"
+        permissionButton.accessibilityLabel = Strings.ChatActions.permissionMode
+        permissionButton.menuFor = { [weak self] in
+            self?.permissionChoice?()?.uiMenu { [weak self] in self?.view.setNeedsLayout() }
+        }
+        controls.accessibilityElements = [permissionButton]
+        controls.addSubview(permissionButton)
+        controls.isHidden = true
+        scroll.addSubview(controls)
         mediaHeading.text = Strings.media.uppercased()
         scroll.addSubview(mediaHeading)
         mediaCard.source = loader
@@ -403,10 +418,15 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         ).contentHeight
         let workCount = (detail?.running.count ?? 0) + (detail?.terminals.count ?? 0)
         let settled = detail?.completed.count ?? 0
+        let permission = permissionChoice?().map {
+            SettingsRow(id: "permission-mode", title: Strings.ChatActions.permissionMode, icon: ("shield-checkmark-outline", .blue), value: $0.current, accessory: .none)
+        }
+        let controlRows = permission.map { [$0] } ?? []
         let layout = SessionDetailLayout(
             width: width, nameHeight: ceil(name.font.lineHeight),
             nameWidth: name.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: name.font.lineHeight)).width,
             renames: canRename, subtitleHeight: ceil(subtitle.font.lineHeight), tiles: tiles.count,
+            controls: controlRows.map { SettingsLayout.RowSpec(hasIcon: true, valueWidth: SettingsCardView.valueWidth($0.value), accessory: $0.accessory) },
             media: .init(count: shownMedia.count, more: hasMore(shared.media.count, limit: mediaLimit)),
             links: .init(count: shownLinks.count, more: hasMore(shared.links.count, limit: linksLimit)),
             family: familyHeight, running: workCount, completed: settled,
@@ -419,6 +439,14 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         if let frame = layout.pencilTouch { pencil.frame = frame }
         subtitle.frame = layout.subtitle
         for (tile, frame) in zip(tiles, layout.tiles) { tile.place(frame) }
+        controls.isHidden = layout.controls == nil
+        if let card = layout.controls {
+            controls.frame = card.frame
+            controls.show(controlRows, layout: card)
+            permissionButton.frame = controls.bounds
+            permissionButton.accessibilityValue = permission?.value
+            controls.bringSubviewToFront(permissionButton)
+        }
         mediaHeading.isHidden = layout.media == nil
         mediaCard.isHidden = layout.media == nil
         if let frame = layout.mediaHeading { mediaHeading.frame = frame }
@@ -584,7 +612,7 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
         let pictures = shared.media.filter(\.isPicture).map { picture -> Picture in
             switch picture {
             case .picture: Picture(key: picture.key, thumbhash: nil, label: Strings.picture)
-            case .tool(let media): Picture(key: media.key, thumbhash: media.item.thumbhash, label: media.item.name)
+            case .tool(let media): Picture(media)
             }
         }
         guard let at = pictures.firstIndex(where: { $0.key == one.key }) else { return }
@@ -594,7 +622,7 @@ final class SessionDetailViewController: UIViewController, UIGestureRecognizerDe
     private func openLink(_ index: Int) {
         let links = shownLinks
         guard links.indices.contains(index), let url = URL(string: links[index].url) else { return }
-        UIApplication.shared.open(url)
+        openBrowser(url, session: session, agentID: agentId)
     }
 
     private func toggleCompleted() {
@@ -909,7 +937,7 @@ final class DetailActivityCardView: UIView {
 }
 
 /// The detail's mark, large: the seedling, its clay icon, Happy's own,
-/// a picture, or a glyph on a tile.
+/// a picture or placeholder, or a glyph on a tile.
 final class DetailMarkView: UIView {
     var images: Images?
     var mark: Row.Mark = .none {
@@ -918,11 +946,13 @@ final class DetailMarkView: UIView {
     private let seedling = MarkView()
     private let picture = UIImageView()
     private var job: Task<Void, Never>?
+    private let placeholder = AvatarPlaceholderSlot()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         picture.contentMode = .scaleAspectFit
         picture.clipsToBounds = true
+        placeholder.liveHost = picture
         addSubview(seedling)
         addSubview(picture)
         isAccessibilityElement = false
@@ -936,10 +966,12 @@ final class DetailMarkView: UIView {
         picture.frame = bounds
         if case .glyph = mark { picture.layer.cornerRadius = bounds.width * 0.28 }
         if case .image = mark { picture.layer.cornerRadius = bounds.width * 0.22 }
+        if case .placeholder = mark { picture.layer.cornerRadius = bounds.width * 0.22 }
     }
 
     private func apply() {
         job?.cancel(); job = nil
+        placeholder.cancel()
         seedling.isHidden = true
         seedling.seed = nil
         picture.isHidden = false
@@ -959,11 +991,18 @@ final class DetailMarkView: UIView {
         case .image(let path, let thumbhash):
             picture.contentMode = .scaleAspectFill
             let pixels = Int(SessionDetailLayout.Metrics.mark * 3)
-            picture.image = images?.cachedPicture(path, thumbhash: thumbhash, pixels: pixels) ?? Images.placeholder(thumbhash)
-            job = Task { [weak self] in
-                guard let image = await self?.images?.picture(path, thumbhash: thumbhash, pixels: pixels), !Task.isCancelled else { return }
-                self?.picture.image = image
+            if let cached = images?.cachedPicture(path, thumbhash: thumbhash, pixels: pixels) {
+                picture.image = cached
+            } else {
+                picture.image = ThumbHashImages.image(thumbhash)
+                job = Task { [weak self] in
+                    guard let image = await self?.images?.picture(path, thumbhash: thumbhash, pixels: pixels), !Task.isCancelled, let self else { return }
+                    ImageFade.show(image, in: picture, fade: true)
+                }
             }
+        case .placeholder(let seed):
+            picture.contentMode = .scaleAspectFill
+            placeholder.show(seed: seed, side: SessionDetailLayout.Metrics.mark) { [weak self] in self?.picture.image = $0 }
         case .glyph(let name):
             picture.contentMode = .center
             picture.backgroundColor = UIColor(Palette.settingsTilePurple)

@@ -45,7 +45,9 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     private lazy var list = ChatListView(renderer: context.account.localSettings.chatListRenderer)
     private lazy var scrim = ChatScrimView()
     private lazy var headerScrim = HeaderScrimView()
-    private lazy var titleView = ChatHeaderTitleView()
+    /// The phone's header: the name and the session's status on one glass
+    /// capsule, the agent chat's own, in the bar from the first frame.
+    private let header = ChatHeaderView()
     private lazy var avatarControl = ChatHeaderAvatarControl()
     private lazy var avatarItem = UIBarButtonItem(customView: avatarControl)
     /// The title on a tablet, without glass.
@@ -193,6 +195,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// `traitCollection.isTabletLayout`, kept here so the row inputs can be
     /// built off the main thread.
     private var isTabletLayout = false
+    /// A tablet's way to the accounts, where the bar runs over the sidebar.
+    private var switcher: AccountSwitcher?
     /// PermissionFooter's list cap for this window, read on the main thread
     /// and handed to the measure with the rest of the row style.
     private var permissionListMaxHeight = PermissionFooterLayout.Metrics.maxListHeight
@@ -225,10 +229,21 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         chatId = sessionId
         super.init(nibName: nil, bundle: nil)
         hidesBottomBarWhenPushed = true
-        // Only a cached name is needed by the navigation bar. No record
+        // Only the cached record is needed by the navigation bar. No record
         // projection, checkout grouping, SQL, or composer is made on a tap.
-        navigationItem.title = account.homeFeed.latest?.sessions.first { $0.id == sessionId }?.title
-            ?? Strings.Session.newChat
+        let home = account.homeFeed.latest
+        let cached = home?.sessions.first { $0.id == sessionId }
+        navigationItem.title = cached?.title ?? Strings.Session.newChat
+        // The capsule is in the bar as the push starts, the name and status
+        // on it, as the agent chat's is; nothing is measured to show it.
+        sessionStatus = cached.map { SessionComposerView.headerStatus(record: $0, now: home?.presenceNow) }
+        header.statuses = SessionComposerView.headerStatuses
+        header.onOpen = { [weak self] in self?.openInfo() }
+        headerTitle = navigationItem.title ?? ""
+        applyTitleAndStatus()
+        navigationItem.titleView = header
+        // Compose too, so the bar never makes room for it later.
+        navigationItem.rightBarButtonItems = composeItems
         if ComposeChat.isComposeId(sessionId) {
             let compose = LegacyComposeStart(context: context, account: account)
             compose.host = self
@@ -275,8 +290,11 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         #endif
         super.viewDidLoad()
         isTabletLayout = traitCollection.isTabletLayout
+        // A tablet's bar is opaque with the plain title (TabletBranches),
+        // its name in the bar's own text until that is planned.
+        if isTabletLayout { navigationItem.titleView = nil }
         view.backgroundColor = UIColor(Palette.surface)
-        showsBackTitle()
+        minimalBackButton()
         dropsBackButtonOnTablet() // Tablet (HappyUI/Tablet): ChatHeaderView.tsx
         navigationItem.largeTitleDisplayMode = .never
         configureHeaderAppearance()
@@ -315,6 +333,11 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     }
 
     private func installHeader() {
+        // The header is built a few turns after `viewDidLoad`, and the
+        // window's width settles in between: read the trait again, or a
+        // tablet is handed the phone's header and never hears otherwise,
+        // since the watch below is registered after the change.
+        isTabletLayout = traitCollection.isTabletLayout
         setUpHeader()
         headerScrim.presence = 0
         view.addSubview(headerScrim)
@@ -539,9 +562,9 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         if !sessionApplied { missing.append("session") }
         if !checkoutApplied { missing.append("checkout") }
         if !rowsApplied { missing.append("rows") }
-        let header: UIView = isTabletLayout ? plainTitleView : titleView
-        if !hidesHeader && (!(isTabletLayout ? plainTitleView.measure.isSettled : titleView.measure.isSettled)
-            || header.window == nil || header.bounds.width <= 1) {
+        let title: UIView = isTabletLayout ? plainTitleView : header
+        if !hidesHeader && ((isTabletLayout && !plainTitleView.measure.isSettled)
+            || title.window == nil || title.bounds.width <= 1) {
             missing.append("header")
         }
         if !tabStrip.isHidden, !tabStrip.isSettled { missing.append("strip") }
@@ -571,8 +594,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 
     private func makeChatAttachments() -> ChatAttachmentImages {
         ChatAttachmentImages(
-            pictures: account.attachmentPictures, placeholders: context.account.pictures(for: account.keys.anonID),
-            sessionId: chatId, load: services.attachment
+            pictures: account.attachmentPictures, sessionId: chatId, load: services.attachment
         )
     }
 
@@ -795,7 +817,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             let width = min(fits.width, room)
             composeTarget.frame = CGRect(x: area.midX - width / 2, y: area.midY - fits.height / 2, width: width, height: fits.height).integral
         }
-        titleView.maxWidth = ChatHeaderTitleLayout.maxWidth(headerWidth: size.width)
+        header.maxWidth = ChatTitleLayout.maxWidth(barWidth: size.width)
         plainTitleView.maxWidth = ContentWidth.headerMaxWidth
         dock.setLayoutFrame(screen.dock)
         for (bar, frame) in zip(dockBars, screen.accessories) { bar.view.setLayoutFrame(frame) }
@@ -930,23 +952,21 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 
     // MARK: Header
 
-    /// ChatHeaderView over a transparent bar: the system back button, the
-    /// title capsule, the avatar; the scrim is the screen's own.
+    /// The agent chat's header over a transparent bar: the system back
+    /// button, the name and status on one glass capsule (`header`, in the
+    /// bar since `init`), Compose; the scrim is the screen's own.
     private func setUpHeader() {
         avatarControl.pictures = account.avatarPictures
         avatarControl.isHidden = true
-        // ChatHeaderView's text scales; the bar and its controls don't. The
-        // bar holds its title view's own text size to XXL, so the header is
-        // handed the screen's.
-        titleView.traitOverrides.followsTextSize = true
+        // The tablet's plain title scales; the bar and its controls don't.
+        // The bar holds its title view's own text size to XXL, so the title
+        // is handed the screen's.
         plainTitleView.traitOverrides.followsTextSize = true
         updateHeaderText()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitDisplayScale.self]) { (self: Self, _) in
             self.updateHeaderText()
         }
-        titleView.onPlanned = { [weak self] in self?.headerPlanned() }
         plainTitleView.onPlanned = { [weak self] in self?.headerPlanned() }
-        titleView.addTarget(self, action: #selector(openInfo), for: .touchUpInside)
         plainTitleView.addTarget(self, action: #selector(openInfo), for: .touchUpInside)
         avatarControl.addTarget(self, action: #selector(openInfo), for: .touchUpInside)
         if #available(iOS 26.0, *) {
@@ -956,27 +976,69 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         applyHeaderBranch()
     }
 
+    /// At the right only Compose, a glass circle as Back is: the session's
+    /// permission mode and details are on its profile, which the title opens.
+    private var composeItems: [UIBarButtonItem] {
+        [HeaderBar.composeItem { [weak self] in self?.compose() }]
+    }
+
+    /// The tablet's plain title is planned: it takes the bar's text's place.
     private func headerPlanned() {
-        navigationItem.titleView = isTabletLayout ? plainTitleView : titleView
+        if isTabletLayout { navigationItem.titleView = plainTitleView }
         opening?.check()
+    }
+
+    /// The name as the header says it (`updateHeader`).
+    private var headerTitle = ""
+    /// The session's status as the header says it: the composer's
+    /// (`composerDidChangeHeaderStatus`), the record home held until then.
+    private var sessionStatus: ChatHeaderStatus?
+
+    /// What is under the name: a chat still being started says what the
+    /// start is doing; any other, its session's status.
+    private var shownStatus: ChatHeaderStatus? {
+        if let compose = composing, isComposing {
+            return compose.progress.map { ChatHeaderStatus(text: $0, color: UIColor(Palette.textSecondary)) }
+        }
+        return sessionStatus
+    }
+
+    /// The name and status on the phone's capsule and the tablet's plain
+    /// title alike, the status crossfading as the agent chat's does.
+    private func applyTitleAndStatus() {
+        let status = shownStatus
+        if header.titleView.text != headerTitle {
+            header.titleView.text = headerTitle
+            header.resize()
+        }
+        header.setStatus(status?.text ?? "", color: status?.color ?? UIColor(Palette.textSecondary))
+        // Made with the view, at the screen's text size.
+        guard isViewLoaded else { return }
+        plainTitleView.update(title: headerTitle, subtitle: status?.text, changes: nil)
+        plainTitleView.isEnabled = session.record != nil
     }
 
     /// ChatHeaderView's `glassEnabled` and SessionView's `headerRight`
     /// (`TabletBranches`): a phone's glass capsule and avatar over the
     /// scrim, or a tablet's opaque bar (`header.background`) with the plain
     /// title and no avatar. The back button is `dropsBackButtonOnTablet`'s.
+    ///
+    /// On a tablet the bar runs over the sidebar as well, and the back
+    /// button is gone, so the account switcher takes the left as it does on
+    /// home: with a chat open it is still the way to the accounts. A phone
+    /// has its back button there and home a screen behind. At the right
+    /// only Compose (`composeItems`), set with the title in `init`.
     private func applyHeaderBranch() {
         let tablet = isTabletLayout
         configureHeaderAppearance()
-        if sessionApplied { navigationItem.titleView = tablet ? plainTitleView : titleView }
-        var items = tablet ? [] : [avatarItem]
-        if let host = self as UIViewController as? ComposeHosting {
-            items.append(HeaderBar.composeItem { [weak host] in host?.compose() })
+        if !tablet {
+            navigationItem.titleView = header
+        } else if sessionApplied, plainTitleView.measure.isSettled {
+            navigationItem.titleView = plainTitleView
         }
-        #if DEBUG
-        items.append(fixturesMenu())
-        #endif
-        navigationItem.rightBarButtonItems = items
+        applyTitleAndStatus()
+        if tablet, switcher == nil { switcher = AccountSwitcher(context: context, controller: self) }
+        navigationItem.leftBarButtonItem = tablet ? switcher?.barItem : nil
         if contentInstalled { tabStrip.glass = !tablet } // TabletBranches.worktreeStripGlass
         floatingDockChanged()
     }
@@ -1000,13 +1062,11 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 
     }
 
-    /// The header's text at the screen's text size (`ChatHeaderTitleView.text`).
-    /// The controller's own traits: in its trait change its view's are
-    /// still the old ones.
+    /// The tablet title's text at the screen's text size
+    /// (`ChatPlainHeaderTitleView.text`). The controller's own traits: in
+    /// its trait change its view's are still the old ones.
     private func updateHeaderText() {
-        let text = TextEnvironment(traitCollection)
-        titleView.text = text
-        plainTitleView.text = text
+        plainTitleView.text = TextEnvironment(traitCollection)
     }
 
     private func updateHeader() {
@@ -1024,24 +1084,16 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         case .deleted: Strings.SessionDetail.sessionDeleted
         case .name(let name): name ?? Strings.Session.newChat
         }
-        var subtitle = model.subtitle
-        // Grouped by project the header names the checkout, and says how
-        // many tabs the strip under it holds.
+        // Grouped by project the header names the checkout; the strip
+        // under it holds its tabs. Under the name is the status, as in the
+        // agent chat: the branch and line counts are on session info.
         if let checkout {
             title = checkout.workspaceName ?? model.subtitle ?? checkout.projectName
-            subtitle = Strings.Chat.worktreeTabs(stripTabs(checkout).count)
         }
-        if let compose = composing, isComposing {
-            // Nothing is there yet: what the start is doing is its status.
-            title = Strings.Session.newChat
-            subtitle = compose.progress
-        }
+        if isComposing { title = Strings.Session.newChat }
         navigationItem.title = title
-        titleView.update(title: title, subtitle: subtitle, changes: model.changes)
-        titleView.isEnabled = session.record != nil
-        titleView.sizeToFit()
-        plainTitleView.update(title: title, subtitle: subtitle, changes: model.changes)
-        plainTitleView.isEnabled = session.record != nil
+        headerTitle = title
+        applyTitleAndStatus()
 
         let settings = session.settings
         avatarControl.isHidden = session.record == nil
@@ -1254,6 +1306,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     @objc private func openInfo() {
         guard session.record != nil else { return }
         push(.sessionInfo(id: chatId), context: context)
+    }
+
+    /// The permission modes its composer offers, for the session's profile
+    /// over it (`SessionInfoViewController`).
+    var permissionChoice: PermissionModeChoice? {
+        composer.permissionChoice
     }
 
     private var isPendingChat: Bool {
@@ -1770,6 +1828,9 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         case .retry(let localId):
             let sender = services.sender
             Task { try? await sender.retry(localId: localId) }
+        case .cancelUpload:
+            // Only a V2 conversation's sending pictures have a cross.
+            break
         case .copyMenu, .selectable, .markdownSelectable:
             // Long presses; see `chatList(_:hold:frame:at:)`.
             break
@@ -1798,7 +1859,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 
     func chatList(_ list: ChatListView, openLink url: String) {
         guard let url = URL(string: url) else { return }
-        UIApplication.shared.open(url)
+        openBrowser(url)
     }
 
     /// Sends a permission answer; the button pulses until it has gone.
@@ -1878,6 +1939,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 
     func composerDidChangeFocus(_ composer: any ChatComposerView) {}
 
+    /// The session's status is the header's, under its name.
+    func composerDidChangeHeaderStatus(_ composer: any ChatComposerView) {
+        sessionStatus = composer.headerStatus
+        applyTitleAndStatus()
+    }
+
     /// The draft is restored: the composer shows at the height laid out
     /// for it, now. A report for the chat before a retarget isn't this
     /// one's.
@@ -1946,21 +2013,6 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 }
 
 extension LegacyChatViewController: ChatAttachmentProviding {}
-
-#if DEBUG
-extension LegacyChatViewController {
-    /// Debug builds: open any fixture chat from any chat.
-    private func fixturesMenu() -> UIBarButtonItem {
-        let context = self.context
-        let actions = FixtureScenario.allCases.map { scenario in
-            UIAction(title: scenario.title) { [weak self] _ in
-                self?.push(.session(id: FixtureScenarios.prefix + scenario.rawValue), context: context)
-            }
-        }
-        return UIBarButtonItem(image: .icon(.ionicons("construct-outline"), size: 20), menu: UIMenu(title: "Fixture chats", children: actions))
-    }
-}
-#endif
 
 /// Cancels the feed when the screen goes away.
 private final class TaskHolder {

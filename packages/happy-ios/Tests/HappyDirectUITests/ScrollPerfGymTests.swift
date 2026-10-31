@@ -33,6 +33,13 @@ private let skipsQuiescence: Bool = {
 /// metrics (default 3).
 @MainActor
 final class ScrollPerfGymTests: XCTestCase {
+    /// The transcript, whichever renderer drew it: the agents' chat draws
+    /// on UltraList, which is not a scroll view, so it is found by its
+    /// identifier rather than by kind.
+    var transcriptElement: XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "transcript").firstMatch
+    }
+
     private let app = XCUIApplication()
     private var environment: [String: String] { ProcessInfo.processInfo.environment }
     private var chat: String { environment["GYM_CHAT"] ?? "Gym Long Chat" }
@@ -46,6 +53,28 @@ final class ScrollPerfGymTests: XCTestCase {
     }
 
     // MARK: Workloads
+
+    /// Rendered evidence of the actual agent transcript's header, at the
+    /// oldest loaded row and with content under it, then with the keyboard.
+    func testAgentHeaderEdges() {
+        app.launchEnvironment["HAPPY_GYM_SCRIPT"] = "top wait*3"
+        launch()
+        open(chat)
+        runScript("top wait*3")
+        func keep(_ name: String) {
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        keep("agent-header-top")
+        transcriptElement.swipeUp(velocity: .slow)
+        pause(1)
+        keep("agent-header-scrolled")
+        app.textViews["composer"].tap()
+        pause(1)
+        keep("agent-header-keyboard")
+    }
 
     /// Not a workload: reads the gym's conversations back to their first
     /// message, as someone who has read their long chats has them, so every
@@ -191,21 +220,15 @@ final class ScrollPerfGymTests: XCTestCase {
         print("GYM_POST_STORY \(task)")
         watchRing(row, "posted on home")
 
-        // As SHIP BOSS had it: in the chat, + and its permission changed
-        // first, then the story posted while the chat is on screen.
+        // As SHIP BOSS had it: in the chat, + opened and closed first, then
+        // the story posted while the chat is on screen.
         open(task)
         app.buttons["Add a picture"].tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         if springboard.alerts.firstMatch.waitForExistence(timeout: 3) {
             springboard.alerts.firstMatch.buttons["Don’t Allow"].tap()
         }
-        let permission = app.descendants(matching: .any)["attach-permission"]
-        XCTAssertTrue(permission.waitForExistence(timeout: 5), "+ didn't open its sheet")
-        pause(1)
-        permission.tap()
-        let auto = app.collectionViews.buttons.matching(NSPredicate(format: "label == 'Auto' OR label BEGINSWITH 'Auto,'")).firstMatch
-        XCTAssertTrue(auto.waitForExistence(timeout: 5), "no permission menu")
-        auto.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["attach-sheet"].waitForExistence(timeout: 5), "+ didn't open its sheet")
         pause(1)
         app.buttons["attach-close"].tap()
         pause(1)
@@ -216,20 +239,27 @@ final class ScrollPerfGymTests: XCTestCase {
         watchRing(row, "posted in its chat")
     }
 
-    /// Not a workload: with the photo library never asked about, the composer's + opens its sheet and Photos opens the
-    /// system's picker without either asking for the library; a photo
-    /// picked there waits in the composer.
-    func testAttachAsksNothing() {
+    /// Not a workload: with the photo library never asked about, the
+    /// composer's + asks once, as Telegram's menu does. Refused, it shows
+    /// why with "Choose Photos or Videos" under it, which opens the system's
+    /// picker without asking again; a photo picked there waits in the composer.
+    func testAttachAsksOnceAndRefusedKeepsTheSystemPicker() {
         app.resetAuthorizationStatus(for: .photos)
         launch()
         open(environment["GYM_STORY_TASK"] ?? "Release notes")
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         app.buttons["Add a picture"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["attach-sheet"].waitForExistence(timeout: 5), "+ didn't open its sheet")
-        XCTAssertFalse(springboard.alerts.firstMatch.waitForExistence(timeout: 3), "+ asked for the photo library")
-        app.buttons["attach-photos"].tap()
-        XCTAssertFalse(springboard.alerts.firstMatch.waitForExistence(timeout: 3), "Photos asked for the photo library")
-        XCTAssertFalse(app.descendants(matching: .any)["library-picker"].exists, "Photos opened the app's own library, which needs it")
+        let refuse = springboard.alerts.firstMatch.buttons["Don’t Allow"]
+        XCTAssertTrue(refuse.waitForExistence(timeout: 5), "+ never asked for the photo library")
+        refuse.tap()
+        let explanation = app.descendants(matching: .any)["attach-no-access"]
+        let photos = app.buttons["attach-photos"]
+        XCTAssertTrue(photos.waitForExistence(timeout: 5), "refused, the menu offers no Photos")
+        XCTAssertFalse(app.descendants(matching: .any)["attach-grid"].isHittable, "refused, the menu still shows a grid")
+        XCTAssertGreaterThan(photos.frame.minY, explanation.staticTexts.firstMatch.frame.maxY, "Photos isn't under the explanation")
+        photos.tap()
+        XCTAssertFalse(springboard.alerts.firstMatch.waitForExistence(timeout: 3), "Photos asked for the photo library again")
         let photo = app.images.matching(NSPredicate(format: "label BEGINSWITH 'Photo'")).firstMatch
         XCTAssertTrue(photo.waitForExistence(timeout: 10), "the system's picker shows no photo")
         pause(1.5)
@@ -263,7 +293,7 @@ final class ScrollPerfGymTests: XCTestCase {
         scan.tap()
         pause(2)
         XCTAssertFalse(app.descendants(matching: .any)["new-work"].exists, "Scan opened the last install's computer")
-        XCTAssertFalse(app.scrollViews["transcript"].exists, "Scan opened a chat")
+        XCTAssertFalse(transcriptElement.exists, "Scan opened a chat")
     }
 
     /// The ring on `row` turns new, opens its viewer at a tap, and is seen once closed.
@@ -274,7 +304,7 @@ final class ScrollPerfGymTests: XCTestCase {
         row.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 7 + 29, dy: row.frame.height / 2)).tap()
         let viewer = app.descendants(matching: .any)["story-viewer-page"]
         XCTAssertTrue(viewer.waitForExistence(timeout: 10), "\(when): a tap on the ring opened no viewer")
-        XCTAssertFalse(app.scrollViews["transcript"].exists, "\(when): the ring opened the chat")
+        XCTAssertFalse(transcriptElement.exists, "\(when): the ring opened the chat")
         pause(2)
         app.descendants(matching: .any)["story-close"].firstMatch.tap()
         XCTAssertTrue(until(10) { !viewer.exists }, "\(when): the viewer never closed")
@@ -298,6 +328,8 @@ final class ScrollPerfGymTests: XCTestCase {
         launch()
         open(title)
         runScript(whole)
+        XCTAssertGreaterThan(reading("frames"), 0, "the script measured no scrolling frames")
+        XCTAssertGreaterThan(reading("scriptPoints"), 100, "the script moved no transcript rows")
         report(workload)
     }
 
@@ -351,12 +383,14 @@ final class ScrollPerfGymTests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 15), "no row \(title)")
         let height = app.frame.height
         for _ in 0..<20 where !(row.frame.midY > height * 0.15 && row.frame.midY < height * 0.75) {
+            let before = row.frame.midY
             let up = row.frame.midY > height * 0.5
             app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.7 : 0.3)).press(
                 forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.4 : 0.6)),
                 withVelocity: .slow, thenHoldForDuration: 0.3
             )
             pause(0.6)
+            if abs(row.frame.midY - before) < 1, row.isHittable { break }
         }
         return row
     }
@@ -371,7 +405,7 @@ final class ScrollPerfGymTests: XCTestCase {
     /// The transcript's value once it is up: the open's timing.
     @discardableResult
     private func waitForTranscript() -> String {
-        let transcript = app.scrollViews["transcript"]
+        let transcript = transcriptElement
         XCTAssertTrue(transcript.waitForExistence(timeout: 30), "the transcript never showed")
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline, !((transcript.value as? String) ?? "").hasPrefix("first=") { pause(0.2) }
@@ -414,11 +448,11 @@ final class ScrollPerfGymTests: XCTestCase {
 
     private var meter: XCUIElement { app.buttons["gym-meter"] }
 
-    /// One integer of the meter's reading.
+    /// Counts or whole points of the meter's reading.
     private func reading(_ key: String) -> Int {
         let value = (meter.value as? String) ?? ""
         let pair = value.split(separator: " ").first { $0.hasPrefix("\(key)=") }
-        return pair.flatMap { Int($0.dropFirst(key.count + 1)) } ?? -1
+        return pair.flatMap { Double($0.dropFirst(key.count + 1)) }.map { Int($0) } ?? -1
     }
 
     private func resetMeter() {

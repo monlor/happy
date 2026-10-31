@@ -97,7 +97,7 @@ final class HostedHeaderBarTests: XCTestCase {
         let (window, _, home, _) = try await agentHome(style: .light)
         defer { window.isHidden = true }
         let item = home.navigationItem
-        XCTAssertNil(item.searchController, "search is the bar's own field, not a search controller")
+        XCTAssertTrue(item.searchController === home.search.controller)
         XCTAssertEqual(item.leftBarButtonItems?.count, 1)
         XCTAssertEqual(item.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher")
         let switcher = try XCTUnwrap(item.leftBarButtonItem?.customView)
@@ -105,11 +105,9 @@ final class HostedHeaderBarTests: XCTestCase {
         for child in switcher.subviews where !child.isHidden {
             XCTAssertTrue(switcher.bounds.contains(child.frame), "\(child) is cut by the bar")
         }
-        // rightBarButtonItems run from the outermost in: settings, (compose), search.
         let right = item.rightBarButtonItems?.map(\.accessibilityIdentifier) ?? []
-        XCTAssertEqual(right.first, "settings")
-        XCTAssertEqual(right.last, "search")
-        XCTAssertEqual(right.filter { $0 != "compose" }, ["settings", "search"])
+        XCTAssertEqual(right, ["settings"])
+        XCTAssertTrue(home.toolbarItems?.contains { $0.accessibilityIdentifier == "compose" } == true)
         let bar = try XCTUnwrap(home.navigationController?.navigationBar)
         Self.assertClear(bar)
     }
@@ -129,33 +127,34 @@ final class HostedHeaderBarTests: XCTestCase {
             home.search.begin()
             try await Task.sleep(for: .milliseconds(600))
             XCTAssertTrue(home.search.isActive)
-            XCTAssertTrue(home.navigationItem.titleView === home.search.bar)
-            XCTAssertNil(home.navigationItem.rightBarButtonItems)
+            // The header stays as it was: account and settings, while search is open.
+            XCTAssertEqual(home.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher")
+            XCTAssertEqual(home.navigationItem.rightBarButtonItems?.first?.accessibilityIdentifier, "settings")
             XCTAssertEqual(state(sidebar), before, "opening search moved home")
             let results = try XCTUnwrap(Self.subview(HomeSearchResultsView.self, in: home.view))
-            XCTAssertFalse(results.showsResults, "nothing typed, nothing over home")
+            XCTAssertTrue(results.showsResults, "empty search also covers home")
             keep(window, "search-open-\(name)")
 
-            type("settings", into: home.search.bar)
+            type("settings", into: home.search)
             try await Task.sleep(for: .milliseconds(300))
             XCTAssertTrue(results.showsResults)
             XCTAssertTrue(results.list.rows.contains { $0.kind == .result }, "the settings quick action answers")
             XCTAssertEqual(state(sidebar), before, "results replaced or moved home")
             keep(window, "search-results-\(name)")
 
-            type("zzzz-nothing", into: home.search.bar)
+            type("zzzz-nothing", into: home.search)
             try await Task.sleep(for: .milliseconds(300))
-            XCTAssertFalse(results.showsResults)
+            XCTAssertTrue(results.showsResults)
             XCTAssertEqual(state(sidebar), before)
             keep(window, "search-nothing-\(name)")
 
-            type("", into: home.search.bar)
+            type("", into: home.search)
             try await Task.sleep(for: .milliseconds(200))
-            XCTAssertFalse(results.showsResults)
+            XCTAssertTrue(results.showsResults)
             XCTAssertEqual(state(sidebar), before)
 
             // A result opens its screen; back, the search is still there.
-            type("settings", into: home.search.bar)
+            type("settings", into: home.search)
             try await Task.sleep(for: .milliseconds(200))
             let open = try XCTUnwrap(results.list.rows.first { $0.id == "search:actions:settings" })
             let row = try XCTUnwrap(results.list.subviews.compactMap { $0 as? RowView }.first { $0.row?.id == open.id })
@@ -187,6 +186,26 @@ final class HostedHeaderBarTests: XCTestCase {
             sidebar.tap(row, at: CGPoint(x: row.frame.midX, y: row.frame.midY))
             try await settle(navigation)
             let chat = try XCTUnwrap(navigation.topViewController as? ChatViewController)
+            // Back, the name, and Compose alone: no More menu.
+            XCTAssertEqual(chat.navigationItem.rightBarButtonItems?.map(\.accessibilityIdentifier), ["compose"])
+            XCTAssertNil(chat.navigationItem.leftBarButtonItems, "Back alone at the left")
+            XCTAssertNotNil(chat.navigationItem.rightBarButtonItems?.first?.primaryAction, "Compose composes at a tap")
+            // The name and status sit on one capsule of the system's glass,
+            // the bar's 44 tall, inside the room the bar gave the title.
+            let header = try XCTUnwrap(chat.navigationItem.titleView as? ChatHeaderView)
+            XCTAssertTrue(header.capsule.effect is UIGlassEffect, "the title is on Liquid Glass, not a blur")
+            XCTAssertEqual(header.capsule.frame.height, ChatHeaderLayout.Metrics.height)
+            XCTAssertTrue(header.bounds.contains(header.capsule.frame), "the capsule runs past what the bar gave it")
+            // On the line of the bar's buttons, which sit at the top of its 54.
+            let capsule = header.capsule.convert(header.capsule.bounds, to: navigation.navigationBar)
+            XCTAssertEqual(capsule.midY, header.convert(header.bounds, to: navigation.navigationBar).midY, accuracy: 1, "the capsule is off the title's line")
+            XCTAssertTrue(navigation.navigationBar.bounds.contains(capsule), "the capsule leaves the bar")
+            XCTAssertGreaterThan(capsule.minX, 16 + 44, "the capsule runs under Back")
+            // "Work item 1" is short: the capsule is Telegram's minimum, on
+            // the bar's middle.
+            XCTAssertEqual(capsule.midX, navigation.navigationBar.bounds.midX, accuracy: 1, "a short title is off the bar's middle")
+            XCTAssertEqual(capsule.width, ChatHeaderLayout.Metrics.minContent + 2 * ChatHeaderLayout.Metrics.padding, "a short title's capsule isn't the minimum")
+            XCTAssertNotNil(Self.subview(UILabel.self, in: header.capsule.contentView) { $0.accessibilityIdentifier == "chat-status" }, "the status is on the glass")
             XCTAssertNil(chat.navigationItem.standardAppearance, "the bar's own, shared look")
             Self.assertClear(navigation.navigationBar)
             keep(window, "chat-\(name)")
@@ -228,9 +247,99 @@ final class HostedHeaderBarTests: XCTestCase {
         window.layoutIfNeeded()
         try await Task.sleep(for: .milliseconds(500))
         XCTAssertEqual(home.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher")
+        // Read on screen from the left: filter, compose (when this home
+        // composes), settings outermost. Named, so a test needs no label.
+        let trailing = (home.navigationItem.rightBarButtonItems ?? []).reversed().compactMap(\.accessibilityIdentifier)
+        XCTAssertEqual(trailing.first, "filter")
+        XCTAssertEqual(trailing.last, "settings")
         XCTAssertNil(home.navigationItem.standardAppearance)
         Self.assertClear(navigation.navigationBar)
         keep(window, "legacy-home-light")
+    }
+
+    /// On a tablet the bar runs over the sidebar, where home itself draws
+    /// nothing and a chat has no back button: the switcher is there at the
+    /// root and stays there with a chat open, so the accounts are always a
+    /// tap away.
+    func testTheSwitcherStaysOnATabletWithAChatOpen() async throws {
+        let controller = AccountController(
+            serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
+            credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
+            rnServerImport: { .confirmed(ServerConfig.defaultServerURL) },
+            transport: HeaderNoNetwork(), connector: HeaderNoSockets()
+        )
+        try await controller.signIn(Credentials(token: "t", secret: Data(repeating: 11, count: 32)))
+        let account = try XCTUnwrap(controller.session)
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let home = LegacyHomeViewController(context: context, session: account)
+        let navigation = UINavigationController(rootViewController: home)
+        AppCoordinator.applyAppearance(to: navigation.navigationBar)
+        let scene = try await hostedActiveScene()
+        let window = hostedKeyWindow(in: scene, root: navigation)
+        defer { window.isHidden = true }
+        // What TabletShellViewController sets on a tablet-wide window.
+        navigation.traitOverrides.isTabletLayout = true
+        window.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertTrue(home.traitCollection.isTabletLayout)
+        XCTAssertEqual(home.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher", "beside the sidebar, home still shows the switcher")
+        keep(window, "tablet-home")
+
+        let chat = LegacyChatViewController(context: context, session: account, sessionId: "tablet-switcher")
+        navigation.pushViewController(chat, animated: false)
+        try await until { navigation.topViewController === chat && navigation.transitionCoordinator == nil }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(chat.navigationItem.hidesBackButton, "a tablet's chat has no back button")
+        // Compose alone at the right, in every build: the permission mode is
+        // on the session's info, and no debug fixtures sit in the bar.
+        XCTAssertEqual(chat.navigationItem.rightBarButtonItems?.map(\.accessibilityIdentifier), ["compose"])
+        XCTAssertEqual(chat.navigationItem.leftBarButtonItem?.customView?.accessibilityIdentifier, "account-switcher", "with a chat open the accounts are still reachable")
+        keep(window, "tablet-chat")
+
+        // A phone's chat keeps its back button there instead.
+        navigation.traitOverrides.isTabletLayout = false
+        window.layoutIfNeeded()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(chat.navigationItem.hidesBackButton)
+        XCTAssertNil(chat.navigationItem.leftBarButtonItem)
+    }
+
+    /// A signed-in Happy account and an open agent connection each report
+    /// themselves active, from two fields that know nothing of each other
+    /// (`AccountController.accounts`: the anon ID and the connections'
+    /// active ID). The menu must still tick exactly one, and it has to be
+    /// the one the button draws, or the switcher says two things at once.
+    func testTheMenuTicksOneAccountWithAComputerAndAnAccountBothActive() async throws {
+        let controller = AccountController(
+            serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/test",
+            credentialStore: InMemoryCredentialStore(), storeDirectory: nil,
+            agentTransport: { _ in HeaderUnreachable() },
+            rnServerImport: { .confirmed(ServerConfig.defaultServerURL) },
+            transport: HeaderNoNetwork(), connector: HeaderNoSockets()
+        )
+        try await controller.signIn(Credentials(token: "t", secret: Data(repeating: 12, count: 32)))
+        await controller.agentConnections.setForeground(false)
+        let computer = try await controller.agentConnections.add(JSONDecoder().decode(AgentConnectionCredentials.self,
+            from: Data(#"{"address":"switcher-test","port":1,"deviceID":"\#(UUID().uuidString)","deviceToken":"test"}"#.utf8)), name: "A computer")
+        addTeardownBlock { @MainActor in try? await controller.agentConnections.remove(computer.id) }
+
+        // Both say they are active: that is the case under test.
+        let accounts = controller.accounts
+        XCTAssertEqual(accounts.filter(\.isActive).count, 2, "the fixture is not the mixed case")
+
+        let context = AppContext(account: controller, variant: .preview, version: "test")
+        let host = UIViewController()
+        let switcher = AccountSwitcher(context: context, controller: host)
+        let actions = switcher.menuElements().flatMap { ($0 as? UIMenu)?.children ?? [$0] }.compactMap { $0 as? UIAction }
+        let ticked = actions.filter { $0.state == .on }
+        XCTAssertEqual(ticked.count, 1, "the menu ticked \(ticked.map(\.title))")
+        // The button draws the first active one, so the tick belongs there.
+        let shown = try XCTUnwrap(accounts.first(where: \.isActive))
+        XCTAssertEqual(ticked.first?.accessibilityIdentifier, "account-\(shown.id)")
+        // Every account is still offered, with Add; Manage Accounts is
+        // gone (Settings' accounts card signs one out from its row).
+        XCTAssertEqual(actions.count, accounts.count + 1)
+        XCTAssertFalse(actions.contains { $0.accessibilityIdentifier == "account-manage" })
     }
 
     /// No ground, no blur, no line, the same scrolled as at the edge: the
@@ -245,9 +354,9 @@ final class HostedHeaderBarTests: XCTestCase {
         XCTAssertEqual(bar.standardAppearance, bar.scrollEdgeAppearance, "no change between the edge and scrolled", file: file, line: line)
     }
 
-    private func type(_ text: String, into bar: UISearchBar) {
-        bar.text = text
-        bar.delegate?.searchBar?(bar, textDidChange: text)
+    private func type(_ text: String, into search: BarSearch) {
+        search.bar.text = text
+        search.updateSearchResults(for: search.controller)
     }
 
     private func settle(_ navigation: UINavigationController) async throws {

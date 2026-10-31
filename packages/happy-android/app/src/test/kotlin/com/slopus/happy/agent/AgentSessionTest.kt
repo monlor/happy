@@ -7,8 +7,12 @@ import com.slopus.happy.auth.ExpoSecureStore
 import com.slopus.happy.connection.AgentConnectionCredentials
 import com.slopus.happy.connection.AgentConnections
 import com.slopus.happy.connection.Transport
+import com.slopus.happy.connection.TransportResponse
+import com.slopus.happy.conversation.ConversationApi
+import com.slopus.happy.ui.conversation.conversationRequest
 import com.slopus.happy.testing.SoftwareKeys
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -69,6 +73,27 @@ class AgentSessionTest {
     }
 
     @Test
+    fun artifactFilesUseOnlyTheSelectedConnectionsCredential() = runBlocking {
+        foreground.value = false
+        open.value = null
+        val other = connections.add(AgentConnectionCredentials("other-addr", 24781, "dv2", "other-token"), "Other").id
+        val seen = mutableListOf<Triple<String, String, String>>()
+        val sessions = sessions { credentials ->
+            object : Transport by agent {
+                override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>): TransportResponse {
+                    seen += Triple(credentials.address, credential, path)
+                    return TransportResponse(200, body = byteArrayOf(1, 2, 3))
+                }
+            }
+        }
+        ConversationApi(sessions.session(other)!!.conversationRequest()).artifactFile("r1", "2", "images/plot #1.png")
+        assertEquals(listOf(Triple("other-addr", "other-token", "/v0/artifacts/r1/versions/2/files/images/plot%20%231.png")), seen)
+        seen.clear()
+        ConversationApi(sessions.session(id)!!.conversationRequest()).artifactFile("r1", "2", "report.md")
+        assertEquals(listOf(Triple("addr", "token", "/v0/artifacts/r1/versions/2/files/report.md")), seen)
+    }
+
+    @Test
     fun theSnapshotThenTheJournalKeepHomeCurrent() = runBlocking {
         val session = sessions().session(id)!!
         agent.frames.send(Wire.hello("c0"))
@@ -104,6 +129,32 @@ class AgentSessionTest {
         agent.bootstrap = Wire.bootstrap(bots = listOf(Wire.bot("b2", "Other", Wire.agent("ab2"))), cursor = "c7")
         agent.frames.send(Wire.hello("c7", gap = true))
         eventually({ session.feed.value.conversations.map { it.agentId } }) { it == listOf("ab2") }
+    }
+
+    @Test
+    fun bootstrapAndGapReadsStaySyncingUntilTheirResponsesArrive() = runBlocking {
+        var gate = CompletableDeferred<Unit>()
+        val session = sessions {
+            object : Transport by agent {
+                override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>): TransportResponse {
+                    if (path == "/v0/bootstrap/desktop") gate.await()
+                    return agent.request(method, path, credential, body, headers)
+                }
+            }
+        }.session(id)!!
+        eventually({ session.isSyncing.value }) { it }
+        assertFalse(session.feed.value.loaded)
+        gate.complete(Unit)
+        agent.frames.send(Wire.hello("c0"))
+        eventually({ session.status.value }) { it == AgentLinkStatus.Connected }
+        eventually({ session.isSyncing.value }) { !it }
+
+        gate = CompletableDeferred()
+        agent.frames.send(Wire.hello("c7", gap = true))
+        eventually({ session.isSyncing.value }) { it }
+        assertEquals(AgentLinkStatus.Connected, session.status.value)
+        gate.complete(Unit)
+        eventually({ session.isSyncing.value }) { !it }
     }
 
     @Test

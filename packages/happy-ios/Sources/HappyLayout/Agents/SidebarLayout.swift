@@ -24,7 +24,6 @@ public enum SidebarLayout {
         public var hasFold: Bool
         /// A section heading's "+", which makes new work in it: one square
         /// before its fold, always shown.
-        public var hasAdd: Bool
         /// The fold points right ("›"), not down ("⌄"): its ink weighs elsewhere.
         public var foldClosed: Bool
         /// Drawn as a story row (Stories on): the card, the disc in its
@@ -34,14 +33,13 @@ public enum SidebarLayout {
         /// own size, as the rows are.
         public var amongStories: Bool
 
-        public init(kind: Kind, depth: Int = 0, hasMark: Bool = true, hasTrailing: Bool = false, hasWorkingSignal: Bool = false, hasFold: Bool = false, hasAdd: Bool = false, foldClosed: Bool = false, story: StoryRow? = nil, amongStories: Bool = false) {
+        public init(kind: Kind, depth: Int = 0, hasMark: Bool = true, hasTrailing: Bool = false, hasWorkingSignal: Bool = false, hasFold: Bool = false, foldClosed: Bool = false, story: StoryRow? = nil, amongStories: Bool = false) {
             self.kind = kind
             self.depth = depth
             self.hasMark = hasMark
             self.hasTrailing = hasTrailing
             self.hasWorkingSignal = hasWorkingSignal
             self.hasFold = hasFold
-            self.hasAdd = hasAdd
             self.foldClosed = foldClosed
             self.story = story
             self.amongStories = amongStories
@@ -145,7 +143,6 @@ public enum SidebarLayout {
         /// on the row's middle. On whole pixels at `scale`.
         public var chevronGlyph: CGRect?
         /// A section's "+", one square before its fold.
-        public var add: CGRect?
         /// A separator's hairline, across the row box's whole width.
         public var rule: CGRect?
         /// A story row's ring box, around its disc, kept with no ring too.
@@ -162,15 +159,17 @@ public enum SidebarLayout {
         public var draft: CGRect?
         /// A story row's empty mark, on its last line, on whole pixels.
         public var empty: CGRect?
+        /// In a grouped list, the row's place in its card; nil in a plain
+        /// list, and for a heading or a separator.
+        public var cell: Cell?
 
-        public init(box: CGRect, mark: CGRect? = nil, label: CGRect = .zero, trailing: CGRect? = nil, chevron: CGRect? = nil, chevronGlyph: CGRect? = nil, add: CGRect? = nil, rule: CGRect? = nil, ring: CGRect? = nil, subtitle: CGRect? = nil, corner: CGRect? = nil, signalLane: CGRect? = nil, time: CGRect? = nil, draft: CGRect? = nil, empty: CGRect? = nil) {
+        public init(box: CGRect, mark: CGRect? = nil, label: CGRect = .zero, trailing: CGRect? = nil, chevron: CGRect? = nil, chevronGlyph: CGRect? = nil, rule: CGRect? = nil, ring: CGRect? = nil, subtitle: CGRect? = nil, corner: CGRect? = nil, signalLane: CGRect? = nil, time: CGRect? = nil, draft: CGRect? = nil, empty: CGRect? = nil, cell: Cell? = nil) {
             self.box = box
             self.mark = mark
             self.label = label
             self.trailing = trailing
             self.chevron = chevron
             self.chevronGlyph = chevronGlyph
-            self.add = add
             self.rule = rule
             self.ring = ring
             self.subtitle = subtitle
@@ -179,6 +178,7 @@ public enum SidebarLayout {
             self.time = time
             self.draft = draft
             self.empty = empty
+            self.cell = cell
         }
     }
 
@@ -187,6 +187,8 @@ public enum SidebarLayout {
         /// The tree's lines: vertical stems and the elbows into nested rows, `line` wide.
         public var connectors: [CGRect]
         public var contentHeight: CGFloat
+        /// A grouped list's cards, top first; none in a plain list.
+        public var groups: [Group] = []
     }
 
     public static func height(_ row: Row) -> CGFloat {
@@ -225,6 +227,12 @@ public enum SidebarLayout {
     }
 
     public static func layout(_ rows: [Row], width: CGFloat, top: CGFloat = Metrics.contentTop, bottom: CGFloat = Metrics.contentBottom, scale: CGFloat = 3) -> Result {
+        layout(rows, width: width, top: top, bottom: bottom, scale: scale, style: .plain)
+    }
+
+    /// `rows` in `style`: desktop's column, or iOS's inset grouped cards.
+    public static func layout(_ rows: [Row], width: CGFloat, top: CGFloat, bottom: CGFloat, scale: CGFloat = 3, style: Style) -> Result {
+        if style == .grouped { return grouped(rows, width: width, top: top, bottom: bottom, scale: scale) }
         typealias M = Metrics
         var frames: [Frame] = []
         frames.reserveCapacity(rows.count)
@@ -270,12 +278,7 @@ public enum SidebarLayout {
                 // clear of the fold's lane (`padding-right: row padding + 22`),
                 // so showing the fold moves nothing.
                 let x = boxX + M.sectionTitleInset
-                var end = trailingRect.minX
-                if row.hasAdd {
-                    let add = trailingRect.offsetBy(dx: -(M.trailing + M.trailingGap), dy: 0)
-                    frame.add = add
-                    end = add.minX
-                }
+                let end = trailingRect.minX
                 frame.label = CGRect(x: x, y: y, width: max(0, end - sectionFoldGap - x), height: height)
                 frame.chevron = trailingRect
                 frame.chevronGlyph = fold()
@@ -321,9 +324,15 @@ public enum SidebarLayout {
     /// the status ends the lane's room before it, whatever the lane holds.
     static func storyRow(_ story: StoryRow, hasMark: Bool, y: CGFloat, width: CGFloat, scale: CGFloat) -> Frame {
         typealias S = StoryRowMetrics
+        let box = CGRect(x: S.cardInset, y: y, width: max(0, width - 2 * S.cardInset), height: storyHeight(story.text.scale))
+        return storyRow(story, hasMark: hasMark, in: box, scale: scale)
+    }
+
+    /// A story row whose card is `box`.
+    static func storyRow(_ story: StoryRow, hasMark: Bool, in box: CGRect, scale: CGFloat) -> Frame {
+        typealias S = StoryRowMetrics
         func pixel(_ value: CGFloat) -> CGFloat { (value * max(1, scale)).rounded() / max(1, scale) }
         let text = story.text
-        let box = CGRect(x: S.cardInset, y: y, width: max(0, width - 2 * S.cardInset), height: storyHeight(text.scale))
         var frame = Frame(box: box)
         let disc = CGRect(x: box.minX + S.pad, y: pixel(box.midY - S.disc / 2), width: S.disc, height: S.disc)
         if hasMark {
@@ -395,12 +404,7 @@ public enum SidebarLayout {
         let shrink = S.headingGlyph / M.chevronGlyph
         frame.chevron = fold
         frame.chevronGlyph = CGRect(x: pixel(fold.midX - S.headingGlyph / 2 - ink.dx * shrink), y: pixel(fold.midY - S.headingGlyph / 2 - ink.dy * shrink), width: S.headingGlyph, height: S.headingGlyph)
-        var end = fold.minX
-        if row.hasAdd {
-            let add = fold.offsetBy(dx: -S.headingStep, dy: 0)
-            frame.add = add
-            end = add.minX
-        }
+        let end = fold.minX
         let clear = S.headingStep - S.headingBox
         frame.label = CGRect(x: S.headingInset, y: y, width: max(0, end - clear - S.headingInset), height: box.height)
         return frame

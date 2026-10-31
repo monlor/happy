@@ -186,7 +186,7 @@ final class StoriesCircleView: UIControl {
     /// Holds what is cut around the circle before it.
     private let content = UIView()
     private let avatar = UIImageView()
-    private let initials = UILabel()
+    private let placeholder = AvatarPlaceholderSlot()
     private let seenRing = CAShapeLayer()
     private let unseenRing = CAShapeLayer()
     private let unseenGradient = CAGradientLayer()
@@ -198,6 +198,8 @@ final class StoriesCircleView: UIControl {
     private let cut = CAShapeLayer()
     private let title = UILabel()
     private var photoKey: String?
+    /// The photo or its placeholder, for tests.
+    var avatarImage: UIImage? { avatar.image }
     private var loading: Task<Void, Never>?
     private var single = false
     private var drawnScale: CGFloat = 1
@@ -222,11 +224,7 @@ final class StoriesCircleView: UIControl {
         avatar.layer.cornerRadius = geometry.avatar.width / 2
         avatar.backgroundColor = UIColor(Palette.storiesAvatarFill)
         avatar.isUserInteractionEnabled = false
-        initials.font = .systemFont(ofSize: 20, weight: .semibold)
-        initials.textColor = UIColor(Palette.storiesAvatarText)
-        initials.textAlignment = .center
-        initials.frame = avatar.bounds
-        avatar.addSubview(initials)
+        placeholder.liveHost = avatar
         content.addSubview(avatar)
         for ring in [seenRing, unseenRing] {
             ring.fillColor = nil
@@ -288,7 +286,6 @@ final class StoriesCircleView: UIControl {
         let previous = self.item
         self.item = item
         title.text = item.title
-        initials.text = item.initials
         accessibilityIdentifier = "story-circle:\(item.isSelf ? "self" : item.title)"
         accessibilityLabel = Strings.Stories.author(item.title, unseen: item.unseen)
         if previous?.segments != item.segments || previous?.unseen != item.unseen {
@@ -429,26 +426,31 @@ final class StoriesCircleView: UIControl {
 
     private func loadPhoto(_ item: StoriesRowItem, images: Images?) {
         // Without a way to read it, the photo waits for the next configure.
-        let key = images == nil ? nil : item.photo.map { "\($0)#\(item.thumbhash ?? "")" }
+        let key = item.photo.map { "\($0)#\(item.thumbhash ?? "")\(images == nil ? "?" : "")" } ?? "placeholder:\(item.placeholderSeed)"
         guard key != photoKey else { return }
         photoKey = key
         loading?.cancel()
+        placeholder.cancel()
+        // Without a photo: the placeholder the author's ID picks.
+        let showPlaceholder = { [weak self] in
+            self?.placeholder.show(seed: item.placeholderSeed, side: StoriesRowLayout.Metrics.avatar) { self?.avatar.image = $0 }
+        }
         guard let path = item.photo, let images else {
-            initials.isHidden = false
-            avatar.image = nil
+            // Its thumbhash meanwhile, when it has a photo to wait for.
+            let thumbhash = item.photo == nil ? nil : ThumbHashImages.image(item.thumbhash)
+            if let thumbhash { avatar.image = thumbhash } else { showPlaceholder() }
             return
         }
-        initials.isHidden = true
         let pixels = Int(StoriesRowLayout.Metrics.avatar * (window?.screen.scale ?? 3))
         if let cached = images.cachedPicture(path, thumbhash: item.thumbhash, pixels: pixels) {
             avatar.image = cached
             return
         }
-        avatar.image = Images.placeholder(item.thumbhash)
+        avatar.image = ThumbHashImages.image(item.thumbhash)
         loading = Task { [weak self] in
             let image = await images.picture(path, thumbhash: item.thumbhash, pixels: pixels)
             guard let self, !Task.isCancelled, photoKey == key else { return }
-            if let image { avatar.image = image } else if avatar.image == nil { initials.isHidden = false }
+            if let image { ImageFade.show(image, in: avatar, fade: true) } else if avatar.image == nil { showPlaceholder() }
         }
     }
 

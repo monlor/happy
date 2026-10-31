@@ -260,10 +260,16 @@ final class ProfileCarouselView: UIView, UIScrollViewDelegate {
 
 /// A row in a settings card: what it says and does.
 struct SettingsRow {
-    enum Tile { case orange, gray, blue, purple, green, red, teal, indigo }
+    enum Tile { case orange, gray, blue, purple, green, red, teal, indigo, action }
     var id: String
     var title: String
     var icon: (glyph: String, tile: Tile)?
+    /// An account's or connection's row: `image` round in the icon's
+    /// place, an empty circle until it comes, never a glyph.
+    var avatar = false
+    /// Its picture, drawn round in the icon's place; the icon is the
+    /// fallback for one that hasn't come yet.
+    var image: UIImage?
     var value: String?
     var accessory: SettingsLayout.Accessory = .chevron
     var destructive = false
@@ -271,6 +277,27 @@ struct SettingsRow {
     var isOn = false
     var action: (() -> Void)?
     var toggled: ((Bool) -> Void)?
+    /// The line under this row's card, said by the card's last row.
+    var footer: String?
+    /// A block of text the card's width (a secret key), in monospace.
+    var isCode = false
+    /// Quieter, for a row that can't be used here.
+    var dimmed = false
+    /// What VoiceOver adds about it: why a dimmed row does nothing.
+    var hint: String?
+    /// What a hold on it offers (signing an account out), and VoiceOver's
+    /// actions on it.
+    var menu: [MenuItem] = []
+
+    struct MenuItem {
+        var title: String
+        var glyph: String
+        var destructive = false
+        var run: () -> Void
+    }
+
+    /// Whether it takes the icon's lane.
+    var hasIcon: Bool { icon != nil || avatar }
 }
 
 /// A grouped card of rows, Telegram's inset style: a coloured square with a
@@ -306,9 +333,30 @@ final class SettingsCardView: UIView {
         text.map { ($0 as NSString).size(withAttributes: [.font: RowView.valueFont]).width }
     }
 
-    final class RowView: UIView {
+    /// The cards' rows as the layout takes them, a code row measured at
+    /// the page's `width`.
+    static func specs(_ cards: [[SettingsRow]], width: CGFloat) -> [[SettingsLayout.RowSpec]] {
+        cards.map { card in
+            card.map { row in
+                let text = row.isCode ? height(row.title, font: RowView.codeFont, width: SettingsLayout.textWidth(width)) : nil
+                return SettingsLayout.RowSpec(hasIcon: row.hasIcon && !row.isCode, valueWidth: row.isCode ? nil : valueWidth(row.value), accessory: row.isCode ? .none : row.accessory, textHeight: text)
+            }
+        }
+    }
+
+    /// Each card's footer, its last row's, measured at the page's `width`.
+    static func footers(_ cards: [[SettingsRow]], width: CGFloat) -> [CGFloat?] {
+        cards.map { card in card.last?.footer.map { height($0, font: SettingsFooters.font, width: SettingsLayout.footerWidth(width)) } }
+    }
+
+    private static func height(_ text: String, font: UIFont, width: CGFloat) -> CGFloat {
+        ceil((text as NSString).boundingRect(with: CGSize(width: width, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font], context: nil).height)
+    }
+
+    final class RowView: UIView, UIContextMenuInteractionDelegate {
         static let titleFont = Fonts.ui(.regular, size: 17)
         static let valueFont = Fonts.ui(.regular, size: 17)
+        static let codeFont = Fonts.mono(bold: false, size: 15)
         private let tile = UIView()
         private let glyph = UIImageView()
         private let title = UILabel()
@@ -317,6 +365,7 @@ final class SettingsCardView: UIView {
         private let toggle = UISwitch()
         private let separator = UIView()
         private var row: SettingsRow?
+        private lazy var menuInteraction = UIContextMenuInteraction(delegate: self)
         /// A fold's chevron, turned down while what it folds is open.
         var chevronTurned = false {
             didSet { chevron.image = Glyphs.image(chevronTurned ? "chevron-down" : "chevron-right", size: 14) }
@@ -326,6 +375,7 @@ final class SettingsCardView: UIView {
             super.init(frame: frame)
             tile.layer.cornerRadius = SettingsLayout.Metrics.tileRadius
             tile.layer.cornerCurve = .continuous
+            tile.clipsToBounds = true
             glyph.tintColor = UIColor(Palette.settingsGlyph)
             glyph.contentMode = .center
             tile.addSubview(glyph)
@@ -349,19 +399,38 @@ final class SettingsCardView: UIView {
         @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
         func show(_ row: SettingsRow, frames: SettingsLayout.Row) {
+            let previous = self.row
             self.row = row
             frame = frames.box
             let origin = frames.box.origin
             func local(_ rect: CGRect) -> CGRect { rect.offsetBy(dx: -origin.x, dy: -origin.y) }
             tile.isHidden = frames.icon == nil
-            if let icon = row.icon, let frame = frames.icon {
+            if let frame = frames.icon {
                 tile.frame = local(frame)
-                tile.backgroundColor = UIColor(Self.color(icon.tile))
-                glyph.image = Glyphs.image(icon.glyph, size: SettingsLayout.Metrics.glyph)
-                glyph.frame = tile.bounds
+                if row.image != nil || row.avatar {
+                    // Its own picture, round, filling the square an icon
+                    // would have had: the rows read as the accounts they are.
+                    tile.backgroundColor = row.image == nil ? UIColor(Palette.settingsAddFill) : .clear
+                    tile.layer.cornerRadius = frame.height / 2
+                    // The picture over the thumbhash it had: dissolved in.
+                    ImageFade.show(row.image, in: glyph, fade: previous?.id == row.id && previous?.image != nil)
+                    glyph.contentMode = .scaleAspectFill
+                    glyph.clipsToBounds = true
+                    glyph.frame = tile.bounds
+                } else if let icon = row.icon {
+                    tile.backgroundColor = icon.tile == .action ? .clear : UIColor(Self.color(icon.tile))
+                    tile.layer.cornerRadius = SettingsLayout.Metrics.tileRadius
+                    glyph.tintColor = UIColor(icon.tile == .action ? Palette.textLink : Palette.settingsGlyph)
+                    glyph.image = Glyphs.image(icon.glyph, size: SettingsLayout.Metrics.glyph)
+                    glyph.contentMode = .center
+                    glyph.clipsToBounds = false
+                    glyph.frame = tile.bounds
+                }
             }
             title.text = row.title
-            title.textColor = UIColor(row.destructive ? Palette.settingsDestructive : Palette.settingsText)
+            title.font = row.isCode ? Self.codeFont : Self.titleFont
+            title.numberOfLines = row.isCode ? 0 : 1
+            title.textColor = UIColor(row.destructive ? Palette.settingsDestructive : row.dimmed ? Palette.settingsSecondary : row.icon?.tile == .action ? Palette.textLink : Palette.settingsText)
             title.frame = local(frames.title)
             value.isHidden = frames.value == nil
             value.text = row.value
@@ -382,7 +451,25 @@ final class SettingsCardView: UIView {
             toggle.accessibilityLabel = row.title
             isAccessibilityElement = row.accessory != .toggle
             accessibilityLabel = [row.title, row.value].compactMap { $0 }.joined(separator: ", ")
-            accessibilityTraits = row.accessory == .toggle ? [] : .button
+            accessibilityHint = row.hint
+            accessibilityTraits = row.accessory == .toggle ? [] : row.action != nil ? .button : row.dimmed ? .notEnabled : .staticText
+            if row.menu.isEmpty {
+                removeInteraction(menuInteraction)
+            } else if !interactions.contains(where: { $0 === menuInteraction }) {
+                addInteraction(menuInteraction)
+            }
+            accessibilityCustomActions = row.menu.map { item in
+                UIAccessibilityCustomAction(name: item.title) { _ in item.run(); return true }
+            }
+        }
+
+        func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+            guard let items = row?.menu, !items.isEmpty else { return nil }
+            return UIContextMenuConfiguration(actionProvider: { _ in
+                UIMenu(children: items.map { item in
+                    UIAction(title: item.title, image: Glyphs.image(item.glyph, size: 17), attributes: item.destructive ? .destructive : []) { _ in item.run() }
+                })
+            })
         }
 
         static func color(_ tile: SettingsRow.Tile) -> ColorToken {
@@ -395,6 +482,7 @@ final class SettingsCardView: UIView {
             case .red: Palette.settingsTileRed
             case .teal: Palette.settingsTileTeal
             case .indigo: Palette.settingsTileIndigo
+            case .action: Palette.textLink
             }
         }
 
@@ -422,28 +510,90 @@ final class SettingsCardView: UIView {
     }
 }
 
+/// The lines under settings' cards, each where the layout put it.
+final class SettingsFooters {
+    static let font = Fonts.ui(.regular, size: 13)
+    private weak var container: UIView?
+    private var labels: [UILabel] = []
+
+    init(in container: UIView) { self.container = container }
+
+    /// `texts` by card, at `layout`'s footer frames.
+    func show(_ texts: [String?], layout: [SettingsLayout.Card]) {
+        let shown = zip(texts, layout).compactMap { text, card in text.flatMap { text in card.footer.map { (text, $0) } } }
+        while labels.count < shown.count {
+            let label = UILabel()
+            label.font = Self.font
+            label.textColor = UIColor(Palette.settingsSecondary)
+            label.numberOfLines = 0
+            container?.addSubview(label)
+            labels.append(label)
+        }
+        while labels.count > shown.count { labels.removeLast().removeFromSuperview() }
+        for (label, (text, frame)) in zip(labels, shown) {
+            label.text = text
+            label.frame = frame
+        }
+    }
+
+    /// What they say, top to bottom: for the tests.
+    var texts: [String] { labels.compactMap { $0.text } }
+}
+
 /// A profile's picture: a computer's own bytes, an account's from its
-/// server, else the placeholder its thumbhash makes; decoded off main.
+/// server, else the placeholder its thumbhash makes, else the one its ID
+/// picks (`AvatarPlaceholder`); decoded off main.
 @MainActor
 enum ProfilePictures {
+    /// The largest an account's placeholder is drawn: Settings' agent
+    /// picture.
+    static let placeholderSide = AgentEditButtonLayout.Metrics.avatar
+
+    /// What the account's placeholder is picked by: an agent connection's
+    /// computer, else the account's own ID (derived from its secret), so
+    /// it is the same on every phone.
+    static func placeholderSeed(_ account: AccountSummary, context: AppContext) -> String {
+        context.account.agentConnections.placeholderSeed(for: account.id) ?? account.id
+    }
+
     static func key(_ account: AccountSummary, context: AppContext) -> String {
         let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
         return direct.map { "\($0.avatarETag ?? ""):\($0.avatar?.count ?? 0):\($0.thumbhash ?? "")" } ?? account.avatarURL?.absoluteString ?? account.avatarThumbhash ?? ""
     }
 
+    /// What shows until `load` answers: the thumbhash, decoded now, so the
+    /// first frame has it.
+    static func placeholder(_ account: AccountSummary, context: AppContext) -> UIImage? {
+        let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
+        return ThumbHashImages.image(direct.map { $0.thumbhash } ?? account.avatarThumbhash)
+    }
+
+    /// What can show at once: the thumbhash, or, for an account with no
+    /// picture of its own, its placeholder if that is decoded already.
+    static func immediate(_ account: AccountSummary, context: AppContext) -> UIImage? {
+        if let thumbhash = placeholder(account, context: context) { return thumbhash }
+        let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
+        guard direct.map({ $0.avatar == nil }) ?? (account.avatarURL == nil) else { return nil }
+        return AvatarPlaceholderImages.cached(seed: placeholderSeed(account, context: context), side: placeholderSide)
+    }
+
+    /// Nil only when the placeholder isn't bundled.
     static func load(_ account: AccountSummary, context: AppContext) async -> UIImage? {
+        if let picture = await picture(account, context: context) { return picture }
+        return await AvatarPlaceholderImages.image(seed: placeholderSeed(account, context: context), side: placeholderSide)
+    }
+
+    /// The account's own picture or its thumbhash, or nil.
+    private static func picture(_ account: AccountSummary, context: AppContext) async -> UIImage? {
         let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
         let bytes = direct?.avatar
-        let connectionHash = direct?.thumbhash
         var image = await Task.detached { () -> UIImage? in
-            if let bytes, let image = AccountPictureImages.decode(bytes)?.picture as? UIImage { return image }
-            return connectionHash.flatMap { AccountPictureImages.placeholder($0)?.picture as? UIImage }
+            bytes.flatMap { AccountPictureImages.decode($0)?.picture as? UIImage }
         }.value
-        guard image == nil, direct == nil else { return image }
-        let pictures = context.account.pictures(for: account.id)
-        if let url = account.avatarURL { image = await pictures?.image(url) }
-        if image == nil, let hash = account.avatarThumbhash { image = await pictures?.placeholderImage(hash) }
-        return image
+        if image == nil, direct == nil, let url = account.avatarURL {
+            image = await context.account.pictures(for: account.id)?.image(url)
+        }
+        return image ?? placeholder(account, context: context)
     }
 }
 #endif

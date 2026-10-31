@@ -30,6 +30,9 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
         case text(String)
         /// A picture sent with a message, inline.
         case picture(id: String, mimeType: String, data: Data)
+        /// A file sent with a message the computer hasn't taken yet, from
+        /// its copy on this phone: a video's tile while it uploads.
+        case sentFile(SentFile)
         /// Pictures and videos an agent's tool presented, in `columns` (0:
         /// justified rows); read on demand.
         case gallery([Media], columns: Int)
@@ -47,6 +50,26 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
         /// A sidebar Prioritizing proposed (a `sidebar_proposal` artifact),
         /// drawn by the sidebar's own rows and answered where it stands.
         case sidebarProposal(artifactId: String)
+    }
+
+    /// A file of a message still on its way, by its piece's id
+    /// (`UploadProgressBoard.fileKey`).
+    public struct SentFile: Equatable, Sendable {
+        public var id: String
+        public var name: String
+        public var mimeType: String
+        public var file: URL
+        public var width: Int?
+        public var height: Int?
+
+        public init(id: String, name: String, mimeType: String, file: URL, width: Int? = nil, height: Int? = nil) {
+            self.id = id; self.name = name; self.mimeType = mimeType; self.file = file
+            self.width = width; self.height = height
+        }
+
+        public var isVideo: Bool { mimeType.hasPrefix("video/") }
+        /// A picture or video, drawn as a tile; anything else is named.
+        public var isVisual: Bool { isVideo || mimeType.hasPrefix("image/") }
     }
 
     public var id: String
@@ -210,6 +233,10 @@ public struct ChatSnapshot: Equatable, Sendable {
     /// own typing echoed back.
     public var draft = ""
     public var draftArrivals = 0
+    /// The phone's kept draft has been checked, including an empty or
+    /// missing copy. A screen's unsent prefill waits for this, since a
+    /// conversation read ahead may publish before its draft is attached.
+    public var localDraftLoaded = false
     /// When `draft` was written (ms since 1970): a draft from elsewhere
     /// older than what is being typed here isn't shown over it.
     public var draftUpdatedAt: Double = 0
@@ -300,8 +327,12 @@ public actor Conversation {
     /// The running turn and when it began (or when a send was taken, before
     /// its run is known).
     private var activeRun: (id: String?, startedAt: Double?)?
-    /// New work the daemon may not have made yet; sends wait for it.
-    private var creation: Task<String, Error>?
+    /// A task its first message makes (`NewTask`): until then nothing of it
+    /// is on the computer, and everything that goes there waits for it.
+    private var creation: NewTask?
+    /// Why the last send was refused before anything was drawn: the task
+    /// its first message makes could not be made.
+    public private(set) var sendRefusal: String?
     private var visible = false
     /// On screen, the reader at the newest message and at rest.
     private var readsNewest = false
@@ -319,12 +350,14 @@ public actor Conversation {
     private var lastDraftEdit: Double = 0
     static let draftDebounce: Duration = .milliseconds(300)
 
-    public init(client: AgentClient, store: Store, agentId: String, creation: Task<String, Error>? = nil, mode: AgentWire.Mode? = nil, persistence: SyncEngine? = nil) {
+    /// `newTask` opens the conversation of a task its first message makes,
+    /// under the ID named for it here.
+    public init(client: AgentClient, store: Store, agentId: String, newTask: NewTask? = nil, mode: AgentWire.Mode? = nil, persistence: SyncEngine? = nil) {
         self.client = client
         self.store = store
         self.persistence = persistence
-        self.agentId = agentId
-        self.creation = creation
+        self.agentId = newTask?.agentId ?? agentId
+        self.creation = newTask
         (updates, continuation) = AsyncStream.makeStream(of: ChatSnapshot.self, bufferingPolicy: .bufferingNewest(1))
         picked = mode
         self.mode = mode
@@ -341,12 +374,13 @@ public actor Conversation {
             snapshot.error = "Could not open this conversation on this device."; publish(); return
         }
         if let creation {
-            // New work has nothing to read yet: it is shown at once, empty.
+            // A new task has nothing to read yet: it is shown at once, empty,
+            // and followed once its first message has made it.
             snapshot.loaded = true
             publish()
             defaultMode = Task { [client] in try await client.defaultMode() }
             following = Task {
-                guard let id = try? await creation.value, !Task.isCancelled else { return }
+                guard let id = try? await creation.made(), !Task.isCancelled else { return }
                 await self.created(id)
             }
             return
@@ -587,6 +621,7 @@ public actor Conversation {
             messages[message.id] = message
             attachmentCleanup.insert(message.id)
             outgoing.removeAll { $0.id == message.id }
+            UploadProgressBoard.shared.clear(message: message.id)
             if let runId = payload["runId"]?.stringValue {
                 place(message.id, in: runId)
             } else if !pending.contains(message.id), !runs.contains(where: { $0.messageIds.contains(message.id) }) {
@@ -718,11 +753,20 @@ public actor Conversation {
 
     // MARK: Sending
 
-    /// Draws the message at once and sends it, after the new work it is in
-    /// has been made.
+    /// Draws the message and sends it. A new task's first message makes the
+    /// task first: refused, nothing is drawn, `sendRefusal` says why, and
+    /// false leaves the composer holding what it held.
     @discardableResult
     public func send(id: String = ClientID.make(), text: String, pictures: [(mimeType: String, data: Data)] = [], attachments: [OutgoingAttachment] = []) async -> Bool {
         guard !outgoing.contains(where: { $0.id == id }), messages[id] == nil else { return false }
+        sendRefusal = nil
+        if let creation {
+            do { agentId = try await creation.make() }
+            catch {
+                sendRefusal = Store.describe(error)
+                return false
+            }
+        }
         admitting.insert(id)
         defer { admitting.remove(id) }
         var inline = pictures
@@ -754,7 +798,7 @@ public actor Conversation {
         }
         if let persistence {
             do {
-                if let creation { agentId = try await creation.value }
+                if let creation { agentId = try await creation.make() }
                 try await checkpointClaim(for: "conversation:\(agentId)").value
                 try await persistence.enqueueMessage(queuedMessage(id: id, text: text, pictures: inline))
             }
@@ -786,6 +830,45 @@ public actor Conversation {
         deliver(id)
     }
 
+    /// Takes one picture or file (`key`, its piece's id) out of a message
+    /// the computer hasn't taken yet, and sends the rest of it; one left
+    /// with nothing is taken back whole.
+    public func removeAttachment(_ id: String, key: String) async {
+        guard let piece = UploadProgressBoard.piece(key, message: id),
+              let found = outgoing.first(where: { $0.id == id }), !found.accepted else { return }
+        // Nothing still sending writes the message as it was.
+        if let task = delivering[id] {
+            task.cancel()
+            await task.value
+        }
+        var withdrawn = false
+        if let persistence {
+            guard let result = try? await persistence.removeAttachment(id, piece), result.removed else { return }
+            withdrawn = result.message == nil
+        }
+        guard let index = outgoing.firstIndex(where: { $0.id == id }), !outgoing[index].accepted else { return }
+        switch piece {
+        case .picture(let at):
+            guard outgoing[index].pictures.indices.contains(at) else { return }
+            outgoing[index].pictures.remove(at: at)
+        case .file(let at):
+            guard outgoingFiles[id]?.indices.contains(at) == true else { return }
+            outgoingFiles[id]?.remove(at: at)
+        }
+        // What is left starts again under its new keys.
+        UploadProgressBoard.shared.clear(message: id)
+        let send = outgoing[index]
+        if withdrawn || (send.text.isEmpty && send.pictures.isEmpty && (outgoingFiles[id] ?? []).isEmpty) {
+            outgoing.remove(at: index)
+            outgoingModes.removeValue(forKey: id)
+            attachmentCleanup.insert(id)
+            publish()
+            return
+        }
+        publish()
+        if persistence == nil, send.failure == nil { deliver(id) }
+    }
+
     private func deliver(_ id: String) {
         guard delivering[id] == nil, !admitting.contains(id) else { return }
         let client = client
@@ -794,9 +877,9 @@ public actor Conversation {
             do {
                 if let persistence, !(await persistence.deliveryAllowed) { return }
                 guard await saveConversationNow() else { failed(id, "Could not save this message on this device."); return }
-                // New work: its conversation exists once the daemon has made it,
-                // under the ID the daemon gave it.
-                if let creation { agentId = try await creation.value }
+                // A new task: its conversation exists once the computer has
+                // made it, under the ID the computer gave it.
+                if let creation { agentId = try await creation.make() }
                 if let persistence, !(await persistence.deliveryAllowed) { return }
                 guard let outgoingIndex = outgoing.firstIndex(where: { $0.id == id }) else { return }
                 let send = outgoing[outgoingIndex]
@@ -831,6 +914,8 @@ public actor Conversation {
                 }
                 sent(id)
             } catch {
+                // Stopped to take a picture out (`removeAttachment`), which sends the rest.
+                if error is CancellationError { return }
                 if persistence != nil, !(error is AgentClientError) || (error as? AgentClientError)?.status.map({ $0 >= 500 }) == true {
                     // Offline sends stay queued and resume on the account's
                     // next resync, with the same daemon message ID.
@@ -990,6 +1075,7 @@ public actor Conversation {
 
     /// Accepted: it shows as waiting until its echo or its run arrives.
     private func sent(_ id: String) {
+        UploadProgressBoard.shared.clear(message: id)
         guard let index = outgoing.firstIndex(where: { $0.id == id }) else { return }
         outgoing[index].accepted = true
         // Until the run says when it began, the clock counts from the send.
@@ -1010,12 +1096,16 @@ public actor Conversation {
     /// at once, and goes to the computer if it never did.
     public func useDrafts(_ drafts: Drafts) async {
         self.drafts = drafts
-        guard creation == nil, let kept = await drafts.draft(agentId), kept.updatedAt > draft.updatedAt else { return }
+        defer {
+            snapshot.localDraftLoaded = true
+            publish()
+        }
+        // A new task's is kept under the ID named for it here.
+        guard let kept = await drafts.draft(agentId), kept.updatedAt > draft.updatedAt else { return }
         draft = kept
         snapshot.draft = kept.text
         snapshot.draftUpdatedAt = kept.updatedAt
         snapshot.draftArrivals += 1
-        publish()
         if !kept.synced { saveDraftSoon(after: .zero) }
     }
 
@@ -1056,8 +1146,15 @@ public actor Conversation {
     private func saveDraft(_ revision: Int) async {
         let local = draft
         do {
-            // New work's draft is under the ID the daemon gives it.
-            if let creation { agentId = try await creation.value }
+            // A new task's draft stays on this phone until its first message
+            // makes the task, then goes under the ID the computer gave it.
+            if let creation {
+                guard let made = await creation.madeAgentId else {
+                    await drafts?.keep(agentId, local)
+                    return
+                }
+                agentId = made
+            }
             await drafts?.keep(agentId, local)
             // Cleared, it is still the mode the next message goes with.
             let value = AgentWire.DraftValue(text: local.text, mode: try await sendingMode())
@@ -1197,8 +1294,9 @@ public actor Conversation {
             for (offset, picture) in send.pictures.enumerated() {
                 pieces.append(.picture(id: "\(send.id):\(offset + 1)", mimeType: picture.mimeType, data: picture.data))
             }
-            if let files = outgoingFiles[send.id], !files.isEmpty {
-                pieces.append(.text(files.map { "📎 \(AttachmentRules.safeName($0.name))" }.joined(separator: "\n")))
+            for (offset, file) in (outgoingFiles[send.id] ?? []).enumerated() {
+                pieces.append(.sentFile(ChatItem.SentFile(id: UploadProgressBoard.fileKey(send.id, offset), name: AttachmentRules.safeName(file.name),
+                    mimeType: file.mimeType, file: file.fileURL, width: file.width, height: file.height)))
             }
             items.append(ChatItem(id: send.id, role: .user, pieces: pieces, delivery: send.failure.map { .failed($0) } ?? (send.accepted ? .pending : .sending)))
         }

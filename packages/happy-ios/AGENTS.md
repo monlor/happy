@@ -31,6 +31,9 @@ nothing here is wired to the release skill or to EAS.
 6. **No icon fonts.** Icons are happy-app's glyphs as vector outlines
    (`HappyIcons`), drawn as template images. Keep the fonts' license
    notices in `Sources/HappyIcons/LICENSES.md`.
+   The avatar placeholders are Crafted Studios' shaders (MIT); their
+   license and notice sit beside them in
+   `Sources/HappyUI/Resources/AvatarPlaceholders`.
 7. **Telegram-iOS is a reference, never a source.** It is GPL-2.0. Study
    its techniques (async text layout, bubble animations, keyboard
    handling) and reimplement them; never copy its code, and don't depend
@@ -319,6 +322,22 @@ nothing here is wired to the release skill or to EAS.
     files deleted. Signed-out logout never deletes unknown RN bytes. If RN
     authenticates an account also held in an own item, recovery removes that
     redundant own item only after reading the shared credentials successfully.
+  - **Origin.** Each registry entry records how the account came here
+    (`AccountOrigin`). A *legacy* account exists elsewhere: carried over
+    from the RN app, restored from its secret key, or linked from another
+    device. Entries from before the field existed are legacy. One *made for
+    a computer* came from Add Agent with a `happy://terminal?` code
+    (`addAccount(approvingTerminal:)`):
+    - its secret is on this phone only. Settings › Account shows no secret
+      key and no Link New Device, and another device's `happy:///account?`
+      code is refused (`ScanProblem.accountNotShareable`). Sign-out warns
+      that nothing can open it again;
+    - it goes by the first computer paired with it, the earliest machine
+      in its store (`AccountDisplay.computerName`, cached in the registry);
+      "Agent" until that arrives. Only a legacy account with no profile
+      name is called "Legacy Account". There is never a "Happy account".
+    - A registry rebuilt from the Keychain after corruption loses the
+      origin, so those accounts come back as legacy.
   - **Account id.** The account's anonymous id, derived from its secret,
     so it is known offline and the same account is never listed twice.
   - **Separate caches.** Each account has its own directory,

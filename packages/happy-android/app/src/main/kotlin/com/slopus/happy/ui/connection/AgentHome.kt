@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +28,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarColors
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +49,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.slopus.happy.AppGraph
 import com.slopus.happy.R
 import com.slopus.happy.agent.AgentFeed
+import com.slopus.happy.agent.AgentFeedRow
 import com.slopus.happy.agent.AgentLinkStatus
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
@@ -74,6 +77,9 @@ class AgentHomeActions(
     val onSwitchAccount: (String) -> Unit,
     /** Scans a code and adds the Happy account or agent connection it is for. */
     val onAdd: () -> Unit,
+    /** Opens the agent's artifacts, and one Surface. */
+    val onOpenArtifacts: () -> Unit = {},
+    val onOpenSurface: (AgentFeedRow.Surface) -> Unit = {},
 )
 
 /** The colours of every bar on an agent connection's screens: the page's own [container], scrolled or not. */
@@ -128,10 +134,11 @@ internal fun AgentTopBar(
 
 /**
  * Home while an agent connection is open: a Material top app bar with the
- * account menu as its navigation, the agent's name (and, while the link
- * isn't up, how it stands) as its title, and search, settings and new chat
- * as its actions. No composer. Then the conversations ([AgentHomeList]),
- * or a state page while there are none to show. Search swaps the bar for a
+ * account menu (the agent's own picture) as its navigation, the agent's
+ * name as its title (with how the link stands under it while it's down),
+ * and search and settings as its actions. No composer. Then the
+ * conversations ([AgentHomeList]), with new chat as a floating button at
+ * the bottom end, or a state page while there are none to show. Search swaps the bar for a
  * search bar of the same height, and the results lie over home in a panel
  * of their own ([AgentSearchResults]), so opening and closing it moves
  * nothing and home keeps its scroll.
@@ -149,7 +156,6 @@ fun AgentHomeScreen(
     val colors = HappyTheme.colors
     var searching by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
-    var expanded by rememberSaveable { mutableStateOf(listOf<String>()) }
     val listState = rememberLazyListState()
     val focus = LocalFocusManager.current
     val closeSearch = {
@@ -159,7 +165,7 @@ fun AgentHomeScreen(
     }
     BackHandler(enabled = searching, onBack = closeSearch)
 
-    val items = remember(feed, expanded) { agentHomeItems(feed, expanded.toSet()) }
+    val items = remember(feed) { agentHomeItems(feed) }
     val searchEntries = rememberSearchEntries(actions)
     val untitled = stringResource(R.string.session_new_chat)
     val headings = Triple(
@@ -171,12 +177,13 @@ fun AgentHomeScreen(
         agentSearchResults(feed, query, untitled, headings, searchEntries.first, searchEntries.second)
     }
 
-    // One surface under the bar and the page, the chat's own (surface), light and dark.
-    Column(modifier = Modifier.fillMaxSize().background(colors.surface)) {
+    // One ground under the bar and the page, the chat's own (surface), light and dark; the cards sit on it, as on iOS.
+    val ground = colors.surface
+    Column(modifier = Modifier.fillMaxSize().background(ground)) {
         if (searching) {
             AgentTopBar(
                 tag = AgentHomeTags.BAR,
-                container = colors.surface,
+                container = ground,
                 navigationIcon = { BarIconButton(Ionicon.ArrowBack, stringResource(R.string.common_back), closeSearch) },
                 title = { AgentSearchField(query, { query = it }) },
                 actions = {
@@ -188,7 +195,7 @@ fun AgentHomeScreen(
         } else {
             AgentTopBar(
                 tag = AgentHomeTags.BAR,
-                container = colors.surface,
+                container = ground,
                 navigationIcon = {
                     Box(Modifier.padding(horizontal = 4.dp)) { AccountMenuButton(accounts, actions.onSwitchAccount, actions.onAdd) }
                 },
@@ -196,7 +203,6 @@ fun AgentHomeScreen(
                 actions = {
                     BarIconButton(Ionicon.SearchOutline, stringResource(R.string.agent_search_open), { searching = true }, Modifier.testTag(AgentHomeTags.SEARCH))
                     BarIconButton(Ionicon.SettingsOutline, stringResource(R.string.settings_title), actions.onSettings, Modifier.testTag(AgentHomeTags.SETTINGS))
-                    BarIconButton(Ionicon.CreateOutline, stringResource(R.string.home_compose), actions.onCompose, Modifier.testTag(AgentHomeTags.COMPOSE))
                 },
             )
         }
@@ -220,7 +226,8 @@ fun AgentHomeScreen(
                     },
                     body = statusMessage(status) ?: stringResource(R.string.agent_home_offline_body),
                 )
-                items.isEmpty() -> StatePage(
+                // Artifacts alone is no home yet: the first chat is.
+                feed.rows.all { it is AgentFeedRow.Section || it == AgentFeedRow.Artifacts } -> StatePage(
                     tag = AgentHomeTags.EMPTY,
                     art = if (statusMessage(status) == null) StateArt.Make else null,
                     title = stringResource(R.string.agent_home_empty_title),
@@ -232,13 +239,30 @@ fun AgentHomeScreen(
                     state = listState,
                     now = now,
                     onOpen = actions.onOpenConversation,
-                    onToggle = { id -> expanded = if (id in expanded) expanded - id else expanded + id },
-                    contentPadding = PaddingValues(top = 4.dp),
+                    onOpenArtifacts = actions.onOpenArtifacts,
+                    onOpenSurface = actions.onOpenSurface,
+                    contentPadding = PaddingValues(),
                     header = statusMessage(status)?.let { text ->
                         { item(key = "banner", contentType = "banner") { Banner(text) } }
                     },
-                    bottom = { Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = 24.dp)) },
+                    // Room for the last card to scroll clear of the compose button.
+                    bottom = { Spacer(Modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = AgentHomeSpec.fabClearance)) },
                 )
+            }
+            if (feed.loaded && !searching) {
+                // At the end of the content column, so on a tablet it stays with the rows.
+                Box(Modifier.align(Alignment.BottomCenter).contentMaxWidth(LocalWindowLayout.current)) {
+                    FloatingActionButton(
+                        onClick = actions.onCompose,
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .windowInsetsPadding(WindowInsets.navigationBars)
+                            .padding(AgentHomeSpec.fabMargin)
+                            .testTag(AgentHomeTags.COMPOSE),
+                    ) {
+                        Icon(Ionicon.CreateOutline, 24.dp, LocalContentColor.current, contentDescription = stringResource(R.string.home_compose))
+                    }
+                }
             }
             if (searching && query.isNotBlank()) {
                 // Home dims under the results, and a tap on it ends the search; it stays as it was underneath.
@@ -287,18 +311,29 @@ private fun rememberSearchEntries(actions: AgentHomeActions): Pair<List<AgentSea
     }
 }
 
-/** The agent's name, the bar's title; under it, while the link isn't up, how it stands. */
+/**
+ * The agent's name, the bar's title. While the link isn't up, how it
+ * stands (connecting, offline, removed, update required) follows the name
+ * on the same line, so the name never moves; online says nothing.
+ */
 @Composable
 private fun BarTitle(name: String, status: AgentLinkStatus) {
     val colors = HappyTheme.colors
-    Column {
-        Text(name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            name,
+            style = AgentHomeSpec.barTitle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false).testTag(AgentHomeTags.TITLE),
+        )
         if (status != AgentLinkStatus.Connected) {
             val color = when (status) {
                 AgentLinkStatus.Connecting -> colors.status.connecting
                 AgentLinkStatus.Offline -> colors.status.disconnected
                 else -> colors.status.error
             }
+            Spacer(Modifier.width(10.dp))
             Row(modifier = Modifier.testTag(AgentHomeTags.STATUS), verticalAlignment = Alignment.CenterVertically) {
                 StatusDot(color = color, pulsing = status == AgentLinkStatus.Connecting, size = 6.dp)
                 Spacer(Modifier.width(6.dp))
@@ -306,7 +341,7 @@ private fun BarTitle(name: String, status: AgentLinkStatus) {
                     stringResource(
                         when (status) {
                             AgentLinkStatus.Connecting -> R.string.status_connecting
-                            AgentLinkStatus.Offline -> R.string.agent_home_status_offline
+                            AgentLinkStatus.Offline -> R.string.status_offline
                             AgentLinkStatus.Revoked -> R.string.agent_home_status_revoked
                             else -> R.string.agent_home_status_update
                         },
@@ -358,6 +393,8 @@ fun AgentHome(
     onCompose: () -> Unit,
     onSettings: () -> Unit,
     onAppearance: () -> Unit,
+    onOpenArtifacts: () -> Unit = {},
+    onOpenSurface: (AgentFeedRow.Surface) -> Unit = {},
 ) {
     val session = remember(id) { graph.agentSessions.session(id) } ?: return
     val agents by graph.agentConnections.accounts.collectAsStateWithLifecycle()
@@ -372,7 +409,7 @@ fun AgentHome(
         }
     }
     val add = LocalAddFlow.current
-    val actions = remember(graph, onOpenConversation, onCompose, onSettings, onAppearance, add) {
+    val actions = remember(graph, onOpenConversation, onCompose, onSettings, onAppearance, onOpenArtifacts, onOpenSurface, add) {
         AgentHomeActions(
             onOpenConversation = onOpenConversation,
             onCompose = onCompose,
@@ -380,14 +417,18 @@ fun AgentHome(
             onAppearance = onAppearance,
             onSwitchAccount = { graph.open(it) },
             onAdd = { add?.scan() },
+            onOpenArtifacts = onOpenArtifacts,
+            onOpenSurface = onOpenSurface,
         )
     }
-    AgentHomeScreen(
-        name = agents.firstOrNull { it.id == id }?.name.orEmpty(),
-        feed = feed,
-        status = status,
-        accounts = rememberAccountMenu(graph),
-        actions = actions,
-        now = now,
-    )
+    CompositionLocalProvider(LocalAgentPictures provides session.pictures) {
+        AgentHomeScreen(
+            name = agents.firstOrNull { it.id == id }?.name.orEmpty(),
+            feed = feed,
+            status = status,
+            accounts = rememberAccountMenu(graph),
+            actions = actions,
+            now = now,
+        )
+    }
 }

@@ -4,7 +4,9 @@ import HappyWire
 public struct HomeSnapshot: Equatable, Sendable {
     public var loaded = false
     public var live = false
-    public var usesSpaces = false
+    /// Bootstrap/sidebar reconciliation is still running. An open stream
+    /// alone does not mean the phone has caught up.
+    public var syncing = true
     public var rows: [Row] = []
     public var allRows: [Row] = []
     public var settings: [String: JSONValue] = [:]
@@ -24,21 +26,26 @@ public actor SyncEngine {
     private var storage: SyncStorage?
     private var desktop: DesktopSnapshot?
     private var snapshot = HomeSnapshot()
-    private var collapsed: Set<String> = []
     private var listeners: [UUID: AsyncStream<HomeSnapshot>.Continuation] = [:]
     private var runner: Task<Void, Never>?
     private var refresh: Task<Void, Never>?
     private var delivery: Task<Void, Never>?
     private var messageDelivery: Task<Void, Never>?
     private var messageListeners: [UUID: (agentID: String, continuation: AsyncStream<DeliveryEvent>.Continuation)] = [:]
+    private var profileListeners: [UUID: AsyncStream<Void>.Continuation] = [:]
     private var verified = false
     private var settingsDeliveryDirty = false
     private var messageDeliveryDirty = false
+    /// The queued message being delivered now, and those being changed,
+    /// which delivery leaves until they are written again.
+    private var deliveringMessage: String?
+    private var holding: Set<String> = []
     private var generation = 0
     private var stopped = false
     private var cursor: String?
     private var dirty = false
     private var revision = 0
+    private var sidebarSyncing = false
 
     public init(client: AgentClient, directory: URL?) {
         self.client = client
@@ -56,6 +63,23 @@ public actor SyncEngine {
         continuation.yield(snapshot)
         continuation.onTermination = { [weak self] _ in Task { await self?.removeListener(id) } }
         return stream
+    }
+
+    /// A beat whenever the person's profile may have changed elsewhere: a
+    /// `profile.updated`, or the stream coming back after missing some.
+    /// Whoever shows the profile reads it again.
+    public func profileUpdates() -> AsyncStream<Void> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        profileListeners[id] = continuation
+        continuation.onTermination = { [weak self] _ in Task { await self?.removeProfileListener(id) } }
+        return stream
+    }
+
+    private func removeProfileListener(_ id: UUID) { profileListeners.removeValue(forKey: id) }
+
+    private func profileChanged() {
+        for listener in profileListeners.values { listener.yield() }
     }
 
     public var deliveryAllowed: Bool { !stopped && runner != nil && verified }
@@ -97,6 +121,8 @@ public actor SyncEngine {
         listeners.removeAll()
         for listener in messageListeners.values { listener.continuation.finish() }
         messageListeners.removeAll()
+        for listener in profileListeners.values { listener.finish() }
+        profileListeners.removeAll()
     }
 
     private func database() throws -> SyncStorage {
@@ -114,7 +140,6 @@ public actor SyncEngine {
                 cursor = cached.cursor
             }
             snapshot.settings = try await database.settings()
-            if let folds = try await database.checkpoint("folds")?.value.arrayValue { collapsed = Set(folds.compactMap(\.stringValue)) }
             guard current(generation) else { return }
             derive()
             await spaces.startExternal()
@@ -126,6 +151,9 @@ public actor SyncEngine {
         var attempt = 0
         while current(generation) {
             do {
+                sidebarSyncing = false
+                snapshot.syncing = true
+                publish()
                 try await reconcile(generation)
                 beginDelivery(generation)
                 beginMessageDelivery(generation)
@@ -133,27 +161,27 @@ public actor SyncEngine {
                 for try await frame in stream {
                     guard current(generation) else { return }
                     if frame.event == "hello" {
+                        sidebarSyncing = true
+                        snapshot.syncing = true
                         snapshot.live = true; snapshot.error = nil; attempt = 0
                         publish()
                         // The bootstrap cursor precedes its reads. Opening from
                         // it is safe even after a crash, replay or daemon replacement.
                         let hello = try JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8))
                         if hello["gap"] == .bool(true) { scheduleReconcile(generation) }
-                        await spaces.externalResync(loadSidebar: snapshot.usesSpaces)
+                        profileChanged()
+                        try await resyncSidebar(generation)
                         continue
                     }
                     guard let event = try? JSONDecoder().decode(JSONValue.self, from: Data(frame.data.utf8)) else { continue }
                     await spaces.externalEvent(event)
                     guard current(generation) else { return }
+                    if event["type"] == .string("profile.updated") { profileChanged() }
                     if event["type"] == .string("user_settings.updated"), let value = event["payload"]?["setting"],
                        let setting = try? JSONDecoder().decode(UserSetting.self, from: JSONEncoder().encode(value)) {
                         try await database().receiveSetting(setting.key, value: setting.value, version: setting.version)
                         snapshot.settings = try await database().settings()
-                        // V2 turned on here: its sidebar is read now,
-                        // or the home has nothing to draw until a relaunch.
-                        let previouslySpaces = snapshot.usesSpaces
                         derive()
-                        if snapshot.usesSpaces && !previouslySpaces { await spaces.externalResync(loadSidebar: true) }
                     }
                     // Events are delivery hints, never a durable checkpoint.
                     // Coalesce catalog invalidations; message token events go
@@ -180,6 +208,17 @@ public actor SyncEngine {
 
     private func current(_ generation: Int) -> Bool { !stopped && !Task.isCancelled && self.generation == generation }
 
+    private func resyncSidebar(_ generation: Int) async throws {
+        sidebarSyncing = true
+        if !snapshot.syncing { snapshot.syncing = true; publish() }
+        let ready = await spaces.externalResync(loadSidebar: false)
+        guard current(generation) else { throw CancellationError() }
+        guard ready else { throw AgentClientError.invalidResponse }
+        sidebarSyncing = false
+        snapshot.syncing = !snapshot.live || refresh != nil
+        publish()
+    }
+
     private func scheduleReconcile(_ generation: Int) {
         dirty = true
         revision += 1
@@ -199,7 +238,13 @@ public actor SyncEngine {
                     failures += 1
                 }
             }
-            if self.generation == generation { refresh = nil }
+            if self.generation == generation {
+                refresh = nil
+                if snapshot.live && !sidebarSyncing && snapshot.syncing {
+                    snapshot.syncing = false
+                    publish()
+                }
+            }
         }
     }
 
@@ -235,9 +280,7 @@ public actor SyncEngine {
         verified = true
         cursor = desktop.cursor
         snapshot.settings = try await database.settings()
-        let previouslySpaces = snapshot.usesSpaces
         derive()
-        if snapshot.usesSpaces && !previouslySpaces { await spaces.externalResync(loadSidebar: true) }
     }
 
     public func setProjectsHidden(_ hidden: Bool) async throws {
@@ -312,18 +355,10 @@ public actor SyncEngine {
         }
     }
 
-    public func fold(_ id: String) async throws {
-        if !collapsed.insert(id).inserted { collapsed.remove(id) }
-        if collapsed.count > 512 { collapsed.remove(collapsed.sorted().first!) }
-        try await database().commit(.init(value: .array(collapsed.sorted().map(JSONValue.string)), cursor: nil), named: "folds")
-        derive()
-    }
-
     private func derive() {
         snapshot.loaded = desktop != nil
-        snapshot.usesSpaces = snapshot.settings[DesktopSettingKeys.v2] == .bool(true)
         if let desktop {
-            snapshot.allRows = SidebarRows.make(desktop, settings: snapshot.settings, collapsed: collapsed)
+            snapshot.allRows = SidebarRows.make(desktop, settings: snapshot.settings)
             snapshot.rows = Rows.visible(snapshot.allRows)
         }
         publish()
@@ -354,6 +389,38 @@ public actor SyncEngine {
         beginMessageDelivery(generation)
     }
 
+    /// Takes one picture or file out of a queued message the computer
+    /// hasn't taken, stopping its delivery first so nothing writes the old
+    /// one back; one left with nothing goes whole. The message as it is
+    /// now (nil: gone), or nil, false when it was already sent.
+    public func removeAttachment(_ id: String, _ piece: UploadProgressBoard.Piece) async throws -> (message: QueuedMessage?, removed: Bool) {
+        holding.insert(id)
+        defer {
+            holding.remove(id)
+            beginMessageDelivery(generation)
+        }
+        if deliveringMessage == id, let task = messageDelivery {
+            task.cancel()
+            await task.value
+        }
+        let database = try database()
+        guard var message = try await database.queuedMessages().first(where: { $0.id == id }) else { return (nil, false) }
+        switch piece {
+        case .picture(let index):
+            guard message.pictures.indices.contains(index) else { return (message, false) }
+            message.pictures.remove(at: index)
+        case .file(let index):
+            guard let files = message.files, files.indices.contains(index) else { return (message, false) }
+            message.files?.remove(at: index)
+        }
+        if message.text.isEmpty, message.pictures.isEmpty, (message.files ?? []).isEmpty {
+            try await database.acknowledgeMessage(id)
+            return (nil, true)
+        }
+        try await database.updateMessage(message)
+        return (message, true)
+    }
+
     public func queuedMessages(for agentID: String) async throws -> [QueuedMessage] {
         try await database().queuedMessages().filter { $0.agentID == agentID }
     }
@@ -378,10 +445,13 @@ public actor SyncEngine {
             var blocked = Set<String>()
             var candidate: QueuedMessage?
             for message in queued {
-                if message.failure != nil { blocked.insert(message.agentID) }
+                // One being changed holds its conversation's later ones, in order.
+                if message.failure != nil || holding.contains(message.id) { blocked.insert(message.agentID) }
                 else if !blocked.contains(message.agentID) { candidate = message; break }
             }
             guard var message = candidate else { return }
+            deliveringMessage = message.id
+            defer { deliveringMessage = nil }
             do {
                 let migrated = try AttachmentRules.migratePictures(message, directory: attachmentDirectory)
                 if migrated != message {

@@ -134,7 +134,7 @@ final class SessionInfoViewController: UIViewController {
         // Header.tsx's title and every row's Text scale; the rows are
         // measured from their labels as drawn, as Settings' are.
         followsTextSize()
-        showsBackTitle()
+        minimalBackButton()
         dropsBackButtonOnTablet() // Tablet (HappyUI/Tablet): navigation/Header.tsx
         // The title home already shows, in the bar as the screen slides in.
         // The first frame of the session's own snapshot sets the same title,
@@ -627,9 +627,47 @@ final class SessionInfoViewController: UIViewController {
         return row
     }
 
+    /// The chat this profile was opened over, which holds the composer the
+    /// permission mode is picked through; nil opened from anywhere else.
+    private var chatBeneath: LegacyChatViewController? {
+        guard let stack = navigationController?.viewControllers, let index = stack.firstIndex(of: self), index > 0,
+              let chat = stack[index - 1] as? LegacyChatViewController, chat.chatId == sessionId else { return nil }
+        return chat
+    }
+
+    /// The chat's permission mode, which its header's More menu used to
+    /// pick: the current one as the row's value, the modes a pull-down from
+    /// the row, a pick going through the chat's composer as before.
+    private weak var permissionRow: ItemRowView?
+
+    private func permissionModeRow(_ choice: PermissionModeChoice) -> UIView {
+        let row = ItemRowView(title: Strings.ChatActions.permissionMode, detail: choice.current, icon: icon("shield-checkmark-outline", SecondaryPalette.blue))
+        let button = MenuRowButton(frame: row.bounds)
+        button.menuFor = { [weak self] in
+            self?.chatBeneath?.permissionChoice?.uiMenu { [weak self] in self?.refreshPermissionMode() }
+        }
+        button.accessibilityIdentifier = "profile-permission-mode"
+        button.accessibilityLabel = Strings.ChatActions.permissionMode
+        button.accessibilityValue = choice.current
+        row.addSubview(button)
+        row.isAccessibilityElement = false
+        row.accessibilityElements = [button]
+        permissionRow = row
+        return row
+    }
+
+    private func refreshPermissionMode() {
+        guard let row = permissionRow, let current = chatBeneath?.permissionChoice?.current else { return }
+        row.detail = current
+        row.subviews.compactMap { $0 as? MenuRowButton }.first?.accessibilityValue = current
+    }
+
     private func quickActions(_ model: SessionInfoModel, forking: Bool) -> GroupPlan {
         typealias S = Strings.SessionDetail
         var rows: [() -> UIView] = []
+        if let choice = chatBeneath?.permissionChoice {
+            rows.append { [unowned self] in permissionModeRow(choice) }
+        }
         rows.append { [unowned self] in
             let changes = ItemRowView(
                 title: Strings.FilesDetail.changes,
@@ -781,6 +819,10 @@ final class SessionInfoViewController: UIViewController {
         var rows: [() -> UIView] = []
         rows.append { [unowned self] in info(S.host, subtitle: metadata.host, icon: icon("desktop-outline", purple)) }
         rows.append { [unowned self] in info(S.path, subtitle: metadata.path, icon: icon("folder-outline", purple)) }
+        // Once under the chat's name in its header, where its status is now.
+        if let branch = model.branch {
+            rows.append { [unowned self] in info(Strings.ChatActions.branch, subtitle: branch, icon: icon("git-branch-outline", purple)) }
+        }
         if let version = metadata.cliVersion {
             rows.append { [unowned self] in
                 info(S.cliVersion, subtitle: version, detail: model.cliOutdated ? "⚠️" : nil,
