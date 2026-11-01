@@ -16,15 +16,15 @@ struct HomeRowDrawing: Sendable {
         case clip(CGRect)
     }
 
-    /// How a row answers a finger, as its table cell does.
+    /// How a row answers a finger, as the table's cells did.
     enum Press: Sendable, Equatable {
-        /// No feedback: headings, and the tablet's cells.
+        /// No feedback: headings, and the tablet's chats and cards.
         case none
-        /// A fill behind the content: a flat session's selected background
-        /// (SessionRowCell), a project row's pressed one (HomeCardCell).
+        /// A fill behind the content: a flat session's selected background,
+        /// a project row's pressed one.
         case fill(ColorToken)
-        /// The content at half strength over an unchanged background
-        /// (ArchiveToggleCell).
+        /// The content at half strength over an unchanged background: the
+        /// archive toggle.
         case dim
     }
 
@@ -49,14 +49,14 @@ struct HomeRowDrawing: Sendable {
     var avatarAlpha: CGFloat = 1
     var monochromeAvatar = false
     var addFrame: CGRect?
-    var shimmer: (String, TextStyle, CGRect)?
+    /// A title whose work runs: drawn in the bitmap like any, with a
+    /// sheen band over it in the overlay (`ShimmerBand`).
+    var shimmer: ShimmerTitle?
     var accessibilityLabel = ""
     var accessibilityValue: String?
     var isHeading = false
     var contentAlpha: CGFloat = 1
     var pulsingDots: [(ColorToken, CGRect)] = []
-    var provider: (ProviderIconKind, CGRect)?
-    var roundAdd = false
     let environment: HomeTextEnvironment
     let dark: Bool
     /// Archived phone rows have fixed geometry for their only live overlay
@@ -122,6 +122,31 @@ struct HomeRowDrawing: Sendable {
         }
     }
 
+    /// A shimmering title: its words, how they are drawn, and how wide
+    /// they run in their frame.
+    struct ShimmerTitle: Sendable {
+        var value: String
+        var style: TextStyle
+        var color: ColorToken
+        var frame: CGRect
+        var runWidth: CGFloat
+    }
+
+    /// The surface the title sits on, which the band mixes toward.
+    var shimmerGround: ColorToken { card?.color ?? background ?? Palette.surface }
+
+    /// The shimmering title again in the sheen band's colour, at the
+    /// origin of its own frame: the copy its band masks.
+    nonisolated func drawShimmerCopy(in context: CGContext) {
+        guard let shimmer else { return }
+        var copy = self
+        copy.deferredDrawing = nil
+        copy.contentAlpha = 1
+        let band = Shimmer.highlight(.sheen, ink: shimmer.color, ground: shimmerGround)
+        copy.marks = [.text(shimmer.value, shimmer.style, band, CGRect(origin: .zero, size: shimmer.frame.size))]
+        copy.draw(in: context)
+    }
+
     nonisolated func resolved(_ token: ColorToken) -> UIColor {
         UIColor(dark ? token.dark : token.light)
     }
@@ -137,7 +162,9 @@ struct HomeRowDrawing: Sendable {
         let rowWidth = inCard ? HomeCardLayout.contentWidth(width) : width
         var separatorX: CGFloat = ProjectListMetrics.nameX
         func measured(_ value: String, _ style: TextStyle) -> Measurable {
-            if deferred { return .fixed(.zero) }
+            // Unmeasured, but as tall as the one line it is: a row's
+            // height follows its text.
+            if deferred { return .fixed(width: 0, height: value.isEmpty ? 0 : style.oneLine(in: environment.text)) }
             return Measurable { HomeRowMeasurer.measure(value, style: style, in: environment.text, width: $0, maxLines: 1) }
         }
         func text(_ value: String, _ style: TextStyle, _ color: ColorToken, _ frame: CGRect) {
@@ -147,8 +174,11 @@ struct HomeRowDrawing: Sendable {
             if let frame { plan.marks.append(.fill(color, frame, round: round)) }
         }
         func title(_ value: String, style: TextStyle, frame: CGRect, working: Bool, color: ColorToken = Palette.text) {
-            if working { plan.shimmer = (value, style, frame) }
-            else { text(value, style, color, frame) }
+            text(value, style, color, frame)
+            guard working else { return }
+            // The band runs across the words, not the column they sit in.
+            let advance = deferred ? frame.width : HomeRowMeasurer.measure(value, style: style, in: environment.text, width: .greatestFiniteMagnitude, maxLines: 1).width
+            plan.shimmer = ShimmerTitle(value: value, style: style, color: color, frame: frame, runWidth: min(advance, frame.width))
         }
         func activity(_ activity: HomeActivity, frame: CGRect?) {
             guard activity.blocked || activity.unread else { return }
@@ -211,7 +241,7 @@ struct HomeRowDrawing: Sendable {
         case .project(.archived(let row)): session(row, archived: true)
         case .flat(.dayHeader), .project(.section), .project(.archiveHeader):
             // Only the room between two cards.
-            plan.size = CGSize(width: width, height: HomeRowHeights.gap)
+            plan.size = CGSize(width: width, height: HomeCardLayout.Metrics.gap)
         case .flat(.archiveToggle(let hidden)), .project(.archiveToggle(let hidden)):
             let value = catalog(hidden ? "sidebar.showArchived" : "sidebar.hideArchived")
             let layout = ArchiveToggleLayout(width: width, label: measured(value, TextStyles.archiveToggle), paddingTop: grouped ? ArchiveToggleLayout.unbanded.top : ArchiveToggleLayout.Metrics.paddingTop, paddingBottom: grouped ? ArchiveToggleLayout.unbanded.bottom : ArchiveToggleLayout.Metrics.paddingBottom)
@@ -306,9 +336,8 @@ struct HomeRowDrawing: Sendable {
         }
         avatarFrame = moved(avatarFrame)
         addFrame = addFrame.map(moved)
-        shimmer = shimmer.map { ($0.0, $0.1, moved($0.2)) }
+        shimmer = shimmer.map { ShimmerTitle(value: $0.value, style: $0.style, color: $0.color, frame: moved($0.frame), runWidth: $0.runWidth) }
         pulsingDots = pulsingDots.map { ($0.0, moved($0.1)) }
-        provider = provider.map { ($0.0, moved($0.1)) }
     }
 
     nonisolated static func canDeferArchiveText(_ row: HomeListRow) -> Bool {

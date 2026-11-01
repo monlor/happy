@@ -81,14 +81,23 @@ extension Strings {
     public static let connecting = "Connecting…"
     public static let offline = "Offline — showing what this phone last saw."
     public static let unanswered = "The computer did not answer."
-    /// A new task's first message couldn't make the task; nothing was sent.
-    public static func newTaskFailed(_ reason: String) -> String {
-        "The task could not be started.\(reason.isEmpty ? "" : " \(reason)") Your text and attachments are still here."
+    /// An action the computer refused, undone here.
+    public static let refused = "The computer refused that, so it was undone."
+    /// New work's first message couldn't make it; nothing was sent.
+    public static func newWorkFailed(_ kind: NewTask.Kind, _ reason: String) -> String {
+        "The \(kind == .bot ? "bot" : "task") could not be started.\(reason.isEmpty ? "" : " \(reason)") Your text and attachments are still here."
     }
 
     // New work (MakeStuffView.tsx).
     public static let introLine = "Say what it is — it’ll find its place."
-    public static let composerPlaceholder = "Describe it…"
+
+    // What new work will be (`NewWorkPanel`); desktop's create-bot page
+    // asks the name as "Name, generated if left blank".
+    public static let newWorkTask = "Task"
+    public static let newWorkBot = "Bot"
+    public static let newWorkName = "Name (optional)"
+    public static let newWorkTaskNote = "A task names itself from its first message unless you name it."
+    public static let newWorkBotNote = "A bot is one lasting conversation with a folder of its own."
 
     // The working line (AgentWorkingStatus.tsx, happyAgentConnection's `activityOf`).
     public static let phaseWaitingForModel = "Waiting for model"
@@ -221,13 +230,15 @@ extension Strings {
     public static let language = "Language"
     public static let disconnect = "Disconnect"
     public static let signOut = "Sign out"
-    public static let addHappyAccount = "Add Happy account"
-    public static let agentConnection = "Agent"
-    /// A Happy account carried over or restored from elsewhere, with no
-    /// name of its own yet. One made for a computer goes by the computer.
-    public static let legacyAccount = "Legacy Account"
-    public static let disconnectTitle = "Disconnect agent?"
-    public static let signOutTitle = "Sign out?"
+    public static var addHappyAccount: String { AccountKind.addCLIAccount }
+    /// What an agent connection is, said where its kind is named.
+    public static let agentConnection = AccountKind.agent
+    /// What a Happy account on the relay is, and what one with no name of
+    /// its own yet is called (one made for a computer goes by the computer
+    /// once it has paired).
+    public static let legacyAccount = AccountKind.cli
+    public static var disconnectTitle: String { AccountKind.disconnectAgentTitle }
+    public static var signOutTitle: String { AccountKind.signOutCLITitle }
     public static let removeDetail = "This removes the connection and its credentials from this phone."
     public static let couldNotRename = "Could not rename"
     public static let couldNotSwitch = "Could not switch"
@@ -235,11 +246,9 @@ extension Strings {
     public static let nothingFound = "Nothing found"
     // The QR sheet: nothing is shared, so Scan comes first.
     public static let qrCode = "QR Code"
-    public static let qrText = "Scan an agent’s pairing code, or a code from the terminal or another device."
+    public static let qrText = "Scan a Happy Agent pairing code, or a Happy CLI code from the terminal or another device."
     public static let scanQRCode = "Scan QR Code"
     public static let enterLink = "Enter link manually"
-    public static let signInFirst = "Sign in to Happy"
-    public static let signInFirstDetail = "Sign in to a Happy account before connecting this kind of code."
 
     // The composer's pickers (desktop's ComposerModelControl, flattened).
     public static let model = "Model"

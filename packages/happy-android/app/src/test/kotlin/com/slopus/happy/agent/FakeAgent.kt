@@ -17,9 +17,10 @@ object Wire {
         id: String, workspaceId: String = "w$id", version: String = "01", title: String? = null, status: String = "idle",
         unread: Boolean = false, question: Boolean = false, subtask: Boolean = false, parent: String? = null,
         subtasks: List<JsonObject> = emptyList(), archivedAt: Long? = null, orderKey: String? = null, visible: Boolean = true,
-        updatedAt: Long = 2L,
+        updatedAt: Long = 2L, wait: Boolean = false,
     ) = buildJsonObject {
         put("id", id); put("workspaceId", workspaceId); put("version", version); put("status", status)
+        if (wait) put("wait", buildJsonObject { put("startedAt", 1L); put("dueAt", 99L) })
         put("parentAgentId", parent); put("subtask", subtask); put("userVisible", visible)
         put("title", title); put("titleStatus", if (title == null) "idle" else "ready")
         put("pendingQuestionId", if (question) "q$id" else null)
@@ -44,11 +45,11 @@ object Wire {
 
     fun membership(taskId: String, orderKey: String) = buildJsonObject { put("taskId", taskId); put("orderKey", orderKey) }
 
-    fun project(id: String, name: String, agents: List<JsonObject>, orderKey: String = "1", version: String = "01", avatarUrl: String? = null) = buildJsonObject {
+    /** [avatar] is the wire's project `avatar` (API.md "Projects"): `image` with [thumbhash], `home`, or null for none. */
+    fun project(id: String, name: String, agents: List<JsonObject>, orderKey: String = "1", version: String = "01", avatar: String? = null, thumbhash: String? = null) = buildJsonObject {
         put("id", id); put("name", name); put("version", version); put("orderKey", orderKey); put("status", "active")
         put("agents", JsonArray(agents))
-        // A repo the agent cloned: its picture, daemon-relative.
-        if (avatarUrl != null) put("avatar", buildJsonObject { put("url", avatarUrl) })
+        put("avatar", avatar?.let { kind -> buildJsonObject { put("kind", kind); if (kind == "image") { put("thumbhash", thumbhash); put("source", "user") } } } ?: kotlinx.serialization.json.JsonNull)
     }
 
     fun workspace(id: String, projectId: String, name: String, agents: List<JsonObject>, orderKey: String = "1") = buildJsonObject {
@@ -69,13 +70,22 @@ object Wire {
     fun bootstrap(
         projects: List<JsonObject> = emptyList(), workspaces: List<JsonObject> = emptyList(), bots: List<JsonObject> = emptyList(),
         tasks: List<JsonObject> = emptyList(), memberships: List<JsonObject> = emptyList(), cursor: String = "c0",
-        surfaces: List<JsonObject>? = null,
+        surfaces: List<JsonObject>? = null, userSettings: List<JsonObject>? = null,
     ) = buildJsonObject {
         put("projects", JsonArray(projects)); put("workspaces", JsonArray(workspaces)); put("bots", JsonArray(bots))
         put("tasks", JsonArray(tasks)); put("taskMemberships", JsonArray(memberships)); put("cursor", cursor)
         if (surfaces != null) put("surfaces", JsonArray(surfaces))
+        if (userSettings != null) put("userSettings", JsonArray(userSettings))
         put("profile", buildJsonObject { put("userId", USER) })
     }
+
+    /** A user setting object (API.md, "The setting object"). */
+    fun setting(key: String, value: kotlinx.serialization.json.JsonElement, version: String, updatedAt: Long = 1L) = buildJsonObject {
+        put("key", key); put("value", value); put("updatedAt", updatedAt); put("version", version)
+    }
+
+    /** Desktop's Hide projects as the agent stores it. */
+    fun projectsHidden(hidden: Boolean, version: String) = setting(DesktopSettings.PROJECTS_VISIBILITY, DesktopSettings.projectsVisibility(hidden), version)
 
     fun event(cursor: String, type: String, payload: JsonObject) = AgentEvent(cursor, type, payload)
 
@@ -99,8 +109,8 @@ object Wire {
  * [frames] (chunked, as the daemon writes them).
  */
 class FakeAgent(var bootstrap: JsonObject = Wire.bootstrap(), var name: String = "Studio") : Transport {
-    val calls = mutableListOf<String>()
-    val streamCursors = mutableListOf<String?>()
+    val calls = java.util.concurrent.CopyOnWriteArrayList<String>()
+    val streamCursors = java.util.concurrent.CopyOnWriteArrayList<String?>()
     var frames = Channel<String>(Channel.UNLIMITED)
     var revoked = false
     var resources = mutableMapOf<String, JsonObject>()

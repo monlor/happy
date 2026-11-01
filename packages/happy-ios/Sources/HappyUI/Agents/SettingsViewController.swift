@@ -7,7 +7,7 @@ import UIKit
 /// V2 settings, pushed from the picture in either home's header,
 /// laid out as Telegram's settings are (its techniques, none of its code):
 /// the navigation bar with back at the left, search (the bar's own
-/// integrated search) and the QR button at the right; every computer and account as story circles, the chosen one
+/// integrated search) and the QR button at the right; every computer and account as circles, the chosen one
 /// centred and ringed, its name and line under it; then every setting the
 /// chosen profile has, in grouped cards, with Appearance and About each a
 /// page of their own, as Happy's settings have them.
@@ -51,7 +51,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         var id: String
         var name: String
         var subtitle: String
-        /// What kind it is: an agent, or a legacy account.
+        /// What kind it is: Happy Agent or Happy CLI.
         var kind: String = Strings.agentConnection
         var isAgentConnection: Bool
         var isActive: Bool
@@ -108,6 +108,8 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
     private var settingsObservation: StoreObservation?
     private var snapshot = SettingsSnapshot()
     private var images: [String: UIImage] = [:]
+    /// The placeholder each account without a picture moves as.
+    private var liveSeeds: [String: String] = [:]
     private var imageKeys: [String: String] = [:]
     private var imageJobs: [String: Task<Void, Never>] = [:]
     private var busy = false
@@ -200,7 +202,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         reveal = nil
         view.layoutIfNeeded()
         if let y = settingsLayout.revealOffset(card: card, row: index, viewport: scroll.bounds.height, insets: LayoutInsets(scroll.adjustedContentInset)) {
-            scroll.setContentOffset(CGPoint(x: 0, y: y), animated: true)
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: y), animated: true)
         }
         cards[card].flash(index)
     }
@@ -243,9 +245,12 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         let direct = context.account.agentConnections.accounts
         profiles = (accounts.filter(\.isAgentConnection) + accounts.filter { !$0.isAgentConnection }).map { account in
             if account.isAgentConnection, let computer = direct.first(where: { $0.id == account.id }) {
-                return Profile(id: account.id, name: computer.name, subtitle: computer.status.title, isAgentConnection: true, isActive: account.isActive)
+                return Profile(id: account.id, name: computer.name, subtitle: Strings.AccountKind.subtitle(Strings.agentConnection, computer.status.title), isAgentConnection: true, isActive: account.isActive)
             }
-            return Profile(id: account.id, name: account.shownName, subtitle: account.username.map { "@\($0)" } ?? account.kindName, kind: account.kindName, isAgentConnection: false, isActive: account.isActive)
+            // One with no name of its own is already called by its kind.
+            let username = account.username.map { "@\($0)" }
+            let subtitle = account.shownName == account.kindName ? username ?? "" : Strings.AccountKind.subtitle(account.kindName, username)
+            return Profile(id: account.id, name: account.shownName, subtitle: subtitle, kind: account.kindName, isAgentConnection: false, isActive: account.isActive)
         }
         // With none left, the window's root is the link screen and this
         // page goes with the old one (`AppCoordinator.install`); it lets
@@ -271,6 +276,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         imageJobs[account.id]?.cancel()
         // What it has now in the first build, the picture when it comes.
         if let placeholder = ProfilePictures.immediate(account, context: context) { images[account.id] = placeholder }
+        liveSeeds[account.id] = ProfilePictures.liveSeed(account, context: context)
         imageJobs[account.id] = Task { [weak self] in
             guard let self else { return }
             let image = await ProfilePictures.load(account, context: context)
@@ -326,7 +332,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
                 if let change { change() } else { self.rebuild() }
                 self.view.layoutIfNeeded()
                 let offset = self.settingsLayout.keptOffset(self.scroll.contentOffset.y, viewport: self.scroll.bounds.height, insets: LayoutInsets(self.scroll.adjustedContentInset))
-                if offset != self.scroll.contentOffset.y { self.scroll.setContentOffset(CGPoint(x: 0, y: offset), animated: false) }
+                if offset != self.scroll.contentOffset.y { self.scroll.setContentOffset(CGPoint(x: self.scroll.contentOffset.x, y: offset), animated: false) }
             }
         }
         guard view.window != nil else { return apply() }
@@ -424,6 +430,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
                 title: profile.name,
                 avatar: true,
                 image: images[profile.id],
+                liveSeed: liveSeeds[profile.id],
                 value: profile.id == shownID ? "✓" : nil,
                 accessory: .none,
                 action: { [weak self] in self?.choose(index) },
@@ -445,7 +452,10 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             return [
                 accountRows(),
                 [Row(Index.profile, image: profilePhoto, value: profileName.isEmpty ? nil : profileName, action: { [weak self] in self?.openProfile() })],
-                [Row(Index.appearance, action: { [weak self] in self?.open(.appearance) })],
+                [
+                    Row(Index.appearance, action: { [weak self] in self?.open(.appearance) }),
+                    Row(Index.dataStorage, action: { [weak self] in self?.open(.dataStorage) }),
+                ],
                 [Row(Index.supportUs, action: { [weak self] in self?.open(.supportUs) })],
                 aboutRows(),
                 [Row(id: "disconnect", title: Strings.disconnect, accessory: .none, destructive: true, action: { [weak self] in self?.remove(id, direct: true) })],
@@ -462,6 +472,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
                 Row(Index.language, action: { [weak self] in self?.open(.language) }),
                 Row(Index.voice, action: { [weak self] in self?.open(.voice) }),
                 Row(Index.agents, action: { [weak self] in self?.push(.settingsAgents, for: id) }),
+                Row(Index.dataStorage, action: { [weak self] in self?.open(.dataStorage) }),
             ],
             [
                 Row(Index.scanTerminal, accessory: .none, action: { [weak self] in self?.connectTerminal(scanning: true) }),
@@ -475,7 +486,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
 
     /// The pages a row opens in settings' cards.
     enum Page: CaseIterable {
-        case appearance, supportUs, account, backup, voice, language
+        case appearance, supportUs, account, backup, voice, language, dataStorage
     }
 
     /// Whether `profile`'s page has `page`: a computer's look, or a Happy
@@ -484,6 +495,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         switch page {
         case .appearance: profile.isAgentConnection
         case .supportUs: true
+        case .dataStorage: profile.isAgentConnection || activeSession != nil
         case .account, .backup, .voice, .language: !profile.isAgentConnection && activeSession != nil
         }
     }
@@ -496,6 +508,10 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         case .backup: activeSession.map { BackupSettingsViewController(context: context, session: $0) }
         case .voice: activeSession.map { VoiceSettingsViewController(context: context, session: $0) }
         case .language: activeSession.map { SettingsLanguageViewController(session: $0) }
+        case .dataStorage:
+            // The shown profile's media: a computer's library, or the active account's.
+            DataStorageViewController(library: shown.flatMap { $0.isAgentConnection ? MediaLibrary.agent($0.id) : nil } ?? activeSession?.media,
+                                      connection: { [weak self] in self?.connectionPage() })
         }
     }
 
@@ -556,7 +572,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
     private func searchRows(_ query: String) -> [SettingsRow] {
         var found: [SettingsRow] = []
         for (index, profile) in profiles.enumerated() where profile.name.localizedCaseInsensitiveContains(query) {
-            found.append(SettingsRow(id: "profile:\(profile.id)", title: profile.name, avatar: true, image: images[profile.id], value: profile.kind, action: { [weak self] in
+            found.append(SettingsRow(id: "profile:\(profile.id)", title: profile.name, avatar: true, image: images[profile.id], liveSeed: liveSeeds[profile.id], value: profile.kind, action: { [weak self] in
                 self?.choose(index)
             }))
         }
@@ -610,6 +626,7 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
         agentButton.isHidden = searching
         agentButton.editable = profile.isAgentConnection
         agentButton.picture = images[profile.id]
+        agentButton.liveSeed = liveSeeds[profile.id]
         empty.isHidden = !(searching && !(query ?? "").isEmpty && rows.isEmpty)
         name.text = profile.name
         subtitle.text = profile.subtitle
@@ -624,10 +641,10 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let width = view.bounds.width
         let searching = query != nil
         // Under the bar, whose row is in the safe area: the cards scroll under it.
         scroll.frame = view.bounds
+        let width = scroll.readableColumn(width: view.bounds.width)
         let specs = SettingsCardView.specs(rows, width: width)
         let picture = shown == nil ? nil : agentButton.intrinsicContentSize.width
         let layout = SettingsLayout(width: width, nameHeight: ceil(name.font.lineHeight), subtitleHeight: ceil(subtitle.font.lineHeight), cards: specs, footers: SettingsCardView.footers(rows, width: width), searching: searching, showsStrip: false, picture: picture)
@@ -676,6 +693,19 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
     }
 
     // MARK: Actions
+
+    /// How the shown profile reaches its computer or server, and the
+    /// last ten minutes over it, for Data and Storage's Connection row: a
+    /// computer's any time, a Happy account's once it is the active one
+    /// (only it has a session).
+    private func connectionPage() -> UIViewController? {
+        guard let profile = shown else { return nil }
+        if profile.isAgentConnection {
+            guard context.account.agentConnections.metrics(for: profile.id) != nil else { return nil }
+            return ConnectionViewController(context: context, source: .agent(id: profile.id))
+        }
+        return activeSession.map { ConnectionViewController(context: context, source: .legacy($0)) }
+    }
 
     /// The person's own name and picture on the computer shown.
     private func openProfile() {
@@ -762,26 +792,31 @@ final class SettingsViewController: UIViewController, UIScrollViewDelegate, UISe
             // A legacy account's key is the only way back: the warning says
             // so. One made for a computer has no key to bring it back.
             let account = context.account.accounts.first { $0.id == id }
+            // The last one: the first screen follows the confirm, its
+            // gradient ready by then.
+            if context.account.accounts.count == 1 { GrainGradientView.prepare() }
             let detail = account.map { direct ? Strings.removeDetail : $0.isLegacy ? Strings.SettingsAccount.logoutConfirm : Strings.AccountSwitcher.signOutMadeForComputer($0.shownName) } ?? Strings.removeDetail
             guard await Alerts.confirm(direct ? Strings.disconnectTitle : Strings.signOutTitle, detail, confirmTitle: direct ? Strings.disconnect : Strings.signOut, destructive: true, on: self) else { return }
-            await signOut(id, direct: direct)
+            signOut(id, direct: direct)
         }
     }
 
-    /// Once confirmed: the account goes, and a computer's session with it,
-    /// only if it really went. A Happy account forgets nothing, since
-    /// `Session.forget` also clears caches shared by every account.
-    func signOut(_ id: String, direct: Bool) async {
+    /// Once confirmed, at once: the account leaves the card, and the next
+    /// one opens if it was the one open (`AccountController.beginSignOut`);
+    /// what is slow goes on behind. A computer's session goes with it. A
+    /// Happy account forgets nothing here, since `Session.forget` also
+    /// clears caches shared by every account.
+    func signOut(_ id: String, direct: Bool) {
         do {
-            try await context.account.signOut(accountID: id)
-            // Off its page first, so nothing here still watches its session.
-            if shownID == id { shownID = nil }
-            reload()
-            if direct { Session.forget(id) }
-            Haptics.play(.putAway)
+            try context.account.beginSignOut(accountID: id)
         } catch {
-            Alerts.show(Strings.couldNotRemove, error.localizedDescription, on: self)
+            return Alerts.show(Strings.couldNotRemove, error.localizedDescription, on: self)
         }
+        // Off its page first, so nothing here still watches its session.
+        if shownID == id { shownID = nil }
+        reload()
+        if direct { Session.forget(id) }
+        Haptics.play(.putAway)
     }
 }
 #endif

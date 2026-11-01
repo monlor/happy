@@ -62,7 +62,7 @@ final class TranslationCatalogTests: XCTestCase {
 
     func testEveryCatalogHasEnglishsKeys() {
         let english = Set(TranslationCatalog.english.keys)
-        XCTAssertEqual(english.count, 900)
+        XCTAssertEqual(english.filter { !$0.hasPrefix("native.") }.count, 900)
         for language in AppLanguage.supported.map(\.code) {
             XCTAssertEqual(Set(TranslationCatalog.catalog(for: language).keys), english, language)
         }
@@ -215,7 +215,7 @@ final class TranslationCatalogTests: XCTestCase {
         // The secondary screens': Strings/SecondaryStrings.swift, Strings/Tablet.swift.
         XCTAssertEqual(counts["SecondaryStrings.swift"]?.strings, 115)
         XCTAssertEqual(counts["SecondaryStrings.swift"]?.functions, 8)
-        XCTAssertEqual(counts["Tablet.swift"]?.strings, 3)
+        XCTAssertEqual(counts["Tablet.swift"]?.strings, 1)
         XCTAssertEqual(counts["Tablet.swift"]?.functions, 0)
     }
 

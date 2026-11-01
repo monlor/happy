@@ -16,6 +16,7 @@ import UIKit
 @MainActor
 final class ChatHeaderView: UIView {
     let titleView = ChatTitleView()
+
     /// The title was tapped: the detail opens.
     var onOpen: (() -> Void)? {
         didSet { titleView.onOpen = onOpen }
@@ -37,11 +38,11 @@ final class ChatHeaderView: UIView {
 
     /// The words and their colour, crossfaded together.
     func setStatus(_ text: String, color: UIColor) {
-        guard text != statusLabel.text || color != statusColor else { return }
+        guard text != statusLabel.string || color != statusColor else { return }
         statusColor = color
         if status != text { status = text; return }
         HeaderStatusTransition.apply(to: statusLabel) { [self] in
-            statusLabel.text = text
+            statusLabel.attributedText = NSAttributedString(string: text, attributes: [.font: Self.statusFont])
             statusLabel.textColor = color
         }
         statusWidth = width(of: text)
@@ -49,10 +50,32 @@ final class ChatHeaderView: UIView {
     }
 
     /// Every status this header may say, the line kept as wide as the
-    /// widest: the agent's by default.
+    /// widest, with the spinner's room for those said with it: the
+    /// agent's by default.
     var statuses: [String] = Strings.HeaderStatus.all {
-        didSet { reservedStatusWidth = statuses.map { width(of: $0) }.max() ?? 0; setNeedsLayout() }
+        didSet { reservedStatusWidth = reserved(statuses); setNeedsLayout() }
     }
+
+    private func reserved(_ statuses: [String]) -> CGFloat {
+        let spinning = Set(Strings.HeaderStatus.spinning)
+        let room = ChatHeaderLayout.Metrics.spinner + ChatHeaderLayout.Metrics.spinnerGap
+        return statuses.map { width(of: $0) + (spinning.contains($0) ? room : 0) }.max() ?? 0
+    }
+
+    /// The status is the link on its way ("connecting…"): the spinner
+    /// turns before it, fading in and out with the words.
+    var statusSpins = false {
+        didSet {
+            guard statusSpins != oldValue else { return }
+            if statusSpins { spinner.spins = true }
+            HeaderStatusTransition.fade(spinner, to: statusSpins ? 1 : 0) { [weak self] in
+                guard let self, !statusSpins else { return }
+                spinner.spins = false
+            }
+            HeaderStatusTransition.relayout(self)
+        }
+    }
+    let spinner = LinkSpinnerView(side: ChatHeaderLayout.Metrics.spinner)
 
     /// The widest the name may be in the bar it is in.
     var maxWidth: CGFloat = .greatestFiniteMagnitude {
@@ -65,7 +88,17 @@ final class ChatHeaderView: UIView {
 
     /// The glass the name and status sit on.
     let capsule = GlassCapsuleView(interactive: true)
-    private let statusLabel = UILabel()
+    private let statusLabel = ShimmerLabel()
+    private static var statusFont: UIFont { LegacyFonts.font(.regular, size: 13) }
+
+    /// The status is work under way ("Thinking", "Working"): it carries
+    /// the sheen, as desktop's working line's phase does.
+    var statusShimmers = false {
+        didSet { statusLabel.shimmering = statusShimmers }
+    }
+
+    /// The status's band is running (tests).
+    var statusSweeps: Bool { statusLabel.band.sweeps }
 
     override init(frame: CGRect) {
         // Never zero wide: the bar doesn't look again at a title view that was.
@@ -83,13 +116,15 @@ final class ChatHeaderView: UIView {
             self?.layoutIfNeeded()
         }
         capsule.contentView.addSubview(titleView)
-        statusLabel.font = LegacyFonts.font(.regular, size: 13)
         statusLabel.textColor = UIColor(Palette.textSecondary)
-        statusLabel.textAlignment = .center
-        statusLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.text = status
-        statusLabel.accessibilityIdentifier = "chat-status"
+        statusLabel.alignment = .center
+        statusLabel.attributedText = NSAttributedString(string: status, attributes: [.font: Self.statusFont])
+        statusLabel.ground = UIColor(Palette.surface)
+        statusLabel.textLabel.accessibilityIdentifier = "chat-status"
         capsule.contentView.addSubview(statusLabel)
+        spinner.alpha = 0
+        spinner.accessibilityIdentifier = "chat-status-spinner"
+        capsule.contentView.addSubview(spinner)
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(open)))
     }
 
@@ -98,13 +133,13 @@ final class ChatHeaderView: UIView {
     @objc private func open() { onOpen?() }
 
     private func width(of text: String) -> CGFloat {
-        (text as NSString).size(withAttributes: [.font: statusLabel.font!]).width
+        (text as NSString).size(withAttributes: [.font: Self.statusFont]).width
     }
 
     private lazy var statusWidth: CGFloat = width(of: status)
 
     /// The status's line is this wide whatever it says.
-    private lazy var reservedStatusWidth: CGFloat = statuses.map { width(of: $0) }.max() ?? 0
+    private lazy var reservedStatusWidth: CGFloat = reserved(statuses)
 
     /// The bar's middle in this view: what the capsule centres on. Before
     /// the bar has it, this view's own.
@@ -118,7 +153,7 @@ final class ChatHeaderView: UIView {
     private var layout: ChatHeaderLayout {
         ChatHeaderLayout(
             titleWidth: titleView.intrinsicContentSize.width, statusWidth: statusWidth, reservedStatusWidth: reservedStatusWidth,
-            centerX: barCenterX, room: 0...max(0, bounds.width), height: bounds.height
+            spins: statusSpins, centerX: barCenterX, room: 0...max(0, bounds.width), height: bounds.height
         )
     }
 
@@ -152,6 +187,8 @@ final class ChatHeaderView: UIView {
             .offsetBy(dx: -origin.x, dy: -origin.y)
         statusLabel.frame = (layout.status ?? .zero).offsetBy(dx: -origin.x, dy: -origin.y)
         statusLabel.isHidden = layout.status == nil
+        // Where it was while it fades away: the frame it last had.
+        if let frame = layout.spinner { spinner.frame = frame.offsetBy(dx: -origin.x, dy: -origin.y) }
     }
 
     /// Only the capsule takes a touch; the bar around it stays the bar's.

@@ -64,9 +64,13 @@ suspend fun confirm(
  */
 @Composable
 fun HappyAlert(alert: Alert, onDismiss: () -> Unit) {
+    if (!LocalPageActive.current) return
     AlertDialog(
         onDismissRequest = { if (alert.cancelable) onDismiss() },
-        title = { Text(alert.title) },
+        title = {
+            DialogWindowMotion()
+            Text(alert.title)
+        },
         text = alert.message?.let { message -> { Text(message) } },
         confirmButton = {
             val buttons: @Composable () -> Unit = {

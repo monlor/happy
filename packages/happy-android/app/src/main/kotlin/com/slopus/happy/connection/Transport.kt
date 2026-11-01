@@ -51,10 +51,27 @@ interface Transport {
         silenceMillis: Long = 40_000,
     ): TransportStream = throw AgentConnectionException(AgentConnectionException.Reason.Unavailable)
 
+    /**
+     * A raw TCP stream to the agent's socket, nothing written on it yet:
+     * what the in-app browser speaks HTTP and CONNECT over (iOS's
+     * `browserConnection`). Unavailable where the transport has none.
+     */
+    suspend fun socket(): TransportSocket = throw AgentConnectionException(AgentConnectionException.Reason.Unavailable)
+
     /** Lets go of the tunnel, so the next request makes a new one. */
     suspend fun reset() {}
 
     suspend fun close()
+}
+
+/** Backpressured bytes: each read and write finishes before the next is issued. */
+interface TransportSocket {
+    val authority: String get() = "server.tailcat"
+    /** Up to [maximumBytes]; empty once the other side has finished. */
+    suspend fun read(maximumBytes: Int = 65536): ByteArray
+    suspend fun write(bytes: ByteArray)
+    /** Ends the stream both ways; safe to call more than once, from any thread. */
+    fun close()
 }
 
 /**
@@ -164,6 +181,48 @@ class TailcatTransport(
         return TransportStream.open(reader)
     }
 
+    override suspend fun socket(): TransportSocket {
+        val tunnel = connection()
+        val stream: TailcatConnection = try {
+            withTimeout(requestTimeoutMillis) { runInterruptible(Dispatchers.IO) { tunnel.openTCP(port) } }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            resetIfCurrent(tunnel)
+            throw AgentConnectionException(AgentConnectionException.Reason.Unavailable).initCause(e)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A stack out of connections is busy, not gone: keep the tunnel (and its event stream).
+            if ((e as? io.tailcat.stack.TailcatTransportException)?.reason != io.tailcat.stack.TailcatTransportException.Reason.RESOURCE_LIMIT) resetIfCurrent(tunnel)
+            throw AgentConnectionException(AgentConnectionException.Reason.Unavailable).initCause(e)
+        }
+        return object : TransportSocket {
+            // A cancelled read or write closes the stream, which wakes the blocked call.
+            override suspend fun read(maximumBytes: Int): ByteArray = io { stream.read(maximumBytes) }
+
+            override suspend fun write(bytes: ByteArray) {
+                io { stream.write(bytes) }
+            }
+
+            private suspend fun <T> io(block: () -> T): T = try {
+                runInterruptible(Dispatchers.IO) { block() }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                close()
+                throw e
+            } catch (e: Exception) {
+                close()
+                throw AgentConnectionException(AgentConnectionException.Reason.Unavailable).initCause(e)
+            }
+
+            override fun close() {
+                try {
+                    stream.close()
+                } catch (_: Exception) {
+                    // Already gone.
+                }
+            }
+        }
+    }
+
     private suspend fun resetIfCurrent(used: TailcatClient) {
         val old = lock.withLock { client.takeIf { it === used }?.also { client = null } }
         old?.let { closeOffMain(it) }
@@ -233,14 +292,14 @@ object TailcatHttp {
     private val methods = setOf("GET", "POST", "PATCH", "PUT", "DELETE")
 
     /** The request line and headers; refuses anything that could split them. */
-    fun requestHead(method: String, path: String, port: Int, credential: String, body: ByteArray?, headers: Map<String, String>): ByteArray {
+    fun requestHead(method: String, path: String, port: Int, credential: String, body: ByteArray?, headers: Map<String, String>, authority: String = "server.tailcat:$port"): ByteArray {
         fun unsafe(text: String) = text.contains('\r') || text.contains('\n')
         if (method !in methods || !path.startsWith("/") || path.contains(' ') || unsafe(path) || unsafe(credential) ||
             headers.any { (name, value) -> unsafe(name) || name.contains(':') || unsafe(value) }
         ) throw AgentConnectionException(AgentConnectionException.Reason.InvalidResponse)
         val head = StringBuilder()
             .append("$method $path HTTP/1.1\r\n")
-            .append("Host: server.tailcat:$port\r\n")
+            .append("Host: $authority\r\n")
             .append("Authorization: Bearer $credential\r\n")
             .append("Connection: close\r\n")
         if (headers.keys.none { it.equals("Accept", ignoreCase = true) }) head.append("Accept: application/json\r\n")

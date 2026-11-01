@@ -34,10 +34,14 @@ nothing here is wired to the release skill or to EAS.
    The avatar placeholders are Crafted Studios' shaders (MIT); their
    license and notice sit beside them in
    `Sources/HappyUI/Resources/AvatarPlaceholders`.
-7. **Telegram-iOS is a reference, never a source.** It is GPL-2.0. Study
-   its techniques (async text layout, bubble animations, keyboard
-   handling) and reimplement them; never copy its code, and don't depend
-   on AsyncDisplayKit/Texture or its Display framework.
+7. **Telegram-iOS code may be adapted, not pasted.** Steve Korshakov has
+   personal permission to use Telegram-iOS code in happy-ios (recorded
+   2026-10-31). Study its techniques (async text layout, bubble
+   animations, keyboard handling) and adapt its code into our structure,
+   names and Swift 6 concurrency; don't paste it verbatim or copy its
+   comments, and don't depend on AsyncDisplayKit/Texture or its Display
+   framework. Each commit that adapts its code says so in its message:
+   `Adapted from Telegram-iOS <path> (permission from Steve)`.
 8. **Sync never runs on the main thread. The main thread only applies a
    minimal changeset that was computed elsewhere.**
    - Everything else runs off the main thread: network, decryption,
@@ -92,7 +96,14 @@ nothing here is wired to the release skill or to EAS.
     code with plain names, and legacy reuses them. Never `V2`, `New`,
     `Direct` or feature prefixes. A Happy Protocol V2 pairing is an agent
     connection ("Connect Agent"), never a "computer". Wire names shared
-    with the desktop or daemon stay as they are.
+    with the desktop or daemon stay as they are. **What the person reads
+    names the two kinds Happy Agent (agent connections) and Happy CLI
+    (relay accounts, the code's legacy); "legacy" is never shown, in any
+    language.** The product names are `Strings.AccountKind` and are not
+    translated; sentences around them are in
+    `TranslationCatalog.nativeSources` in every language, and
+    `AccountKindNamingTests` holds all of this. Code, files, settings
+    keys and analytics keep `legacy`.
 11. **No data migrations (not live)**; the only exception is importing the
     RN app's credentials.
 
@@ -234,8 +245,11 @@ nothing here is wired to the release skill or to EAS.
     - happy-app's backoff retries the server calls forever. Here each sync
       makes one registration attempt, and the next session start or
       foreground tries again.
-    - The sign-out unregister is one attempt capped at 5 seconds, where
-      happy-app holds logout until the server answers.
+    - The sign-out unregister never holds the sign-out, where happy-app
+      holds logout until the server answers: the account is gone at once,
+      and the removal waits in `PushUnregisterQueue` (its own Keychain
+      item, `happy-ios:push-unregister`) and is retried at 1 … 30 s and on
+      later launches until the server answers, for up to 30 days.
     - Concurrent APNs requests share one callback, where expo rejects the
       older request.
     - Expo's background re-registration when APNs rotates the token is not
@@ -261,7 +275,7 @@ nothing here is wired to the release skill or to EAS.
   - the session list otherwise, even while every computer is offline (the
     offline plaque heads it then).
 
-  The session list is a `UITableView` over `SessionList` (happy-app's flat
+  The session list is an UltraList over `SessionList` (happy-app's flat
   grouping): live rows by activity, the archive toggle, archived rows by
   day. Swipe or long press archives (`SessionActions`: `killSession` over
   `rpc-call`, then `POST /v1/sessions/:id/archive`). A tap only marks the
@@ -318,8 +332,15 @@ nothing here is wired to the release skill or to EAS.
     without signing other accounts out. `signOut()` removes only the active
     account; `signOut(accountID:)` can remove an inactive one. The next
     account in added order becomes active when the active one signs out.
-    The UI root changes before the removed account's store is erased and
-    files deleted. Signed-out logout never deletes unknown RN bytes. If RN
+    **Sign-out and Disconnect are instant and final**
+    (`beginSignOut(accountID:)`): the account leaves `accounts` in the
+    same call, and the next account opens without anything waiting on the
+    network. Everything slow (the old session and socket stopped, the push
+    token's removal queued, the Keychain item, store, pictures and folder
+    deleted) runs after, written first to `Happy/removals.json`
+    (`AccountRemovalJournal`), so a kill midway is finished by the next
+    launch and the account is never listed again, even while its Keychain
+    item is still there. See docs/accounts.md. Signed-out logout never deletes unknown RN bytes. If RN
     authenticates an account also held in an own item, recovery removes that
     redundant own item only after reading the shared credentials successfully.
   - **Origin.** Each registry entry records how the account came here
@@ -334,8 +355,9 @@ nothing here is wired to the release skill or to EAS.
       that nothing can open it again;
     - it goes by the first computer paired with it, the earliest machine
       in its store (`AccountDisplay.computerName`, cached in the registry);
-      "Agent" until that arrives. Only a legacy account with no profile
-      name is called "Legacy Account". There is never a "Happy account".
+      "Happy CLI" until that arrives, as any relay account with no profile
+      name is. The UI never says "Legacy Account", "Agent" for a relay
+      account, or "Happy account" (rule 10).
     - A registry rebuilt from the Keychain after corruption loses the
       origin, so those accounts come back as legacy.
   - **Account id.** The account's anonymous id, derived from its secret,
@@ -576,7 +598,7 @@ change a file another workstream owns, ask the coordinator.
 | Workstream | Owns |
 | --- | --- |
 | Icons | `Sources/HappyIcons`, `scripts/generate-icons.*`, `Sources/HappyUI/Theme/IconImages.swift`, `ItemIcon`'s icon source, swapping SF Symbols for happy-app's icons in onboarding and troubleshoot, light/dark theme application |
-| Home | `Screens/HomeScreens.swift`, `Screens/SessionListScreens.swift`, `Components/SessionListViews.swift`, home header and dock, new session screen, `Core/Home/` (including the new-session draft store and `SessionStarter`) |
+| Home | `Screens/HomeScreens.swift`, `Screens/SessionListScreens.swift`, `Screens/HomeUltraListView.swift`, `Screens/HomeRowDrawing.swift`, `Components/NoSessionsViews.swift`, home header and dock, new session screen, `Core/Home/` (including the new-session draft store and `SessionStarter`) |
 | Settings | `Screens/SettingsScreens.swift` and every settings screen, the account switcher UI, `Core/Settings/` |
 | Chat | `Sources/HappyUI/Chat/`, `Sources/HappyLayout/Chat/`, the session screen, `docs/telegram-notes.md` |
 | Composer | `Sources/HappyUI/Composer/`, `Sources/HappyLayout/Composer/`, `Sources/HappyCore/Composer/` (model, permission and effort options; `useComposerModes`). The AgentInput card is shared: Home embeds it in the dock. The phone's new session screen draws its own glass composer (`new/index.tsx` `mobileInputBox`), not the card |
@@ -606,12 +628,15 @@ Shared seams, changed only through the coordinator:
 - `Sources/HappyUI/Navigation/Route.swift`: screens open each other only
   through `push(_ route:context:)`. Each workstream replaces only its own
   placeholders in `Screens.make`;
-- the iPad shell: the window's root is `TabletShellViewController`, which
-  embeds `AppCoordinator`'s navigation controller as its detail and is
-  that controller's delegate, so nothing else sets `navigation.delegate`.
-  Tablet branches read `traitCollection.isTabletLayout` and `isZenMode`
-  (re-laid out through `registerForTraitChanges([TabletLayoutTrait.self])`);
-  their rules are in `HappyLayout/Tablet/TabletBranches.swift`;
+- the iPad shell ([docs/IPAD.md](docs/IPAD.md)): the window's root is
+  `ShellViewController`. On an iPhone it holds `AppCoordinator`'s stack
+  alone; on an iPad a `UISplitViewController` with home in the sidebar and
+  everything it opens in the main panel, collapsing to that one stack
+  below 768 or in a compact window. It is the delegate of every stack in
+  it, so nothing else sets `navigation.delegate`. AppCoordinator reads and
+  sets the window's navigation as one stack (`shell.stack`, `setStack`).
+  Home never pushes in the sidebar: its pushes become the main panel's
+  root;
 - `Schema.swift`: migrations are added by the Sending workstream or the
   coordinator. Migrations are append-only now that Preview has shipped;
   never change a registered migration.

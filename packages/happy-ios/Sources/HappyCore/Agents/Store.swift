@@ -48,6 +48,11 @@ public actor Store {
 
     private let client: AgentClient
     private let offline: OfflineFile?
+    /// The account's pending actions (`SyncEngine.intents`): archives,
+    /// leaves and renames are kept and sent through it, and laid over the
+    /// rows until the computer answers. Nil standalone: asked directly.
+    private let intents: IntentOutbox?
+    private var overlay = IntentOverlay()
     private var keeping: Task<Void, Never>?
     private let labels: Rows.Labels
     private let continuation: AsyncStream<Snapshot>.Continuation
@@ -122,9 +127,10 @@ public actor Store {
     private var attentionIdle: Task<Void, Never>?
     private var attentionVisible = true
 
-    public init(client: AgentClient, offline: OfflineFile? = nil, labels: Rows.Labels = Rows.Labels()) {
+    public init(client: AgentClient, offline: OfflineFile? = nil, intents: IntentOutbox? = nil, labels: Rows.Labels = Rows.Labels()) {
         self.client = client
         self.offline = offline
+        self.intents = intents
         self.labels = labels
         (updates, continuation) = AsyncStream.makeStream(of: Snapshot.self, bufferingPolicy: .bufferingNewest(1))
     }
@@ -191,7 +197,6 @@ public actor Store {
         placesReload?.cancel(); placesReload = nil
         attentionIdle?.cancel(); attentionIdle = nil
         keeping?.cancel(); keeping = nil
-        draftPublish?.cancel(); draftPublish = nil
         continuation.finish()
         await client.close()
     }
@@ -262,7 +267,7 @@ public actor Store {
 
     private var typeListeners: [UUID: (prefixes: [String], continuation: AsyncStream<ConversationEvent>.Continuation)] = [:]
 
-    /// Every event whose type starts with one of `prefixes` (`"story."`),
+    /// Every event whose type starts with one of `prefixes` (`"artifact."`),
     /// for what no conversation or Surface key names. `resync` as above.
     public func events(matching prefixes: [String]) -> AsyncStream<ConversationEvent> {
         let id = UUID()
@@ -493,56 +498,11 @@ public actor Store {
             guard let data = try? JSONEncoder().encode(value) else { return [] }
             return (try? decoder.decode([Lossy<T>].self, from: data))?.compactMap(\.value) ?? []
         }
-        places = Places(bots: decode(composed(bots)), tasks: decode(composed(tasks)), surfaces: surfaces, drafts: draftsShown)
+        places = Places(bots: decode(composed(bots)), tasks: decode(composed(tasks)), surfaces: surfaces)
         // A subtask being archived that no bot or task holds any more is gone.
         for (id, removal) in removing where removal.subtask && places.agent(id) == nil { removing[id] = nil }
     }
 
-    // MARK: Drafts
-
-    /// The latest stamp heard for each conversation's draft, the previews
-    /// rows show, and the ones waiting for typing to pause.
-    private var draftStamps: [String: Double] = [:]
-    private var draftsShown: [String: String] = [:]
-    private var draftsWaiting: [String: String] = [:]
-    private var draftPublish: Task<Void, Never>?
-    /// How long typing pauses before a row's draft follows the composer.
-    static let draftDelay: Duration = .seconds(1)
-
-    /// A conversation's draft changed, on this phone or another device: its
-    /// row follows a second after typing pauses, or at once when the draft
-    /// empties, so typing doesn't redraw the list on every keystroke. An
-    /// older stamp than one already heard changes nothing.
-    public func noteDraft(_ agentId: String, text: String?, updatedAt: Double) {
-        if let stamp = draftStamps[agentId], updatedAt < stamp { return }
-        draftStamps[agentId] = updatedAt
-        guard let preview = Rows.draftPreview(text) else {
-            draftsWaiting.removeValue(forKey: agentId)
-            guard draftsShown.removeValue(forKey: agentId) != nil else { return }
-            places.drafts = draftsShown
-            publish()
-            return
-        }
-        guard draftsShown[agentId] != preview else {
-            draftsWaiting.removeValue(forKey: agentId)
-            return
-        }
-        draftsWaiting[agentId] = preview
-        draftPublish?.cancel()
-        draftPublish = Task { [weak self] in
-            try? await Task.sleep(for: Self.draftDelay)
-            guard !Task.isCancelled else { return }
-            await self?.showWaitingDrafts()
-        }
-    }
-
-    private func showWaitingDrafts() {
-        guard !draftsWaiting.isEmpty else { return }
-        draftsShown.merge(draftsWaiting) { _, waiting in waiting }
-        draftsWaiting = [:]
-        places.drafts = draftsShown
-        publish()
-    }
 
     // MARK: Events
 
@@ -608,10 +568,7 @@ public actor Store {
                 // A page shown inline follows its latest version, entry and display.
                 read(artifacts: [id])
             }
-        case "agent.draft.updated":
-            guard let id = payload["agentId"]?.stringValue else { return }
-            noteDraft(id, text: payload["draft"]?["value"]?["text"]?.stringValue, updatedAt: payload["draft"]?["updatedAt"]?.numberValue ?? 0)
-            return
+
         case "user_settings.updated":
             if payload["setting"]?["key"]?.stringValue == Self.settingKey {
                 snapshot.prioritizing = payload["setting"]?["value"] == .bool(true)
@@ -697,7 +654,7 @@ public actor Store {
 
     private func publish() {
         if let document = shown() {
-            let all = Rows.all(document, spaces: spaces, places: places, agentIcons: agentIcons, labels: labels)
+            let all = overlay.apply(Rows.all(document, spaces: spaces, places: places, agentIcons: agentIcons, labels: labels))
             snapshot.rows = Rows.visible(all)
             snapshot.allRows = all
             snapshot.document = document
@@ -850,21 +807,21 @@ public actor Store {
     @discardableResult
     public func leave(taskId: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, asking: { try await client.leaveTask(taskId) })
+        return await removeAtOnce(nodeId, intent: (.leave, taskId, "task"), asking: { try await client.leaveTask(taskId) })
     }
 
     /// Leaves a Surface: its row goes at once, and comes back if the computer refuses.
     @discardableResult
     public func leave(surfaceId: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, asking: { try await client.leaveSurface(surfaceId) })
+        return await removeAtOnce(nodeId, intent: (.leave, surfaceId, "surface"), asking: { try await client.leaveSurface(surfaceId) })
     }
 
     /// Archives a task or bot: its row goes at once, and comes back if the computer refuses.
     @discardableResult
     public func archive(kind: String, id: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, asking: { try await kind == "bot" ? client.archiveBot(id) : client.archiveTask(id) })
+        return await removeAtOnce(nodeId, intent: (.archive, id, kind == "bot" ? "bot" : "task"), asking: { try await kind == "bot" ? client.archiveBot(id) : client.archiveTask(id) })
     }
 
     /// Archives a subtask, and with its row everything under it: it goes
@@ -872,7 +829,7 @@ public actor Store {
     @discardableResult
     public func archiveSubtask(_ agentId: String, nodeId: String) async -> Bool {
         let client = client
-        return await removeAtOnce(nodeId, subtask: true, asking: { try await client.archiveAgent(agentId) })
+        return await removeAtOnce(nodeId, subtask: true, intent: (.archive, agentId, "agent"), asking: { try await client.archiveAgent(agentId) })
     }
 
     /// Takes `nodeId`'s row off at once and asks the computer with `work`.
@@ -880,10 +837,24 @@ public actor Store {
     /// answer; a row already gone answers true. Gone already on the
     /// computer (404) counts as taken; anything else it answers is a
     /// refusal, with its reason.
-    private func removeAtOnce(_ nodeId: String, subtask: Bool = false, asking work: @escaping @Sendable () async throws -> Void) async -> Bool {
+    ///
+    /// With the account's outbox it is kept and sent through it instead
+    /// (`intent`), so it outlives the app, and answers once the computer
+    /// has: true when it took it, false when it refused.
+    private func removeAtOnce(_ nodeId: String, subtask: Bool = false, intent: (kind: Intent.Kind, target: String, of: String)? = nil, asking work: @escaping @Sendable () async throws -> Void) async -> Bool {
         if let pending = removing[nodeId] { return await pending.asked.value }
         guard subtask ? places.agent(nodeId) != nil : spaces[nodeId] != nil else { return true }
+        let intents = intents
         let asked = Task {
+            if let intents, let intent {
+                guard let kept = try? await intents.enqueue(intent.kind, target: intent.target, value: .object(["kind": .string(intent.of)])) else {
+                    await self.removalRefused(nodeId, CancellationError())
+                    return false
+                }
+                if await intents.outcome(kept.id) { return true }
+                await self.removalRefused(nodeId, nil)
+                return false
+            }
             do { try await work() }
             catch AgentClientError.status(404, _, _) {}
             catch {
@@ -898,9 +869,10 @@ public actor Store {
         return await asked.value
     }
 
-    private func removalRefused(_ nodeId: String, _ error: Error) {
+    /// Its row comes back; nil: the account's notice says why.
+    private func removalRefused(_ nodeId: String, _ error: Error?) {
         removing[nodeId] = nil
-        failed(error)
+        if let error { failed(error) } else { publish() }
     }
 
     private func failed(_ error: Error) {
@@ -919,6 +891,17 @@ public actor Store {
         spaces[spaceId]?.title = title
         publish()
         let client = client
+        if let intents, space.target.kind == "task" || space.target.kind == "bot" {
+            // Kept and sent as one; refused, the old name comes back.
+            Task {
+                guard let kept = try? await intents.enqueue(.rename, target: space.target.id, value: .object(["title": .string(title), "kind": .string(space.target.kind)])) else {
+                    await self.withdraw(spaceId, title: title)
+                    return
+                }
+                if await !intents.outcome(kept.id) { await self.withdraw(spaceId, title: title) }
+            }
+            return
+        }
         Task {
             do {
                 switch space.target.kind {
@@ -936,6 +919,13 @@ public actor Store {
         guard let intent = titleIntents[spaceId], intent.title == title else { return }
         titleIntents.removeValue(forKey: spaceId)
         spaces[spaceId]?.title = intent.base
+        publish()
+    }
+
+    /// The account's pending actions changed (`SyncEngine`): the rows wear them.
+    public func setOverlay(_ overlay: IntentOverlay) {
+        guard overlay != self.overlay else { return }
+        self.overlay = overlay
         publish()
     }
 

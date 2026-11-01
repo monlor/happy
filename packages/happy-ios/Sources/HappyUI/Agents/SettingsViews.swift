@@ -27,7 +27,7 @@ final class GlassView: UIView {
     }
 }
 
-/// Every paired computer and signed-in account as a strip of story
+/// Every paired computer and signed-in account as a strip of
 /// circles: the chosen one in the middle, larger and ringed. A drag scales
 /// them as they pass the middle, a stop snaps to one (a selection tick on
 /// each), a tap brings one to the middle; the "+" at the end only taps.
@@ -270,8 +270,19 @@ struct SettingsRow {
     /// Its picture, drawn round in the icon's place; the icon is the
     /// fallback for one that hasn't come yet.
     var image: UIImage?
+    /// An avatar row's placeholder seed, when `image` is its placeholder:
+    /// it moves with Animated Avatars on (`ProfilePictures.liveSeed`).
+    var liveSeed: String?
     var value: String?
     var accessory: SettingsLayout.Accessory = .chevron
+    /// A quieter line under the title (a path, an ID): the row is taller.
+    var subtitle: String?
+    /// Drawn where the value goes, instead of it, at its own size: line
+    /// counts, a copy glyph, a spinner.
+    var valueView: UIView?
+    /// The menu a tap opens, asked for each time it opens (the chat's
+    /// permission modes), from a button over the row (`profile-<id>`).
+    var pullDown: (() -> UIMenu?)?
     var destructive = false
     /// A switch's state, for `.toggle`.
     var isOn = false
@@ -338,10 +349,18 @@ final class SettingsCardView: UIView {
     static func specs(_ cards: [[SettingsRow]], width: CGFloat) -> [[SettingsLayout.RowSpec]] {
         cards.map { card in
             card.map { row in
-                let text = row.isCode ? height(row.title, font: RowView.codeFont, width: SettingsLayout.textWidth(width)) : nil
-                return SettingsLayout.RowSpec(hasIcon: row.hasIcon && !row.isCode, valueWidth: row.isCode ? nil : valueWidth(row.value), accessory: row.isCode ? .none : row.accessory, textHeight: text)
+                guard row.isCode else { return spec(row) }
+                let text = height(row.title, font: RowView.codeFont, width: SettingsLayout.textWidth(width))
+                return SettingsLayout.RowSpec(hasIcon: false, accessory: .none, textHeight: text)
             }
         }
+    }
+
+    /// A row as the layout takes it: its value (or the view in its
+    /// place) measured as the row draws it.
+    static func spec(_ row: SettingsRow) -> SettingsLayout.RowSpec {
+        let value = row.valueView.map { $0.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)).width } ?? valueWidth(row.value)
+        return SettingsLayout.RowSpec(hasIcon: row.hasIcon, valueWidth: value, accessory: row.accessory, subtitle: row.subtitle != nil)
     }
 
     /// Each card's footer, its last row's, measured at the page's `width`.
@@ -359,13 +378,21 @@ final class SettingsCardView: UIView {
         static let codeFont = Fonts.mono(bold: false, size: 15)
         private let tile = UIView()
         private let glyph = UIImageView()
+        /// An account's placeholder, moving (`SettingsRow.liveSeed`).
+        private let live = AvatarPlaceholderSlot()
         private let title = UILabel()
         private let value = UILabel()
         private let chevron = UIImageView(image: Glyphs.image("chevron-right", size: 14))
         private let toggle = UISwitch()
         private let separator = UIView()
+        /// Made for the first row that has one.
+        private var subtitle: UILabel?
+        private var valueView: UIView?
+        /// Over the row while it has a pull-down (`SettingsRow.pullDown`).
+        private var pullDownButton: MenuRowButton?
         private var row: SettingsRow?
         private lazy var menuInteraction = UIContextMenuInteraction(delegate: self)
+        static let subtitleFont = Fonts.ui(.regular, size: 13)
         /// A fold's chevron, turned down while what it folds is open.
         var chevronTurned = false {
             didSet { chevron.image = Glyphs.image(chevronTurned ? "chevron-down" : "chevron-right", size: 14) }
@@ -379,6 +406,7 @@ final class SettingsCardView: UIView {
             glyph.tintColor = UIColor(Palette.settingsGlyph)
             glyph.contentMode = .center
             tile.addSubview(glyph)
+            live.liveHost = glyph
             title.font = Self.titleFont
             value.font = Self.valueFont
             value.textColor = UIColor(Palette.settingsSecondary)
@@ -427,14 +455,54 @@ final class SettingsCardView: UIView {
                     glyph.frame = tile.bounds
                 }
             }
+            live.animate(seed: frames.icon != nil && row.avatar ? row.liveSeed : nil)
             title.text = row.title
             title.font = row.isCode ? Self.codeFont : Self.titleFont
             title.numberOfLines = row.isCode ? 0 : 1
             title.textColor = UIColor(row.destructive ? Palette.settingsDestructive : row.dimmed ? Palette.settingsSecondary : row.icon?.tile == .action ? Palette.textLink : Palette.settingsText)
             title.frame = local(frames.title)
-            value.isHidden = frames.value == nil
+            if let frame = frames.subtitle {
+                let label = subtitle ?? makeSubtitle()
+                label.isHidden = false
+                label.text = row.subtitle
+                label.frame = local(frame)
+            } else {
+                subtitle?.isHidden = true
+            }
+            if valueView !== row.valueView {
+                valueView?.removeFromSuperview()
+                valueView = row.valueView
+                if let view = valueView { addSubview(view) }
+            }
+            value.isHidden = frames.value == nil || valueView != nil
             value.text = row.value
-            if let frame = frames.value { value.frame = local(frame) }
+            if let frame = frames.value {
+                value.frame = local(frame)
+                if let view = valueView {
+                    // At its own size, at the value's end, in the row's middle.
+                    let size = view.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+                    let box = local(frames.box)
+                    view.frame = CGRect(x: value.frame.maxX - size.width, y: ((box.height - size.height) / 2).rounded(), width: size.width, height: size.height)
+                }
+            }
+            if let menu = row.pullDown {
+                let button = pullDownButton ?? {
+                    let button = MenuRowButton(frame: bounds)
+                    addSubview(button)
+                    return button
+                }()
+                pullDownButton = button
+                button.isHidden = false
+                button.frame = bounds
+                button.menuFor = menu
+                button.accessibilityIdentifier = "profile-\(row.id)"
+                button.accessibilityLabel = row.title
+                button.accessibilityValue = row.value
+                bringSubviewToFront(button)
+            } else if let button = pullDownButton {
+                button.isHidden = true
+                button.menuFor = nil
+            }
             chevron.isHidden = frames.chevron == nil
             if let frame = frames.chevron { chevron.frame = local(frame) }
             toggle.isHidden = frames.toggle == nil
@@ -449,8 +517,10 @@ final class SettingsCardView: UIView {
             // A switch row is the switch itself to VoiceOver and to tests.
             toggle.accessibilityIdentifier = "settings-toggle:\(row.id)"
             toggle.accessibilityLabel = row.title
-            isAccessibilityElement = row.accessory != .toggle
-            accessibilityLabel = [row.title, row.value].compactMap { $0 }.joined(separator: ", ")
+            // A pull-down's row is its button to VoiceOver.
+            isAccessibilityElement = row.accessory != .toggle && row.pullDown == nil
+            let shownValue = row.valueView == nil ? row.value : row.valueView?.accessibilityLabel
+            accessibilityLabel = [row.title, row.subtitle, shownValue].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
             accessibilityHint = row.hint
             accessibilityTraits = row.accessory == .toggle ? [] : row.action != nil ? .button : row.dimmed ? .notEnabled : .staticText
             if row.menu.isEmpty {
@@ -461,6 +531,16 @@ final class SettingsCardView: UIView {
             accessibilityCustomActions = row.menu.map { item in
                 UIAccessibilityCustomAction(name: item.title) { _ in item.run(); return true }
             }
+        }
+
+        private func makeSubtitle() -> UILabel {
+            let label = UILabel()
+            label.font = Self.subtitleFont
+            label.textColor = UIColor(Palette.settingsSecondary)
+            label.lineBreakMode = .byTruncatingMiddle
+            addSubview(label)
+            subtitle = label
+            return label
         }
 
         func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
@@ -575,6 +655,15 @@ enum ProfilePictures {
         let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
         guard direct.map({ $0.avatar == nil }) ?? (account.avatarURL == nil) else { return nil }
         return AvatarPlaceholderImages.cached(seed: placeholderSeed(account, context: context), side: placeholderSide)
+    }
+
+    /// What its placeholder moves as with Animated Avatars on: its seed,
+    /// only when it has no picture of its own (nor a thumbhash of one), so
+    /// a real picture is never covered.
+    static func liveSeed(_ account: AccountSummary, context: AppContext) -> String? {
+        let direct = context.account.agentConnections.accounts.first { $0.id == account.id }
+        let hasPicture = direct.map { $0.avatar != nil || $0.thumbhash != nil } ?? (account.avatarURL != nil || account.avatarThumbhash != nil)
+        return hasPicture ? nil : placeholderSeed(account, context: context)
     }
 
     /// Nil only when the placeholder isn't bundled.

@@ -9,8 +9,8 @@ import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.slopus.happy.agent.AgentEvent
+import com.slopus.happy.connection.AgentConnectionException
 import com.slopus.happy.connection.TransportResponse
-import com.slopus.happy.conversation.ArtifactSummary
 import com.slopus.happy.conversation.ConversationApi
 import com.slopus.happy.conversation.Todo
 import com.slopus.happy.ui.PHONE
@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -37,7 +38,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 
-/** Home's Artifacts and Surface pages: what they read, and what they show. */
+/** Home's Surface pages: what they read, and what they show. */
 @RunWith(AndroidJUnit4::class)
 @Config(qualifiers = PHONE)
 class AgentPlacesTest {
@@ -57,28 +58,6 @@ class AgentPlacesTest {
 
     private fun <T> await(flow: kotlinx.coroutines.flow.StateFlow<PlaceRead<T>>, test: (T) -> Boolean): T = runBlocking {
         withTimeout(5_000) { (flow.first { it is PlaceRead.Ready && test(it.value) } as PlaceRead.Ready).value }
-    }
-
-    @Test
-    fun artifactsArePagedAndReadAgainFromTheTop() {
-        val api = api { _, path ->
-            if (path.endsWith("pageCursor=p2")) {
-                """{"artifacts":[{"id":"a2","title":"Two"},{"id":"a3"}],"nextPageCursor":null}"""
-            } else {
-                """{"artifacts":[{"id":"a1","title":"One"},{"id":"a2","title":"Two"}],"nextPageCursor":"p2"}"""
-            }
-        }
-        val reader = ArtifactCatalogReader(api, scope)
-        reader.read()
-        assertEquals("p2", await(reader.state) { true }.next)
-        reader.read(append = true)
-        val all = await(reader.state) { it.next == null }
-        // A repeated id is shown once; an untitled one has no title.
-        assertEquals(listOf(ArtifactSummary("a1", "One"), ArtifactSummary("a2", "Two"), ArtifactSummary("a3", null)), all.items)
-        // At the end, asking for more asks nothing.
-        reader.read(append = true)
-        Thread.sleep(100)
-        assertEquals(listOf("GET /v0/artifacts", "GET /v0/artifacts?pageCursor=p2"), asked)
     }
 
     @Test
@@ -120,6 +99,29 @@ class AgentPlacesTest {
     }
 
     @Test
+    fun aSurfaceReadOnceShowsFromDiskNextTimeEvenWithNoNetwork() {
+        var kept: JsonObject? = null
+        val online = SurfaceReader(api { _, _ -> """{"document":{"text":"# Plan"}}""" }, scope, "s2", "document", cached = { kept }, keep = { kept = it })
+        online.read()
+        assertEquals(SurfaceBody.Document("# Plan"), await(online.state) { true })
+        runBlocking { withTimeout(5_000) { while (kept == null) kotlinx.coroutines.delay(10) } }
+
+        val offline = SurfaceReader(
+            ConversationApi { _, _, _ -> throw AgentConnectionException(AgentConnectionException.Reason.Unavailable) },
+            scope, "s2", "document", cached = { kept }, keep = { kept = it },
+        )
+        offline.read()
+        assertEquals(SurfaceBody.Document("# Plan"), await(offline.state) { true })
+        // The failed read leaves the kept copy on screen.
+        Thread.sleep(200)
+        assertEquals(PlaceRead.Ready(SurfaceBody.Document("# Plan")), offline.state.value)
+        assertEquals(
+            SurfaceBody.Todos(listOf(Todo("t1", "Eggs", false), Todo("t2", "Milk", true))),
+            SurfaceBody.parse(SurfaceBody.Todos(listOf(Todo("t1", "Eggs", false), Todo("t2", "Milk", true))).json()),
+        )
+    }
+
+    @Test
     fun theTodoPageShowsTodosAndTakesANewOne() {
         val added = mutableListOf<String>()
         rule.setHappyContent {
@@ -130,18 +132,6 @@ class AgentPlacesTest {
         rule.node(AgentPlacesTags.TODO_FIELD).performTextInput("Bread")
         rule.node(AgentPlacesTags.TODO_FIELD).performImeAction()
         assertEquals(listOf("Bread"), added)
-    }
-
-    @Test
-    fun theArtifactsPageOpensAnArtifact() {
-        val opened = mutableListOf<String>()
-        rule.setHappyContent {
-            ArtifactsScreen(PlaceRead.Ready(ArtifactPages(listOf(ArtifactSummary("a1", "Report"), ArtifactSummary("a2", null)), null)), {}, { opened += it }, {}, {})
-        }
-        rule.onNodeWithText("Artifacts").assertExists()
-        rule.onNodeWithText("Untitled").assertExists()
-        rule.onNodeWithText("Report").performClick()
-        assertEquals(listOf("a1"), opened)
     }
 
     @Test

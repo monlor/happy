@@ -18,8 +18,8 @@ import UltraView
 /// safe area while the keyboard is down, and follows the keyboard during an
 /// interactive dismiss: `keyboardTracker` is pinned to the keyboard layout
 /// guide, so every keyboard frame, animated or dragged, lays the screen out
-/// again, inside the keyboard's own animation when there is one. On the
-/// UltraList renderer with the floating dock (a phone in portrait),
+/// again, inside the keyboard's own animation when there is one. With the
+/// floating dock (a phone in portrait),
 /// UltraView's keyboard integration moves the keyboard instead
 /// (`ChatUltraKeyboard`), and the dock follows what it reports. Every frame
 /// comes from `LegacyChatScreenLayout`.
@@ -42,13 +42,13 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     private(set) var chatId: String
     private lazy var services = Self.services(account: account, context: context, sessionId: sessionId)
 
-    private lazy var list = ChatListView(renderer: context.account.localSettings.chatListRenderer)
+    private lazy var list = ChatListView()
     private lazy var scrim = ChatScrimView()
     private lazy var headerScrim = HeaderScrimView()
     /// The phone's header: the name and the session's status on one glass
     /// capsule, the agent chat's own, in the bar from the first frame.
     private let header = ChatHeaderView()
-    private lazy var avatarControl = ChatHeaderAvatarControl()
+    private(set) lazy var avatarControl = ChatHeaderAvatarControl()
     private lazy var avatarItem = UIBarButtonItem(customView: avatarControl)
     /// The title on a tablet, without glass.
     private lazy var plainTitleView = ChatPlainHeaderTitleView()
@@ -122,10 +122,11 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// A `compose-chat:` screen's start (`LegacyComposeStart`), until its
     /// first send has made the session; nil on any other chat.
     private var composing: LegacyComposeStart?
-    /// Where a compose chat's first send goes, over its empty list: a
-    /// machine and a folder, picked from a menu.
-    private lazy var composeTarget = UIButton(configuration: .gray())
-    /// A compose chat brings the keyboard up once its composer shows.
+    /// Where a compose chat's first send goes, centred over its empty list
+    /// as Happy Agent's new work asks Task or Bot: the machine (with more
+    /// than one) and the folder, each picked from a menu.
+    private lazy var composeTarget = NewWorkPanel(mode: .session)
+    /// A compose chat brings the keyboard up as it is pushed.
     private var composeFocusOwed = false
     private var anchorMetadata: JSONValue?
     private var anchorRecord: SessionRecord?
@@ -237,7 +238,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         // The capsule is in the bar as the push starts, the name and status
         // on it, as the agent chat's is; nothing is measured to show it.
         sessionStatus = cached.map { SessionComposerView.headerStatus(record: $0, now: home?.presenceNow) }
-        header.statuses = SessionComposerView.headerStatuses
+        header.statuses = SessionComposerView.headerStatuses + Strings.HeaderStatus.spinning
         header.onOpen = { [weak self] in self?.openInfo() }
         headerTitle = navigationItem.title ?? ""
         applyTitleAndStatus()
@@ -289,6 +290,11 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         defer { loadingSeconds = CACurrentMediaTime() - loadingStarted }
         #endif
         super.viewDidLoad()
+        linkWatch = LegacyLink.link(for: account).watch { [weak self] state in
+            guard let self, link != state else { return }
+            link = state
+            applyTitleAndStatus()
+        }
         isTabletLayout = traitCollection.isTabletLayout
         // A tablet's bar is opaque with the plain title (TabletBranches),
         // its name in the bar's own text until that is planned.
@@ -320,14 +326,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         placeholder.onAction = { [weak self] in self?.placeholderAction() }
         view.addSubview(placeholder)
         if let compose = composing {
-            composeTarget.configuration?.cornerStyle = .capsule
-            composeTarget.configuration?.image = .icon(.ionicons("desktop-outline"), size: 16)
-            composeTarget.configuration?.imagePadding = 6
-            composeTarget.configuration?.titleLineBreakMode = .byTruncatingMiddle
-            composeTarget.menu = compose.targetMenu()
-            composeTarget.showsMenuAsPrimaryAction = true
-            composeTarget.accessibilityIdentifier = "compose-target"
+            composeTarget.machine.menu = compose.machineMenu()
+            composeTarget.folder.menu = compose.folderMenu()
             view.addSubview(composeTarget)
+            #if DEBUG
+            if ComposeTrace.isOn { composeTrace = ComposeTrace(self) }
+            #endif
             updateComposeTarget()
         }
     }
@@ -347,7 +351,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         cliWarning.addTarget(self, action: #selector(dismissCliWarning), for: .touchUpInside)
         view.addSubview(cliWarning)
         view.addSubview(scrim)
-        registerForTraitChanges([TabletLayoutTrait.self]) { (self: Self, _) in
+        registerForTraitChanges([TabletLayoutTrait.self, UITraitHorizontalSizeClass.self]) { (self: Self, _) in
             self.tabletLayoutChanged()
         }
     }
@@ -388,7 +392,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
 
     private func installTabStrip() {
         tabStrip.isHidden = true
-        tabStrip.glass = !isTabletLayout
+        tabStrip.glass = !docksList
         tabStrip.names = Self.tabNames(account)
         tabStrip.onSelect = { [weak self] id in self?.selectTab(id) }
         tabStrip.onLongPress = { [weak self] id in self?.sessionActions.present(sessionId: id) }
@@ -477,6 +481,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         super.viewWillAppear(animated)
         appeared = true
         startConstruction()
+        // An empty compose has no transcript to stage: built now, its
+        // composer can take the keyboard while the push still runs.
+        if isComposing { construction?.finish() }
+        #if DEBUG
+        composeTrace?.event("willAppear built=\(construction?.stageSeconds.map { String(format: "%.3f", $0) } ?? [])")
+        #endif
         // A store write: never on the main thread.
         let actions = account.actions
         let chatId = self.chatId
@@ -487,7 +497,6 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             account.spawnRequests.release(sessionId: chatId)
         }
         if contentInstalled {
-            list.setRenderer(context.account.localSettings.chatListRenderer)
             updateUltraKeyboard()
             ultraKeyboard?.activate()
             updateHeaderVisibility(animated: animated)
@@ -500,8 +509,21 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         historyPager?.isActive = true
     }
 
+    /// In the window, the push still to run: a compose chat's composer
+    /// takes the keyboard now, so it comes up with the push.
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        #if DEBUG
+        composeTrace?.event("isAppearing restored=\(composer.isRestored)")
+        #endif
+        takeComposeFocus()
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        #if DEBUG
+        composeTrace?.appeared()
+        #endif
         // In its window now, which a later layout may not follow.
         ultraKeyboard?.refresh()
         VoiceCoordinator.shared.focus(account: account, sessionId: chatId)
@@ -541,6 +563,9 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             // Gone before the machine answered: the start stops, and what
             // was typed stays in the draft for the next compose.
             composing?.cancel()
+            #if DEBUG
+            composeTrace?.stop()
+            #endif
         }
         guard parent == nil, let chat = pendingChat, chat.sessionId != nil || chat.status == .failed else { return }
         let chats = services.pendingChats
@@ -593,9 +618,10 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     }
 
     private func makeChatAttachments() -> ChatAttachmentImages {
-        ChatAttachmentImages(
-            pictures: account.attachmentPictures, sessionId: chatId, load: services.attachment
-        )
+        if let source = services.attachmentSource {
+            return ChatAttachmentImages(pictures: account.attachmentPictures, sessionId: chatId, files: account.filesDirectory, library: account.media, source: source)
+        }
+        return ChatAttachmentImages(pictures: account.attachmentPictures, sessionId: chatId, files: account.filesDirectory, load: services.attachment)
     }
 
     /// Apply the background projection once the views exist. Observations
@@ -762,7 +788,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         updateHeaderVisibility(animated: false)
         updateUltraKeyboard()
         ultraKeyboard?.prepareLayout(guideTop: keyboardTracker.frame.minY)
-        layoutScreen()
+        layoutScreen(keyboard: insetMotion)
         ultraKeyboard?.refresh()
         updatePermissionListMaxHeight()
         if list.bounds.width != sentRowsView.width || list.traitCollection.textEnvironment != sentRowsView.text.environment {
@@ -774,8 +800,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         ContentWidth.maxWidth // Tablet (HappyUI/Tablet): layout.ts maxWidth, was 800 by size class.
     }
 
-    /// `keyboard` is the move UltraList's keyboard reported, for the list
-    /// to take its inset on.
+    /// The move a layout inside the composer's own animation takes the
+    /// list's inset on.
+    private var insetMotion: ChatUltraKeyboard.Change?
+
+    /// `keyboard` is the move UltraList's keyboard reported, or the
+    /// composer's, for the list to take its inset on.
     private func layoutScreen(keyboard: ChatUltraKeyboard.Change? = nil) {
         let size = view.bounds.size
         let composerHeight = composer.composerHeight(fitting: size.width)
@@ -792,8 +822,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             composerCardOffset: composer.cardOffset,
             maxContentWidth: maxContentWidth,
             // TabletBranches: chatFloatingDock and chatInputPaddingH.
-            docked: isTabletLayout,
-            accessoryPaddingH: isTabletLayout ? TabletBranches.Metrics.tabletInputPaddingH : TabletBranches.Metrics.phoneInputPaddingH,
+            docked: docksList,
+            accessoryPaddingH: docksList ? TabletBranches.Metrics.tabletInputPaddingH : TabletBranches.Metrics.phoneInputPaddingH,
             hidesHeader: hidesHeader,
             headerAccessory: tabStrip.isHidden ? 0 : WorktreeTabStripLayout.Metrics.height
         ))
@@ -811,11 +841,13 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         // an empty chat sits between the bar and the dock.
         placeholder.setLayoutFrame(dock.isHidden ? view.bounds : screen.placeholder)
         if composing != nil {
+            // Centred between the bar and the dock, which rides the
+            // keyboard: the panel moves with it, in the same pass.
             let area = screen.placeholder
-            let room = max(0, area.width - 48)
-            let fits = composeTarget.sizeThatFits(CGSize(width: room, height: 44))
-            let width = min(fits.width, room)
-            composeTarget.frame = CGRect(x: area.midX - width / 2, y: area.midY - fits.height / 2, width: width, height: fits.height).integral
+            composeRoom = area
+            let layout = composeTarget.layout(width: size.width, top: area.minY, bottom: area.maxY)
+            composeTarget.place(layout)
+            composeTarget.isHidden = !layout.fits
         }
         header.maxWidth = ChatTitleLayout.maxWidth(barWidth: size.width)
         plainTitleView.maxWidth = ContentWidth.headerMaxWidth
@@ -829,17 +861,16 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         if let strip = screen.statusBarShadow { statusBarStrip.setLayoutFrame(strip) }
     }
 
-    /// One `ChatUltraKeyboard` for the UltraList the list renders with
-    /// under the floating dock, none otherwise.
+    /// One `ChatUltraKeyboard` for the list under the floating dock, none
+    /// otherwise.
     ///
     /// Docked (a tablet, a phone on its side) the list's own frame ends at
     /// the dock and changes height with the keyboard. UltraView has no
     /// public way yet to carry a list's frame or clip on its viewport
-    /// motion, so there the keyboard layout guide moves the screen, as on
-    /// UICollectionView.
+    /// motion, so there the keyboard layout guide moves the screen.
     private func updateUltraKeyboard() {
         // A layout after the chat has left its navigation makes none.
-        let current = floatingDock && parent != nil ? list.ultra?.list : nil
+        let current = floatingDock && parent != nil ? list.ultra.list : nil
         if let keyboard = ultraKeyboard, current != nil, keyboard.list === current { return }
         if let old = ultraKeyboard {
             // Its list may already be off screen: it keeps it for this.
@@ -870,7 +901,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// bottom, so its height moves too; the placeholder only moves, so its
     /// centred content glides.
     private func followUltraKeyboard(_ change: ChatUltraKeyboard.Change) {
-        guard let ultraList = list.ultra?.list else { return layoutScreen(keyboard: change) }
+        let ultraList = list.ultra.list
         let riders = dockRiders
         let drawn = riders.map { $0.layer.presentation()?.frame ?? $0.frame }
         let scrimHeight = scrim.layer.presentation()?.bounds.height ?? scrim.bounds.height
@@ -900,7 +931,15 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// the dock over the list, with the fades behind the bar and the dock
     /// and the bars above the composer that hide while the reader is back.
     private var floatingDock: Bool {
-        !isTabletLayout && !hidesHeader
+        !docksList && !hidesHeader
+    }
+
+    /// The tablet's docked list (`LegacyChatScreenLayout.Input.docked`):
+    /// on a tablet-wide window, and in the iPad's main panel, which keeps
+    /// the phone's bar but has room for nothing to scroll under it or the
+    /// strip (docs/IPAD.md).
+    private var docksList: Bool {
+        isTabletLayout || (traitCollection.userInterfaceIdiom == .pad && traitCollection.horizontalSizeClass == .regular)
     }
 
     /// TabletBranches' `chatHidesHeaderInLandscape`, as the window is now.
@@ -994,14 +1033,29 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// (`composerDidChangeHeaderStatus`), the record home held until then.
     private var sessionStatus: ChatHeaderStatus?
 
+    /// The account's link as its headers show it (`LegacyLink`), the
+    /// same one home's title reads.
+    private var link: LinkState = .online
+    private var linkWatch: Watch?
+
     /// What is under the name: a chat still being started says what the
-    /// start is doing; any other, its session's status.
+    /// start is doing; while the account's link isn't live, where it is
+    /// ("connecting…", "waiting for network…"), with the spinner, as
+    /// Telegram's does; any other, its session's status.
     private var shownStatus: ChatHeaderStatus? {
         if let compose = composing, isComposing {
-            return compose.progress.map { ChatHeaderStatus(text: $0, color: UIColor(Palette.textSecondary)) }
+            return compose.progress.map { ChatHeaderStatus(text: $0, color: UIColor(Palette.textSecondary), working: true) }
+        }
+        if Strings.HeaderStatus.spins(link) {
+            return ChatHeaderStatus(text: Strings.HeaderStatus.text(link), color: UIColor(Palette.textSecondary), spins: true)
         }
         return sessionStatus
     }
+
+    /// What is under the name now, for tests.
+    var headerStatusText: String? { shownStatus?.text }
+    /// Whether the spinner turns before it, for tests.
+    var headerStatusSpins: Bool { header.statusSpins }
 
     /// The name and status on the phone's capsule and the tablet's plain
     /// title alike, the status crossfading as the agent chat's does.
@@ -1012,6 +1066,8 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
             header.resize()
         }
         header.setStatus(status?.text ?? "", color: status?.color ?? UIColor(Palette.textSecondary))
+        header.statusShimmers = status?.working == true
+        header.statusSpins = status?.spins == true
         // Made with the view, at the screen's text size.
         guard isViewLoaded else { return }
         plainTitleView.update(title: headerTitle, subtitle: status?.text, changes: nil)
@@ -1038,8 +1094,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         }
         applyTitleAndStatus()
         if tablet, switcher == nil { switcher = AccountSwitcher(context: context, controller: self) }
-        navigationItem.leftBarButtonItem = tablet ? switcher?.barItem : nil
-        if contentInstalled { tabStrip.glass = !tablet } // TabletBranches.worktreeStripGlass
+        // Off a tablet only the switcher goes: the sidebar's toggle stays.
+        if tablet { navigationItem.leftBarButtonItem = switcher?.barItem }
+        else if let item = switcher?.barItem, navigationItem.leftBarButtonItems?.contains(item) == true {
+            navigationItem.leftBarButtonItems = navigationItem.leftBarButtonItems?.filter { $0 !== item }
+        }
+        if contentInstalled { tabStrip.glass = !docksList } // TabletBranches.worktreeStripGlass
         floatingDockChanged()
     }
 
@@ -1296,7 +1356,12 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// branches again.
     private func tabletLayoutChanged() {
         let tablet = traitCollection.isTabletLayout
-        guard tablet != isTabletLayout else { return }
+        guard tablet != isTabletLayout else {
+            // The iPad's main panel docks the list without the tablet's bar.
+            applyHeaderBranch()
+            view.setNeedsLayout()
+            return
+        }
         isTabletLayout = tablet
         applyHeaderBranch()
         view.setNeedsLayout()
@@ -1319,6 +1384,15 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     }
 
     // MARK: Compose
+
+    /// The start behind an empty chat compose opened, for the tests.
+    var composeStart: LegacyComposeStart? { composing }
+    #if DEBUG
+    /// `HAPPY_COMPOSE_TRACE`: the empty chat's frames, as new work's.
+    private var composeTrace: ComposeTrace?
+    #endif
+    /// Where the empty chat's panel is centred: under the bar, over the dock.
+    private var composeRoom: CGRect = .zero
 
     /// An empty chat compose opened, with no session yet.
     var isComposing: Bool {
@@ -1346,18 +1420,24 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     /// target is fixed, and once the chat is real it goes.
     private func updateComposeTarget() {
         guard let compose = composing else { return }
-        composeTarget.isHidden = !isComposing
-        composeTarget.isEnabled = !compose.isStarting
-        composeTarget.configuration?.title = compose.target
-        composeTarget.accessibilityLabel = compose.target
+        if !isComposing { composeTarget.isHidden = true }
+        composeTarget.isLocked = compose.isStarting
+        composeTarget.showsMachine = compose.asksMachine
+        composeTarget.machine.title = compose.machineName
+        composeTarget.folder.title = compose.folderName
         view.setNeedsLayout()
     }
 
-    /// The keyboard a compose chat opens with, once its composer shows.
+    /// The keyboard a compose chat opens with, as soon as it is in the
+    /// window: the composer shows at once rather than wait for its draft
+    /// to be measured (`focus`), so the keyboard comes up with the push.
     private func takeComposeFocus() {
-        guard composeFocusOwed, isComposing, contentInstalled, composer.isRestored, view.window != nil else { return }
+        guard composeFocusOwed, isComposing, contentInstalled, view.window != nil else { return }
         composeFocusOwed = false
         composer.focus()
+        #if DEBUG
+        composeTrace?.event("focus \(traceResponder)")
+        #endif
     }
 
     /// The session the first send started: the screen becomes its chat in
@@ -1367,7 +1447,7 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         becomeChat(real)
         composing?.cancel()
         composing = nil
-        composeTarget.isHidden = true
+        composeTarget.dismiss()
         updateHeader()
         updatePlaceholder()
         list.scrollToNewest(animated: true)
@@ -1828,15 +1908,26 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
         case .retry(let localId):
             let sender = services.sender
             Task { try? await sender.retry(localId: localId) }
-        case .cancelUpload:
-            // Only a V2 conversation's sending pictures have a cross.
-            break
+        case .cancelUpload(let localId, _):
+            // A picture's cross takes out that file alone; its text still goes.
+            let sender = services.sender
+            Task { try? await sender.discard(localId: localId) }
         case .copyMenu, .selectable, .markdownSelectable:
             // Long presses; see `chatList(_:hold:frame:at:)`.
             break
-        case .openMedia, .openArtifact:
-            // Only V2 conversations show media and artifacts.
+        case .openMedia, .openArtifact, .toggleTurn:
+            // Only V2 conversations show media, artifacts and turns.
             break
+        case .toggleDownload(let ref):
+            chatAttachments?.toggle(ref)
+        case .playAttachment(let attachment):
+            // Plays as soon as its first range is here, streaming.
+            guard let images = chatAttachments else { return }
+            VideoOpening.shared.open(boardKey: images.download(attachment.ref)?.boardKey, from: self, failed: { [weak self] in
+                let alert = UIAlertController(title: nil, message: Strings.fileUnavailable, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
+                self?.present(alert, animated: true)
+            }) { images.player(attachment) }
         }
     }
 
@@ -1931,6 +2022,14 @@ final class LegacyChatViewController: UIViewController, ChatListViewDelegate, Ch
     func composerDidInvalidateHeight(_ composer: any ChatComposerView) {
         view.setNeedsLayout()
         if isShown {
+            // UltraList never moves inside a UIView animation: its newest
+            // inset goes on the composer's own (its default curve), so the
+            // rows rise with the dock's top, not ahead of it.
+            let duration = UIView.inheritedAnimationDuration
+            let ultraList = list.ultra.list
+            let held = ultraList.isTracking || ultraList.isDragging || ultraList.isDecelerating
+            insetMotion = duration > 0 ? ChatUltraKeyboard.Change(transition: .easeInOut(duration), compensates: !held) : nil
+            defer { insetMotion = nil }
             view.layoutIfNeeded()
         } else {
             UIView.performWithoutAnimation { view.layoutIfNeeded() }
@@ -2094,4 +2193,19 @@ final class ChatScrollButton: UIControl {
         layer.shadowColor = UIColor(Palette.shadow).resolvedColor(with: traitCollection).cgColor
     }
 }
+#if DEBUG
+extension LegacyChatViewController: ComposeTraced {
+    var traceResponder: String {
+        func card(_ view: UIView) -> AgentInputCardView? {
+            if let card = view as? AgentInputCardView { return card }
+            return view.subviews.lazy.compactMap(card).first
+        }
+        guard contentInstalled, let card = card(composer) else { return "none" }
+        return card.textView.isFirstResponder ? "composer" : "none"
+    }
+    var traceComposer: UIView? { contentInstalled ? composer : nil }
+    var tracePanel: UIView? { isComposing ? composeTarget : nil }
+    var traceRoom: (top: CGFloat, bottom: CGFloat) { (composeRoom.minY, composeRoom.maxY) }
+}
+#endif
 #endif

@@ -17,10 +17,12 @@ import com.slopus.happy.agent.AgentFeed
 import com.slopus.happy.agent.AgentLinkStatus
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
+import com.slopus.happy.ui.components.LoadingIndicatorSpec
+import com.slopus.happy.ui.components.LoadingIndicatorTags
 import com.slopus.happy.ui.home.AccountMenu
 import com.slopus.happy.ui.home.AccountMenuEntry
 import com.slopus.happy.ui.home.AccountMenuTags
-import com.slopus.happy.ui.layout.ContentWidth
+import com.slopus.happy.ui.layout.ContentTokens
 import com.slopus.happy.ui.layout.ProvideWindowLayout
 import com.slopus.happy.ui.node
 import com.slopus.happy.ui.setHappyContent
@@ -51,12 +53,12 @@ class AgentHomeTabletTest {
 
     private fun show(feed: AgentFeed, status: AgentLinkStatus = AgentLinkStatus.Connected) = rule.setHappyContent {
         ProvideWindowLayout(Modifier.fillMaxSize()) {
-            AgentHomeScreen("Studio", feed, status, accounts, actions, now = AgentHomeLayoutTest.NOW)
+            AgentHomeScreen("Studio", feed, status, accounts, actions)
         }
     }
 
     /** The window is wider than the cap, so there is something to hold back. */
-    private val cap = ContentWidth.tablet
+    private val cap = ContentTokens.Expanded.columnMaxWidth
 
     @Test
     fun theBarAndEveryRowAreHeldToOneContentWidthAndCentred() {
@@ -108,11 +110,19 @@ class AgentHomeTabletTest {
 
     @Test
     fun theStatePagesAreCappedToo() {
-        show(AgentFeed.Empty, AgentLinkStatus.Connecting)
+        show(AgentFeed.Empty, AgentLinkStatus.Offline)
         // The column is the content width less its own 32 of air on each side, and centred in the window.
-        val page = rule.node(AgentHomeTags.SPINNER).bounds
+        val page = rule.node(AgentHomeTags.OFFLINE).bounds
         assertDp("the state page is capped", cap - 64.dp, page.width)
         assertEquals("the state page is centred", (TABLET_WIDTH.dp - page.width).value / 2, page.left.value, 1f)
+    }
+
+    @Test
+    fun theLoaderIsCentred() {
+        show(AgentFeed.Empty, AgentLinkStatus.Connecting)
+        rule.mainClock.advanceTimeBy(LoadingIndicatorSpec.DELAY_MS + 1_000)
+        val loader = rule.node(LoadingIndicatorTags.INDICATOR).bounds
+        assertEquals("the loader is centred", TABLET_WIDTH / 2f, ((loader.left + loader.right) / 2).value, 1f)
     }
 }
 

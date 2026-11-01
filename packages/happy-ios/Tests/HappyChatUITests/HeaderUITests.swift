@@ -19,7 +19,7 @@ final class HeaderUITests: XCTestCase {
 
     func testTheAccountSwitcherOpensItsMenu() {
         let app = XCUIApplication()
-        app.launchArguments = ["-screen", "home", "-renderer", "UITableView", "-sessionCount", "40"]
+        app.launchArguments = ["-screen", "home", "-sessionCount", "40"]
         app.launch()
         let switcher = app.buttons["account-switcher"]
         XCTAssertTrue(switcher.waitForExistence(timeout: 20))
@@ -41,7 +41,7 @@ final class HeaderUITests: XCTestCase {
         keep("manage-accounts-\(style)")
     }
 
-    /// The same screen in the real tablet shell: `TabletShellViewController`
+    /// The same screen in the real tablet shell: `ShellViewController`
     /// with its sidebar, the persistent header, and home as the stack's
     /// root, which is what `-screen home` mounts. Beside the sidebar home
     /// itself draws nothing, so this is the one test that the accounts are
@@ -49,7 +49,7 @@ final class HeaderUITests: XCTestCase {
     /// the detail, where a tablet has no back button in the bar.
     func testTheSwitcherOpensItsMenuBesideTheSidebar() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-screen", "home", "-renderer", "UITableView", "-sessionCount", "40"]
+        app.launchArguments = ["-screen", "home", "-sessionCount", "40"]
         app.launch()
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 20))

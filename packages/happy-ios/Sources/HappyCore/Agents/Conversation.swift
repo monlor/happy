@@ -2,9 +2,8 @@ import Foundation
 import HappyWire
 
 /// One entry in a V2 conversation as the phone shows it: what a
-/// person wrote, or what the agent said. Reasoning, tool calls and the
-/// daemon's housekeeping are never shown; a tool call is kept only for the
-/// pictures and videos it presented.
+/// person wrote, what the agent said, and the steps of its turns.
+/// Reasoning and the daemon's housekeeping are never shown.
 public struct ChatItem: Equatable, Sendable, Identifiable {
     public enum Role: Equatable, Sendable {
         case user, agent
@@ -15,6 +14,15 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
         /// A turn that failed: desktop's failure card, its reason the item's
         /// text, with Retry or a switch to the composer's model.
         case failure(Failure)
+        /// One tool call of the agent's turn (`Turns.swift`); what it showed
+        /// the person (pictures, files, an artifact) is its pieces.
+        case tool(Tool)
+        /// How a finished turn ended: "Completed in 12s".
+        case turnEnd(TurnEnd)
+        /// A question the agent asked.
+        case question(Ask)
+        /// A finished turn's fold control, placed by `TurnFold`.
+        case trace(Trace)
     }
 
     public enum Delivery: Equatable, Sendable {
@@ -44,9 +52,6 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
         case file(Media)
         /// An artifact a tool made or changed, as a card that opens it.
         case artifact(Artifact)
-        /// A story a tool drafted (`draft_story`), by its ID: drawn as the
-        /// story itself, following it live.
-        case story(String)
         /// A sidebar Prioritizing proposed (a `sidebar_proposal` artifact),
         /// drawn by the sidebar's own rows and answered where it stands.
         case sidebarProposal(artifactId: String)
@@ -76,12 +81,15 @@ public struct ChatItem: Equatable, Sendable, Identifiable {
     public var role: Role
     public var pieces: [Piece]
     public var delivery: Delivery
+    /// The run it belongs to, which `TurnFold` folds as one.
+    public var turn: String?
 
-    public init(id: String, role: Role, pieces: [Piece], delivery: Delivery) {
+    public init(id: String, role: Role, pieces: [Piece], delivery: Delivery, turn: String? = nil) {
         self.id = id
         self.role = role
         self.pieces = pieces
         self.delivery = delivery
+        self.turn = turn
     }
 
     public var text: String {
@@ -244,6 +252,9 @@ public struct ChatSnapshot: Equatable, Sendable {
     /// hasn't taken yet: desktop draws it under the working line, as next
     /// in the queue, until the agent takes it up.
     public var queued = 0
+    /// The provider's latest measurement of the conversation's context
+    /// (the bootstrap's, then each `agent.context.updated`); nil until one.
+    public var context: AgentWire.ContextUsage?
 
     public init() {}
 }
@@ -267,7 +278,7 @@ public actor Conversation {
     private var checkpointClaims: [String: Task<Void, Error>] = [:]
     private var attachmentCleanup: Set<String> = []
     private struct KeptConversation: Codable, Equatable, Sendable {
-        struct Run: Codable, Equatable, Sendable { var id: String; var messageIds: [String] }
+        struct Run: Codable, Equatable, Sendable { var id: String; var messageIds: [String]; var time: RunTime? }
         struct Picture: Codable, Equatable, Sendable { var mimeType: String; var data: Data }
         struct Send: Codable, Equatable, Sendable {
             var id: String; var text: String; var pictures: [Picture]; var accepted: Bool; var failure: String?; var mode: AgentWire.Mode?
@@ -297,7 +308,29 @@ public actor Conversation {
     private var heldChildren: [JSONValue] = []
 
     private var runs: [(id: String, messageIds: [String])] = []
+    /// When each run began and ended, and why it ended (`run.*` metadata).
+    struct RunTime: Codable, Equatable, Sendable {
+        var startedAt: Double?
+        var endedAt: Double?
+        var reason: String?
+
+        init(_ run: AgentWire.Run) {
+            startedAt = run.startedAt; endedAt = run.endedAt; reason = run.reason
+        }
+
+        init(_ run: JSONValue?) {
+            startedAt = run?["startedAt"]?.numberValue; endedAt = run?["endedAt"]?.numberValue; reason = run?["reason"]?.stringValue
+        }
+    }
+    private var times: [String: RunTime] = [:]
     private var messages: [String: AgentWire.Message] = [:]
+    /// The question the agent waits on, and how its answer stands.
+    private var asking: ChatItem.Ask?
+    private var askingRead: Task<Void, Never>?
+    /// `question.*` events, which name their agent inside the question.
+    private var questionEvents: Task<Void, Never>?
+    /// Questions answered while this was open, as the computer took them.
+    private var answered: [String: AgentWire.Question] = [:]
     /// User messages the daemon holds that no run has taken yet, oldest first.
     private var pending: [String] = []
     /// Sends the daemon has not echoed yet, oldest first. One it accepted
@@ -395,6 +428,8 @@ public actor Conversation {
     public func stop() async {
         following?.cancel(); following = nil
         children?.cancel(); children = nil
+        questionEvents?.cancel(); questionEvents = nil
+        askingRead?.cancel(); askingRead = nil
         reading?.cancel(); reading = nil
         reloadSoon?.cancel(); reloadSoon = nil
         deliveryWatch?.cancel(); deliveryWatch = nil
@@ -472,6 +507,7 @@ public actor Conversation {
         }
         let events = await store.conversationEvents(agentId)
         let spawned = await store.events(matching: ["agent.created", "agent.updated"])
+        let asked = await store.events(matching: ["question."])
         // Stopped while those were asked for: nothing is followed.
         if Task.isCancelled { return }
         children?.cancel()
@@ -480,6 +516,14 @@ public actor Conversation {
                 guard let self, !Task.isCancelled else { return }
                 guard case .event(let envelope) = event else { continue }
                 await child(envelope)
+            }
+        }
+        questionEvents?.cancel()
+        questionEvents = Task { [weak self] in
+            for await event in asked {
+                guard let self, !Task.isCancelled else { return }
+                guard case .event(let envelope) = event else { continue }
+                await questionEvent(envelope)
             }
         }
         heldEvents = []
@@ -547,6 +591,7 @@ public actor Conversation {
         pending = []
         for run in history.runs {
             runs.append((run.id, (run.messages ?? []).map(\.id)))
+            times[run.id] = RunTime(run)
             for message in run.messages ?? [] { messages[message.id] = message }
         }
         for message in start.pending ?? [] {
@@ -560,6 +605,7 @@ public actor Conversation {
         // and the send's clock until the run's own events come.
         let awaiting = activeRun != nil && activeRun?.id == nil && (outgoing.contains { $0.accepted } || !pending.isEmpty)
         snapshot.working = start.agent.isWorking || awaiting
+        snapshot.context = start.context
         adoptAgent(start.agent)
         if start.agent.isWorking, let run = history.runs.last, run.status == "running" {
             activeRun = (run.id, run.startedAt)
@@ -592,7 +638,10 @@ public actor Conversation {
             let known = Set(runs.map(\.id))
             let older = page.runs.filter { !known.contains($0.id) }
             runs.insert(contentsOf: older.map { ($0.id, ($0.messages ?? []).map(\.id)) }, at: 0)
-            for run in older { for message in run.messages ?? [] { messages[message.id] = message } }
+            for run in older {
+                times[run.id] = RunTime(run)
+                for message in run.messages ?? [] { messages[message.id] = message }
+            }
             snapshot.hasMore = page.hasMore
             publish()
             // A page that lands after its reader left goes again with the rest.
@@ -646,12 +695,16 @@ public actor Conversation {
             accept(payload["acceptedMessageIds"]?.arrayValue?.compactMap(\.stringValue) ?? [], into: runId)
             snapshot.working = true
             activeRun = (runId, payload["run"]?["startedAt"]?.numberValue)
+            times[runId] = RunTime(payload["run"])
         case "run.boundary":
             guard let runId = payload["startedRun"]?["id"]?.stringValue else { return }
             accept(payload["acceptedMessageIds"]?.arrayValue?.compactMap(\.stringValue) ?? [], into: runId)
             snapshot.working = true
             activeRun = (runId, payload["startedRun"]?["startedAt"]?.numberValue)
+            if let finished = payload["finishedRun"]?["id"]?.stringValue { times[finished] = RunTime(payload["finishedRun"]) }
+            times[runId] = RunTime(payload["startedRun"])
         case "run.finished":
+            if let finished = payload["run"]?["id"]?.stringValue { times[finished] = RunTime(payload["run"]) }
             snapshot.working = false
             settle()
             if visible { markRead() }
@@ -666,12 +719,21 @@ public actor Conversation {
             // Present and null clears; absent leaves it.
             if let value = changes["wait"] { wait = value == .null ? nil : Self.decode(AgentWire.AgentWait.self, value) }
             if let value = changes["retrying"] { retrying = value == .null ? nil : Self.decode(AgentWire.AgentRetrying.self, value) }
-            if let value = changes["pendingQuestionId"] { question = value.stringValue != nil }
+            if let value = changes["pendingQuestionId"] {
+                question = value.stringValue != nil
+                waitsOn(value.stringValue)
+            }
             if let running = changes["subagents"]?["running"]?.numberValue { subagentsRunning = Int(running) }
             if let value = changes["title"] { snapshot.title = value.stringValue }
         case "agent.draft.updated":
             guard let draft = payload["draft"].flatMap({ Self.decode(AgentWire.Draft.self, $0) }) else { return }
             adoptDraft(draft, publishes: false)
+        case "agent.context.updated":
+            // A complete replacement; null clears it (a fresh conversation).
+            guard let value = payload["context"] else { return }
+            let context = value == .null ? nil : Self.decode(AgentWire.ContextUsage.self, value)
+            guard value == .null || context != nil, context != snapshot.context else { return }
+            snapshot.context = context
         default:
             return
         }
@@ -933,6 +995,7 @@ public actor Conversation {
         guard let persistence, let value = try? await persistence.cachedResource("conversation:\(agentId)"),
               let kept = try? JSONDecoder().decode(KeptConversation.self, from: JSONEncoder().encode(value)) else { return }
         runs = kept.runs.map { ($0.id, $0.messageIds) }
+        times = Dictionary(kept.runs.compactMap { run in run.time.map { (run.id, $0) } }, uniquingKeysWith: { _, last in last })
         messages = kept.messages
         pending = kept.pending
         outgoing = kept.outgoing.map { ($0.id, $0.text, $0.pictures.map { ($0.mimeType, $0.data) }, $0.accepted, $0.failure) }
@@ -987,7 +1050,7 @@ public actor Conversation {
     private func persistConversation() async -> Bool {
         guard let persistence, snapshot.loaded || !outgoing.isEmpty else { return true }
         let window = Self.kept(runs: runs, messages: messages, pending: pending)
-        let kept = KeptConversation(runs: window.runs.map { .init(id: $0.id, messageIds: $0.messageIds) }, messages: window.messages, pending: pending,
+        let kept = KeptConversation(runs: window.runs.map { .init(id: $0.id, messageIds: $0.messageIds, time: times[$0.id]) }, messages: window.messages, pending: pending,
             outgoing: outgoing.map { .init(id: $0.id, text: $0.text, pictures: $0.pictures.map { .init(mimeType: $0.mimeType, data: $0.data) }, accepted: $0.accepted, failure: $0.failure, mode: outgoingModes[$0.id], files: outgoingFiles[$0.id]) }, mode: mode, hasMore: snapshot.hasMore || window.trimmed)
         guard kept != lastKept || conversationWrite != nil else { return true }
         let key = "conversation:\(agentId)"
@@ -1222,9 +1285,136 @@ public actor Conversation {
         if let mode { setMode(mode) } else { publish() }
     }
 
+    // MARK: Questions
+
+    /// The agent waits on question `id`, or on none: one it isn't showing
+    /// yet is read; one it stopped waiting on leaves the end of the
+    /// transcript and settles where it was asked.
+    private func waitsOn(_ id: String?) {
+        guard let id else {
+            askingRead?.cancel(); askingRead = nil
+            if let asking, asking.phase != .submitting { self.asking = nil }
+            return
+        }
+        guard asking?.question.id != id, askingRead == nil else { return }
+        let client = client
+        let agentId = agentId
+        askingRead = Task {
+            let question = try? await client.question(agentId)
+            guard !Task.isCancelled else { return }
+            askingRead = nil
+            if let question, question.status == "pending" { ask(question) }
+        }
+    }
+
+    private func ask(_ question: AgentWire.Question) {
+        guard question.agentId == nil || question.agentId == agentId, answered[question.id] == nil else { return }
+        if asking?.question.id == question.id { return }
+        asking = ChatItem.Ask(question: question, phase: .pending)
+        publish()
+        // Answered here before a relaunch and not yet taken: still sending.
+        guard let persistence else { return }
+        Task {
+            guard let answers = await persistence.pendingAnswer(question.id),
+                  let kept = await persistence.intents.pending().first(where: { $0.kind == .answer && $0.target == question.id }),
+                  self.asking?.question.id == question.id, self.asking?.phase == .pending else { return }
+            self.asking?.phase = .submitting
+            publish()
+            await settleAnswer(kept, question: question, answers: answers, persistence: persistence)
+        }
+    }
+
+    /// Waits for the computer to take or refuse an answer on its way.
+    private func settleAnswer(_ kept: Intent, question: AgentWire.Question, answers: [String: [String]], persistence: SyncEngine) async {
+        // The person waits on it: tried at once, then kept until it goes.
+        Task { await persistence.intents.attempt(kept.id) }
+        let taken = await persistence.intents.outcome(kept.id)
+        guard self.asking?.question.id == question.id else { return }
+        if taken {
+            var question = question
+            question.status = "answered"
+            question.answers = answers
+            settle(question: question)
+        } else {
+            self.asking?.phase = .failed("")
+            publish()
+        }
+    }
+
+    /// Someone answered it, here or elsewhere, or the run stopped needing it.
+    private func settle(question: AgentWire.Question) {
+        if question.status == "answered" { answered[question.id] = question }
+        if asking?.question.id == question.id { asking = nil }
+        publish()
+    }
+
+    private func questionEvent(_ event: JSONValue) {
+        let payload = event["payload"] ?? .null
+        switch event["type"]?.stringValue {
+        case "question.created":
+            guard let question = payload["question"].flatMap({ Self.decode(AgentWire.Question.self, $0) }), question.agentId == agentId,
+                  question.status == "pending" else { return }
+            ask(question)
+        case "question.updated":
+            guard let id = payload["questionId"]?.stringValue, var question = asking?.question, question.id == id,
+                  let status = payload["changes"]?["status"]?.stringValue, status != "pending" else { return }
+            question.status = status
+            if let answers = payload["changes"]?["answers"].flatMap({ Self.decode([String: [String]].self, $0) }) { question.answers = answers }
+            settle(question: question)
+        default:
+            return
+        }
+    }
+
+    /// Answers the question the agent waits on, each prompt by its ID
+    /// (desktop's `answerInputRun`): shown as sending at once, settled when
+    /// the computer takes it. A refusal says why, and the answer may go
+    /// again; one that lost to another answer shows that one.
+    public func answer(_ answers: [String: [String]]) async {
+        guard var asking, asking.phase != .submitting, asking.phase != .answered else { return }
+        asking.phase = .submitting
+        self.asking = asking
+        publish()
+        if let persistence {
+            // Kept and sent as one, offline or not; shown as sending until
+            // the computer takes it, and through a relaunch.
+            guard let kept = await persistence.answer(asking.question.id, agentId: agentId, answers: answers) else {
+                if self.asking?.question.id == asking.question.id { self.asking?.phase = .failed(""); publish() }
+                return
+            }
+            await settleAnswer(kept, question: asking.question, answers: answers, persistence: persistence)
+            return
+        }
+        do {
+            let returned = try await client.answerQuestion(agentId, questionId: asking.question.id, answers: answers, mutationId: ClientID.make())
+            // What was asked stays as it was asked; the reply may carry only its outcome.
+            var question = asking.question
+            question.status = returned.status
+            question.answers = returned.answers ?? answers
+            settle(question: question)
+        } catch {
+            if case .status(409, _, _)? = error as? AgentClientError {
+                // Answered or abandoned already: what stands now is read again.
+                let current = try? await client.question(agentId)
+                if current?.id == asking.question.id { self.asking?.phase = .pending; publish() }
+                else { self.asking = nil; publish() }
+                return
+            }
+            guard self.asking?.question.id == asking.question.id else { return }
+            self.asking?.phase = .failed(Store.describe(error))
+            publish()
+        }
+    }
+
+    /// Read at once on this phone, and kept until the computer hears
+    /// (`SyncEngine.markRead`); standalone, asked directly.
     private func markRead() {
         let client = client
         let agentId = agentId
+        if let persistence {
+            Task { await persistence.markRead(agentId) }
+            return
+        }
         Task { try? await client.markRead(agentId) }
     }
 
@@ -1282,12 +1472,27 @@ public actor Conversation {
         for run in runs {
             // The newest run while the agent works may end mid-block.
             let streaming = snapshot.working && run.id == runs.last?.id
+            var tools = 0
+            var answer: String?
             for id in run.messageIds {
-                if let message = messages[id], let item = item(message, shown: &shown, streaming: streaming) { items.append(item) }
+                guard let message = messages[id] else { continue }
+                if message.role == "agent" { tools += message.content.filter { if case .toolCall = $0 { true } else { false } }.count }
+                for var item in self.items(message, shown: &shown, streaming: streaming) {
+                    item.turn = run.id
+                    if item.role == .agent { answer = item.text.isEmpty ? nil : item.text }
+                    items.append(item)
+                }
+            }
+            // Ended: how, after how long, and the answer to copy (desktop's `turnStatus`).
+            if let time = times[run.id], let ended = time.endedAt {
+                let turnEnd = ChatItem.TurnEnd(reason: time.reason ?? "completed", durationMs: time.startedAt.map { max(0, ended - $0) }, tools: tools, copyText: answer)
+                items.append(ChatItem(id: "\(run.id):status", role: .turnEnd(turnEnd), pieces: [], delivery: .sent, turn: run.id))
             }
         }
+        // A question waiting on the person is pinned to the end, under the work.
+        if let asking { items.append(ChatItem(id: asking.question.id, role: .question(asking), pieces: [], delivery: .sent)) }
         for id in pending {
-            if let message = messages[id], let item = item(message, shown: &shown, streaming: false) { items.append(item) }
+            if let message = messages[id] { items += self.items(message, shown: &shown, streaming: false) }
         }
         for send in outgoing {
             var pieces: [ChatItem.Piece] = send.text.isEmpty ? [] : [.text(send.text)]
@@ -1345,6 +1550,7 @@ public actor Conversation {
         wait = agent.wait
         retrying = agent.retrying
         question = agent.pendingQuestionId != nil
+        if agent.id == agentId { waitsOn(agent.pendingQuestionId) }
         subagentsRunning = agent.subagents?.running ?? 0
         if agent.id == agentId {
             parentAgentId = agent.parentAgentId
@@ -1375,12 +1581,16 @@ public actor Conversation {
         return try? JSONDecoder().decode(type, from: data)
     }
 
-    private func item(_ message: AgentWire.Message, shown: inout [String: Media], streaming: Bool) -> ChatItem? {
+    /// A message's rows: a person's words, a failure, another agent's
+    /// message, or the agent's words split where each tool call it made
+    /// stands as its own row (desktop's `agent_text` and `tool_call`
+    /// elements), in the order it made them.
+    private func items(_ message: AgentWire.Message, shown: inout [String: Media], streaming: Bool) -> [ChatItem] {
         if message.role == "service" {
             // Only a failure is shown, as desktop's card; other service
             // messages are the daemon's housekeeping.
-            guard let failure = Failure.of(message) else { return nil }
-            return ChatItem(id: message.id, role: .failure(failure), pieces: [.text(failure.reason)], delivery: .sent)
+            guard let failure = Failure.of(message) else { return [] }
+            return [ChatItem(id: message.id, role: .failure(failure), pieces: [.text(failure.reason)], delivery: .sent)]
         }
         if message.role == "user" || message.role == "agent", let sender = Self.collaborator(message, agentId: agentId, parentAgentId: parentAgentId) {
             // Its words as they came, read only when opened; desktop trims the
@@ -1388,7 +1598,7 @@ public actor Conversation {
             let text = message.content.compactMap { block -> String? in if case .text(let text) = block { text } else { nil } }.joined(separator: "\n")
             let body = message.role == "agent" ? Self.inboundText(text, agentId: sender.agentId) : text
             let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
-            return ChatItem(id: message.id, role: .collaborator(agentId: sender.agentId, explanation: sender.explanation), pieces: trimmed.isEmpty ? [] : [.text(trimmed)], delivery: .sent)
+            return [ChatItem(id: message.id, role: .collaborator(agentId: sender.agentId, explanation: sender.explanation), pieces: trimmed.isEmpty ? [] : [.text(trimmed)], delivery: .sent)]
         }
         // The agent that manages this one gives it its work: desktop reads
         // that as dialogue, in the lane the person's own words take.
@@ -1397,9 +1607,21 @@ public actor Conversation {
         switch message.role {
         case "user": role = .user
         case "agent": role = manager == nil ? .agent : .user
-        default: return nil
+        default: return []
         }
+        var items: [ChatItem] = []
         var pieces: [ChatItem.Piece] = []
+        // The words before the first call keep the message's ID; each run
+        // of words after a call is named by the block it starts at.
+        var segment = message.id
+        var proposed: Set<String> = []
+        func flush(next: String) {
+            if !pieces.isEmpty {
+                items.append(ChatItem(id: segment, role: role, pieces: pieces, delivery: role == .user && message.status == "pending" ? .pending : .sent))
+            }
+            pieces = []
+            segment = next
+        }
         for (index, block) in message.content.enumerated() {
             switch block {
             case .text(let text):
@@ -1410,46 +1632,74 @@ public actor Conversation {
                 let key = "\(message.id):\(index)"
                 if pictures[key] == nil { pictures[key] = Data(base64Encoded: data) }
                 if let bytes = pictures[key] { pieces.append(.picture(id: key, mimeType: mimeType, data: bytes)) }
-            case .toolCall(let id, _, _, let presentation):
-                guard let presentation else { continue }
-                if presentation.type == "artifact", let artifactId = presentation.artifactId, presentation.artifactType == "sidebar_proposal" {
-                    // One card across every version: a revision redraws its rows.
-                    if !pieces.contains(.sidebarProposal(artifactId: artifactId)) { pieces.append(.sidebarProposal(artifactId: artifactId)) }
+            case .toolCall(let id, let name, let status, let presentation, let arguments, let output):
+                if let shows = presentation.flatMap({ Self.shows($0, toolCallId: id, shown: &shown) }) {
+                    // One proposal card across every version: a revision redraws its rows.
+                    let showing = shows.filter { piece in
+                        if case .sidebarProposal(let artifactId) = piece { return proposed.insert(artifactId).inserted }
+                        return true
+                    }
+                    guard role == .agent else { pieces += showing; continue }
+                    // Desktop's media and artifact rows: the call's line with
+                    // what it showed under it, a row of its own, so it stays
+                    // when the turn folds.
+                    flush(next: "\(message.id)/\(index + 1)")
+                    items.append(ChatItem(id: id, role: .tool(ChatItem.Tool(name: name, status: status, presentation: presentation)), pieces: showing, delivery: .sent))
                     continue
                 }
-                if presentation.type == "artifact", let artifactId = presentation.artifactId {
-                    // Stories: a `story` artifact is the story, by its ID.
-                    if presentation.artifactType == "story" {
-                        pieces.append(.story(artifactId))
+                guard role == .agent else { continue }
+                if name == AgentWire.Question.toolName {
+                    // Pending, it waits at the transcript's end; answered,
+                    // it settles here, as what was asked and answered.
+                    if asking?.question.id == id { continue }
+                    let question = answered[id] ?? AgentWire.Question.asked(id: id, arguments: arguments, output: output)
+                    if let question, question.status == "answered" {
+                        flush(next: "\(message.id)/\(index + 1)")
+                        items.append(ChatItem(id: id, role: .question(ChatItem.Ask(question: question, phase: .answered)), pieces: [], delivery: .sent))
                         continue
                     }
-                    pieces.append(.artifact(Artifact(
-                        id: artifactId, version: presentation.version ?? 1, type: presentation.artifactType ?? "unknown",
-                        title: presentation.title ?? "", followsLatest: presentation.shows == "latest"
-                    )))
-                    continue
+                    if status == "running" { continue }
                 }
-                guard presentation.type == "media" else { continue }
-                let media = (presentation.items ?? []).enumerated().map { Media(toolCallId: id, index: $0.offset, item: $0.element) }
-                for one in media {
-                    // Named by a later layout block, by either path; the latest wins.
-                    if let source = one.item.source {
-                        shown[source.path] = one
-                        shown[source.absolutePath] = one
-                    }
-                }
-                if let tree = MediaTree.decode(presentation.layout, itemCount: media.count) {
-                    pieces.append(.tree(media, tree))
-                    continue
-                }
-                let visual = media.filter(\.isVisual)
-                if !visual.isEmpty { pieces.append(.gallery(visual, columns: Self.columns(presentation.layout, count: visual.count))) }
-                for one in media where !one.isVisual { pieces.append(.file(one)) }
+                flush(next: "\(message.id)/\(index + 1)")
+                items.append(ChatItem(id: id, role: .tool(ChatItem.Tool(name: name, status: status, presentation: presentation)), pieces: [], delivery: .sent))
             case .reasoning, .unknown:
                 continue
             }
         }
-        guard !pieces.isEmpty else { return nil }
-        return ChatItem(id: message.id, role: role, pieces: pieces, delivery: role == .user && message.status == "pending" ? .pending : .sent)
+        flush(next: "")
+        return items
+    }
+
+    /// What a call showed the person, as pieces of the message: pictures
+    /// and files, an artifact's card, a sidebar proposal. Nil for
+    /// a call that showed nothing, which is a tool row.
+    private static func shows(_ presentation: AgentWire.Presentation, toolCallId id: String, shown: inout [String: Media]) -> [ChatItem.Piece]? {
+        if presentation.type == "artifact", let artifactId = presentation.artifactId, presentation.artifactType == "sidebar_proposal" {
+            return [.sidebarProposal(artifactId: artifactId)]
+        }
+        if presentation.type == "artifact", let artifactId = presentation.artifactId {
+            // A `story` artifact is Stories', which this app doesn't have:
+            // its call is a tool row like any other.
+            if presentation.artifactType == "story" { return nil }
+            return [.artifact(Artifact(
+                id: artifactId, version: presentation.version ?? 1, type: presentation.artifactType ?? "unknown",
+                title: presentation.title ?? "", followsLatest: presentation.shows == "latest"
+            ))]
+        }
+        guard presentation.type == "media" else { return nil }
+        let media = (presentation.items ?? []).enumerated().map { Media(toolCallId: id, index: $0.offset, item: $0.element) }
+        for one in media {
+            // Named by a later layout block, by either path; the latest wins.
+            if let source = one.item.source {
+                shown[source.path] = one
+                shown[source.absolutePath] = one
+            }
+        }
+        if let tree = MediaTree.decode(presentation.layout, itemCount: media.count) { return [.tree(media, tree)] }
+        var pieces: [ChatItem.Piece] = []
+        let visual = media.filter(\.isVisual)
+        if !visual.isEmpty { pieces.append(.gallery(visual, columns: columns(presentation.layout, count: visual.count))) }
+        for one in media where !one.isVisual { pieces.append(.file(one)) }
+        return pieces
     }
 }

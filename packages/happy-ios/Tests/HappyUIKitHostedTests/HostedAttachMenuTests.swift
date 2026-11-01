@@ -100,6 +100,7 @@ final class HostedAttachMenuTests: XCTestCase {
 
     override func tearDown() async throws {
         AttachMenuEnvironment.library = { PhotoKitAttachLibrary() }
+        AttachMenuEnvironment.reduceMotion = { UIAccessibility.isReduceMotionEnabled }
         AttachMenuEnvironment.camera = { UIImagePickerController.isSourceTypeAvailable(.camera) }
         window?.isHidden = true
         window = nil
@@ -131,7 +132,7 @@ final class HostedAttachMenuTests: XCTestCase {
             let allowed = await engine.deliveryAllowed
             XCTAssertTrue(allowed, "the outbox never opened")
         }
-        chat = ChatViewController(session: session, agentId: "attach-test", title: "Attach menu", spaceId: nil, seedling: nil)
+        chat = ChatViewController(session: session, agentId: "attach-test", title: "Attach menu", spaceId: nil, intro: nil)
         let window = hostedKeyWindow(in: try await hostedActiveScene(), root: chat)
         self.window = window
         window.layoutIfNeeded()
@@ -166,6 +167,12 @@ final class HostedAttachMenuTests: XCTestCase {
     }
 
     private func views(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(views) }
+
+    /// Taps picture `index`'s circle, as a finger would.
+    private func pick(_ index: Int, in grid: UICollectionView) throws {
+        let cell = try XCTUnwrap(grid.cellForItem(at: IndexPath(item: index, section: 0)) as? AttachGridCell)
+        cell.check.sendActions(for: .touchUpInside)
+    }
 
     private func wait(_ seconds: Double = 10, _ condition: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(seconds)
@@ -202,33 +209,41 @@ final class HostedAttachMenuTests: XCTestCase {
     // MARK: Library access
 
     /// Full access: the newest first beside the camera, picked in order
-    /// with their numbers, "Add 2" in the tab bar's place; added, a photo
-    /// and a video wait in the composer.
-    func testAuthorizedGridPicksInOrderAndAttachesPhotoAndVideo() async throws {
+    /// with their numbers; the count beside close, the tab bar turned into
+    /// the caption with send, which starts from the draft and writes back
+    /// to it; sent, the menu goes and the composer sends both with it.
+    func testAuthorizedGridPicksInOrderAndSendsWithTheCaption() async throws {
         try await open(FixtureAttachLibrary(access: .authorized, count: 30))
+        card.setText("Draft", selection: NSRange(location: 5, length: 0))
         let sheet = try await menu()
         let grid = try XCTUnwrap(view("attach-grid", in: sheet.view) as? UICollectionView)
         try await wait { grid.visibleCells.count >= 6 }
         XCTAssertNotNil(view("attach-camera", in: sheet.view), "no camera cell")
         XCTAssertNil(view("attach-no-access", in: sheet.view))
         XCTAssertNil(view("attach-limited", in: sheet.view))
-        XCTAssertNil(view("attach-add", in: sheet.view), "Add before anything was picked")
+        XCTAssertNil(view("attach-send", in: sheet.view), "send before anything was picked")
+        XCTAssertNil(view("attach-count", in: sheet.view), "a count before anything was picked")
 
-        sheet.collectionView(grid, didSelectItemAt: IndexPath(item: 0, section: 0))
-        sheet.collectionView(grid, didSelectItemAt: IndexPath(item: 1, section: 0))
+        try pick(0, in: grid)
+        try pick(1, in: grid)
         XCTAssertEqual(sheet.picked, ["fixture-0", "fixture-1"])
         let first = try XCTUnwrap(view("attach-photo:0", in: sheet.view))
         let second = try XCTUnwrap(view("attach-photo:1", in: sheet.view))
         XCTAssertEqual(first.accessibilityLabel, "Photo, picked 1")
         XCTAssertTrue(second.accessibilityLabel?.hasPrefix("Video, ") == true && second.accessibilityLabel?.hasSuffix("picked 2") == true, second.accessibilityLabel ?? "")
-        try await Task.sleep(for: .milliseconds(400))
-        let add = try XCTUnwrap(view("attach-add", in: sheet.view) as? UIControl)
-        XCTAssertEqual(add.accessibilityLabel, "Add 2")
+        try await Task.sleep(for: .milliseconds(500))
+        let send = try XCTUnwrap(view("attach-send", in: sheet.view) as? UIControl)
+        XCTAssertEqual(view("attach-count", in: sheet.view)?.accessibilityLabel, "2 selected")
+        let caption = try XCTUnwrap(view("attach-caption", in: sheet.view) as? UITextView)
+        XCTAssertEqual(caption.text, "Draft", "the caption isn't the draft")
+        XCTAssertNil(view("attach-tab-files", in: sheet.view), "the tabs stayed under the caption")
         try await keep("attach-authorized-selected")
 
-        add.sendActions(for: .touchUpInside)
-        try await wait(15) { self.card.configuration.attachments.count == 2 && self.chat.presentedViewController == nil }
-        XCTAssertEqual(card.configuration.attachments.map(\.mimeType), ["image/jpeg", "video/quicktime"])
+        caption.text = "Draft and two"
+        caption.delegate?.textViewDidChange?(caption)
+        XCTAssertEqual(card.text, "Draft and two", "the caption didn't write back to the draft")
+        send.sendActions(for: .touchUpInside)
+        try await wait(15) { self.chat.presentedViewController == nil && self.card.text.isEmpty && self.card.configuration.attachments.isEmpty }
     }
 
     /// Limited access: only what was allowed, under Telegram's note with
@@ -284,9 +299,9 @@ final class HostedAttachMenuTests: XCTestCase {
         for access in [AttachLibraryAccess.authorized, .limited, .denied] {
             try await open(FixtureAttachLibrary(access: access, count: 8))
             let sheet = try await menu()
-            let files = try XCTUnwrap(view("attach-tab-files", in: sheet.view) as? UIControl)
+            let files = try XCTUnwrap(view("attach-tab-files", in: sheet.view))
             for page in [nil, files] {
-                page?.sendActions(for: .touchUpInside)
+                _ = page?.accessibilityActivate()
                 try await Task.sleep(for: .milliseconds(400))
                 let all = views(sheet.view)
                 XCTAssertFalse(all.contains { $0.accessibilityIdentifier == "attach-paste" }, "\(access): a paste row")
@@ -333,6 +348,222 @@ final class HostedAttachMenuTests: XCTestCase {
         try await Task.sleep(for: .seconds(pace))
     }
 
+    // MARK: In and out
+
+    /// What is on screen each frame, as drawn (presentation layers), in the
+    /// window's space: the sheet's clip and dim, the "+" and the morph's
+    /// picture of it.
+    private struct Frame {
+        var clip: CGRect
+        var dim: Float
+        /// The "+" as drawn: its own opacity times its ancestors'.
+        var plus: Float
+        var plusFrame: CGRect
+        /// The morph's picture of the "+": opacity as drawn, and where.
+        var glyph: Float
+        var glyphFrame: CGRect
+    }
+
+    private func film(_ sheet: @escaping () -> AttachSheetViewController?, plus: UIView, for seconds: Double, while act: () async throws -> Void) async throws -> [Frame] {
+        var frames: [Frame] = []
+        let recorder = TickRecorder { _ in
+            frames.append(self.frame(sheet(), plus: plus))
+        }
+        try await act()
+        try await Task.sleep(for: .seconds(seconds))
+        recorder.stop()
+        return frames
+    }
+
+    private func frame(_ sheet: AttachSheetViewController?, plus: UIView) -> Frame {
+        func drawn(_ view: UIView) -> (Float, CGRect) {
+            guard let window = view.window else { return (0, .zero) }
+            var opacity: Float = 1
+            var current: UIView? = view
+            while let one = current {
+                let layer = one.layer.presentation() ?? one.layer
+                // As drawn: the presentation tree only, so every view is read
+                // from the same committed frame.
+                if layer.isHidden { return (0, .zero) }
+                opacity *= layer.opacity
+                current = one.superview
+            }
+            let layer = view.layer.presentation() ?? view.layer
+            return (opacity, layer.convert(layer.bounds, to: window.layer.presentation() ?? window.layer))
+        }
+        let (plusOpacity, plusFrame) = drawn(plus)
+        var result = Frame(clip: .zero, dim: 0, plus: plusOpacity, plusFrame: plusFrame, glyph: 0, glyphFrame: .zero)
+        guard let sheet, sheet.isViewLoaded, sheet.view.window != nil else { return result }
+        if let clip = views(sheet.view).first(where: { $0.accessibilityIdentifier == "attach-sheet" }) {
+            let layer = clip.layer.presentation() ?? clip.layer
+            if let window = clip.window { result.clip = layer.convert(layer.bounds, to: window.layer.presentation() ?? window.layer) }
+        }
+        if let dim = views(sheet.view).first(where: { $0.accessibilityIdentifier == "attach-dim" }) {
+            result.dim = (dim.layer.presentation() ?? dim.layer).opacity
+        }
+        if let glyph = views(sheet.view).first(where: { $0.accessibilityIdentifier == "attach-morph-glyph" }) {
+            (result.glyph, result.glyphFrame) = drawn(glyph)
+        }
+        return result
+    }
+
+    /// Across a hand-off between the "+" and the morph's picture of it:
+    /// every frame shows exactly one "+", whole, in the button's place;
+    /// never neither, never both.
+    private func assertOnePlus(_ frames: ArraySlice<Frame>, _ phase: String, travel: CGFloat = 0.5, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(frames.isEmpty, "\(phase): no frames", file: file, line: line)
+        // The morph's "+" travels onto the button; the frame before the
+        // button shows again it is on its pixels.
+        if let index = frames.lastIndex(where: { $0.glyph > 0.02 }) {
+            let last = frames[index]
+            XCTAssertEqual(last.glyphFrame.midX, last.plusFrame.midX, accuracy: travel, "\(phase): the morph's + is off the button at the hand-over", file: file, line: line)
+            XCTAssertEqual(last.glyphFrame.midY, last.plusFrame.midY, accuracy: travel, "\(phase): the morph's + is off the button at the hand-over", file: file, line: line)
+            XCTAssertEqual(last.glyphFrame.width, last.plusFrame.width, accuracy: 0.5, file: file, line: line)
+        }
+        for (index, frame) in frames.enumerated() {
+            let shown = [frame.plus, frame.glyph].filter { $0 > 0.02 }
+            XCTAssertEqual(shown.count, 1, "\(phase) frame \(index): plus \(frame.plus), morph \(frame.glyph)", file: file, line: line)
+            XCTAssertGreaterThan(max(frame.plus, frame.glyph), 0.98, "\(phase) frame \(index): the + is faded (\(frame.plus), \(frame.glyph))", file: file, line: line)
+        }
+    }
+
+    /// The "+" as a finger presses it: down, the action, then up, as
+    /// UIControl orders them, so its press's own spring runs as on a phone.
+    private func press(_ plus: UIControl) {
+        plus.isHighlighted = true
+        plus.sendActions(for: .touchUpInside)
+        plus.isHighlighted = false
+    }
+
+    /// The "+" as a finger opens it: the sheet grows out of the button over
+    /// several frames, from about the button's size to its own, while the
+    /// dim fades in; closed, it shrinks back into the button and the dim
+    /// fades out. Neither may land in one frame, and the "+" hands over to
+    /// the morph and back without a frame where it is missing or doubled,
+    /// nor ever showing over the sheet in between.
+    func testTheMenuGrowsOutOfThePlusAndBackIntoIt() async throws {
+        try await open(FixtureAttachLibrary(access: .authorized, count: 30))
+        let plus = try plus()
+        let button = plus.convert(plus.bounds, to: nil)
+        // Before the press, for the hand-over's first frame.
+        let before = frame(nil, plus: plus)
+        let opening = try await film({ self.chat.presentedViewController as? AttachSheetViewController }, plus: plus, for: 0.8) {
+            press(plus)
+        }
+        let sheet = try XCTUnwrap(chat.presentedViewController as? AttachSheetViewController)
+        let rest = try XCTUnwrap(opening.last).clip
+        let growing = opening.filter { $0.clip.width > button.width + 4 && $0.clip.width < rest.width - 4 }
+        XCTAssertGreaterThanOrEqual(growing.count, 5, "the sheet didn't grow over frames: \(opening.prefix(12).map { Int($0.clip.width) })")
+        XCTAssertLessThan(try XCTUnwrap(opening.first { $0.clip.width > 0 }).clip.width, rest.width / 2, "the first frame was already big")
+        XCTAssertGreaterThanOrEqual(opening.filter { $0.dim > 0.05 && $0.dim < 0.95 }.count, 4, "the dim didn't fade in")
+        XCTAssertEqual(rest.width, sheet.view.bounds.width, accuracy: 12)
+        // The hand-over: up to the morph's first frame the button shows,
+        // from it the morph's picture, on the same pixels.
+        XCTAssertGreaterThan(before.plus, 0.98)
+        let firstMorph = try XCTUnwrap(opening.firstIndex { $0.clip.width > 0 }, "the morph never showed")
+        // Its first frame on screen is already one frame into its spring.
+        assertOnePlus(opening[..<(firstMorph + 1)], "open hand-over", travel: 2)
+        // From then on the button stays hidden: its press's spring doesn't
+        // bring it back over the sheet.
+        let after = opening[firstMorph...]
+        XCTAssertTrue(after.allSatisfy { $0.plus < 0.02 }, "the + showed again while the menu opened: \(after.map(\.plus).prefix(30))")
+
+        let closing = try await film({ sheet }, plus: plus, for: 0.9) {
+            try XCTUnwrap(view("attach-close", in: sheet.view) as? UIControl).sendActions(for: .touchUpInside)
+        }
+        try await wait { self.chat.presentedViewController == nil }
+        let shrinking = closing.filter { $0.clip.width > button.width + 4 && $0.clip.width < rest.width - 4 }
+        XCTAssertGreaterThanOrEqual(shrinking.count, 4, "the sheet didn't shrink over frames: \(closing.prefix(12).map { Int($0.clip.width) })")
+        XCTAssertGreaterThanOrEqual(closing.filter { $0.dim > 0.05 && $0.dim < 0.95 }.count, 3, "the dim didn't fade out")
+        // The hand-back: from the frame the morph's + is whole to the end,
+        // exactly one + every frame, the button's own at the end.
+        let whole = try XCTUnwrap(closing.firstIndex { $0.glyph > 0.98 }, "the morph's + never came back whole")
+        assertOnePlus(closing[whole...], "close hand-back")
+        XCTAssertGreaterThan(try XCTUnwrap(closing.last).plus, 0.98, "the + stayed hidden")
+        let landed = try XCTUnwrap(closing.last { $0.glyph > 0.98 })
+        XCTAssertEqual(landed.clip.midX, button.midX, accuracy: 0.5, "it didn't go back into the +")
+        XCTAssertEqual(plus.alpha, 1)
+    }
+
+    /// Closed by tapping the dim and by Escape, the same hand-back.
+    func testTheDimAndEscapeHandTheButtonBackInOneFrame() async throws {
+        try await open(FixtureAttachLibrary(access: .authorized, count: 30))
+        let plus = try plus()
+        for how in ["dim", "escape"] {
+            press(plus)
+            try await wait { self.chat.presentedViewController is AttachSheetViewController }
+            let sheet = try XCTUnwrap(chat.presentedViewController as? AttachSheetViewController)
+            try await Task.sleep(for: .milliseconds(700))
+            let closing = try await film({ sheet }, plus: plus, for: 0.9) {
+                if how == "dim" {
+                    _ = sheet.perform(NSSelectorFromString("dimTapped"))
+                } else {
+                    _ = sheet.accessibilityPerformEscape()
+                }
+            }
+            try await wait { self.chat.presentedViewController == nil }
+            let whole = try XCTUnwrap(closing.firstIndex { $0.glyph > 0.98 }, "\(how): the morph's + never came back whole")
+            assertOnePlus(closing[whole...], "\(how) hand-back")
+            XCTAssertEqual(plus.alpha, 1)
+        }
+    }
+
+    /// With Reduce Motion the sheet slides: the "+" never hides.
+    func testWithReduceMotionThePlusStaysAndTheSheetSlides() async throws {
+        AttachMenuEnvironment.reduceMotion = { true }
+        try await open(FixtureAttachLibrary(access: .authorized, count: 30))
+        let plus = try plus()
+        let opening = try await film({ self.chat.presentedViewController as? AttachSheetViewController }, plus: plus, for: 0.7) {
+            press(plus)
+        }
+        let sheet = try XCTUnwrap(chat.presentedViewController as? AttachSheetViewController)
+        let shown = opening.filter { $0.clip.width > 0 }
+        XCTAssertGreaterThanOrEqual(Set(shown.map { Int($0.clip.minY) }).count, 5, "it didn't slide in")
+        XCTAssertTrue(opening.allSatisfy { $0.glyph < 0.02 }, "a morph under Reduce Motion")
+        let closing = try await film({ sheet }, plus: plus, for: 0.6) { sheet.close() }
+        try await wait { self.chat.presentedViewController == nil }
+        // Its press dims it a moment, as any press does; it never goes.
+        XCTAssertTrue((opening + closing).allSatisfy { $0.plus > 0.5 }, "the + hid under Reduce Motion: \((opening + closing).map(\.plus).min() ?? 0)")
+        XCTAssertGreaterThan(try XCTUnwrap(closing.last).plus, 0.98)
+    }
+
+    /// A picture waiting in the composer grows in over frames and, taken
+    /// out, shrinks and fades over frames before it goes.
+    func testComposerPicturesGrowInAndShrinkOut() async throws {
+        try await open(FixtureAttachLibrary(access: .authorized, count: 4))
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("chip-\(UUID().uuidString).png")
+        try UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).image { context in
+            UIColor.systemTeal.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+        }.pngData()?.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let strip = try XCTUnwrap(views(card).compactMap { $0 as? AttachmentStripView }.first)
+        func scales(while change: () -> Void) async throws -> [CGFloat] {
+            var seen: [CGFloat] = []
+            let recorder = TickRecorder { _ in
+                // Only what can be seen: the strip hidden hides its pictures.
+                guard !strip.isHidden else { return }
+                for view in strip.drawnThumbnails {
+                    seen.append((view.layer.presentation() ?? view.layer).affineTransform().a)
+                }
+            }
+            change()
+            try await Task.sleep(for: .milliseconds(600))
+            recorder.stop()
+            return seen
+        }
+        var config = card.configuration
+        config.attachments = [AgentInputAttachmentPreview(id: "a", fileURL: file, mimeType: "image/png")]
+        let growing = try await scales { self.card.configuration = config }
+        XCTAssertGreaterThanOrEqual(growing.filter { $0 > 0.25 && $0 < 0.95 }.count, 4, "it didn't grow in: \(growing.prefix(12))")
+        XCTAssertEqual(growing.last ?? 0, 1, accuracy: 0.001)
+
+        config.attachments = []
+        let shrinking = try await scales { self.card.configuration = config }
+        XCTAssertGreaterThanOrEqual(shrinking.filter { $0 > 0.25 && $0 < 0.95 }.count, 4, "it didn't shrink out: \(shrinking.prefix(12))")
+        XCTAssertTrue(strip.drawnThumbnails.isEmpty, "it stayed")
+    }
+
     // MARK: Upload progress
 
     /// A tile's ring as the board says, applied once a frame however many
@@ -345,7 +576,7 @@ final class HostedAttachMenuTests: XCTestCase {
         host.backgroundColor = UIColor(Palette.surface)
         window.rootViewController?.view.addSubview(host)
         // Waiting its turn: the short arc, not a whole ring.
-        XCTAssertEqual(UploadRingView().drawn, UploadRingLayout.waitingShare)
+        XCTAssertEqual(MediaRingView().drawn, UploadRingLayout.waitingShare)
         let tile = ChatMediaView(frame: CGRect(x: 60, y: 200, width: 240, height: 180))
         tile.backgroundColor = .systemTeal
         host.addSubview(tile)
@@ -390,16 +621,17 @@ final class HostedAttachMenuTests: XCTestCase {
         let sheet = try await menu()
         let grid = try XCTUnwrap(view("attach-grid", in: sheet.view) as? UICollectionView)
         try await wait { grid.visibleCells.count >= 2 }
-        sheet.collectionView(grid, didSelectItemAt: IndexPath(item: 0, section: 0))
-        sheet.collectionView(grid, didSelectItemAt: IndexPath(item: 1, section: 0))
-        try await Task.sleep(for: .milliseconds(300))
-        try XCTUnwrap(view("attach-add", in: sheet.view) as? UIControl).sendActions(for: .touchUpInside)
-        try await wait(15) { self.card.configuration.attachments.count == 2 && self.chat.presentedViewController == nil }
-        card.setText("Here they are", selection: NSRange(location: 13, length: 0))
-        chat.agentInputCardDidPressSend(card)
+        try pick(0, in: grid)
+        try pick(1, in: grid)
+        try await Task.sleep(for: .milliseconds(500))
+        let caption = try XCTUnwrap(view("attach-caption", in: sheet.view) as? UITextView)
+        caption.text = "Here they are"
+        caption.delegate?.textViewDidChange?(caption)
+        // Sent from the menu, as Telegram's send does.
+        try XCTUnwrap(view("attach-send", in: sheet.view) as? UIControl).sendActions(for: .touchUpInside)
 
         // Both tiles get rings; each only ever moves forward.
-        var seen: [ObjectIdentifier: [UploadRingView.State]] = [:]
+        var seen: [ObjectIdentifier: [MediaRingView.State]] = [:]
         let deadline = ContinuousClock.now + .seconds(60)
         var tiles: [ChatMediaView] = []
         var keeping: Task<Void, Error>?
@@ -431,7 +663,7 @@ final class HostedAttachMenuTests: XCTestCase {
         XCTAssertTrue(sends.first?["text"]?.stringValue?.contains(uploads.first ?? "-") == true, "the message doesn't name the upload")
         XCTAssertEqual(sends.first?["content"]?.arrayValue?.count, 1, "the photo went inline")
         // Taken: the rings are let go.
-        try await wait(10) { tiles.allSatisfy { $0.ring?.isHidden ?? true } }
+        try await wait(10) { tiles.allSatisfy { $0.ring.map { $0.isHidden || $0.state == .play } ?? true } }
     }
 }
 #endif

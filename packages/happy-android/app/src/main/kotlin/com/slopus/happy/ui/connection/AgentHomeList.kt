@@ -1,18 +1,18 @@
 package com.slopus.happy.ui.connection
 
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -22,16 +22,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -39,7 +43,6 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -50,17 +53,25 @@ import com.slopus.happy.agent.AgentFeedRow
 import com.slopus.happy.agent.AgentFeedSection
 import com.slopus.happy.agent.AgentPictures
 import com.slopus.happy.agent.ConversationKind
+import com.slopus.happy.agent.FolderMark
+import com.slopus.happy.ui.components.HappyDropdownMenu
+import com.slopus.happy.ui.components.HappyMenuItem
+import com.slopus.happy.ui.components.HomeCardPlace
+import com.slopus.happy.ui.components.HomeCardRow
+import com.slopus.happy.ui.components.HomeCardSpec
+import com.slopus.happy.ui.components.HomeCardTags
 import com.slopus.happy.ui.components.Icon
 import com.slopus.happy.ui.components.Ionicon
+import com.slopus.happy.ui.components.MenuSpec
 import com.slopus.happy.ui.components.RemoteImage
+import com.slopus.happy.ui.components.ShimmerSpec
 import com.slopus.happy.ui.components.ShimmerText
 import com.slopus.happy.ui.components.StatusDot
-import com.slopus.happy.ui.components.hairline
+import com.slopus.happy.ui.components.avatar.PlaceholderAvatar
 import com.slopus.happy.ui.components.rememberReduceMotion
 import com.slopus.happy.ui.components.rememberThumbHash
 import com.slopus.happy.ui.home.BlockedDotColor
 import com.slopus.happy.ui.home.UnreadDotColor
-import com.slopus.happy.ui.home.formatSessionListTimestamp
 import com.slopus.happy.ui.layout.LocalWindowLayout
 import com.slopus.happy.ui.layout.contentMaxWidth
 import com.slopus.happy.ui.theme.HappyTheme
@@ -82,7 +93,10 @@ object AgentHomeTags {
     fun row(key: String) = "agentHome.row.$key"
     const val ROW_TITLE = "agentHome.rowTitle"
     const val ROW_MARK = "agentHome.rowMark"
-    const val ROW_DIVIDER = "agentHome.rowDivider"
+    const val ROW_DIVIDER = HomeCardTags.DIVIDER
+    const val ROW_DOT = "agentHome.rowDot"
+    /** A Surface row's held menu: Leave. */
+    const val LEAVE = "agentHome.leave"
 }
 
 /**
@@ -93,16 +107,16 @@ object AgentHomeTags {
  * hairline between each and the next from where its title starts. A nested
  * row stays in its parent's card, a mark and its gap further in a level.
  * Every row has a fixed height at the font scale ([rowHeight]): nothing an
- * idle update changes (status, unread, time) can move a row. Text is sp and
+ * idle update changes (status, unread) can move a row. Text is sp and
  * overflows its line rather than growing it, as Home's timestamp slot does.
  */
 object AgentHomeSpec {
     /** The cards' inset from the window's sides, their corners, and the room between two. */
-    val cardInset = 16.dp
-    val cardRadius = 26.dp
-    val cardGap = 24.dp
+    val cardInset = HomeCardSpec.inset
+    val cardRadius = HomeCardSpec.radius
+    val cardGap = HomeCardSpec.gap
     /** Above the first card. */
-    val contentTop = 8.dp
+    val contentTop = HomeCardSpec.contentTop
     /** A top-level mark's left edge, from its card's. */
     val markInset = 16.dp
     val paddingEnd = 16.dp
@@ -114,15 +128,17 @@ object AgentHomeSpec {
     /** A glyph's tile: the mark's square, rounded, the glyph smaller inside; a picture's rounding too. */
     val tileRadius = 8.dp
     val tileGlyph = 18.dp
-    val dot = 10.dp
-    val cornerMinWidth = 48.dp
+    val dot = HomeCardSpec.dot
+    /** Between the title and the dot. */
+    val cornerGap = 12.dp
     /** The bar's title, the agent's name: smaller than Material's large title. */
     val barTitle = happyTextStyle(fontSize = 18, lineHeight = 24, weight = FontWeight.SemiBold)
     /** The compose button's margin from the window's corner, and the room under the last card to scroll it clear. */
     val fabMargin = 16.dp
     val fabClearance = 96.dp
     const val TITLE_LINE = 22
-    val title = happyTextStyle(fontSize = 17, lineHeight = TITLE_LINE, weight = FontWeight.Medium)
+    val title = happyTextStyle(fontSize = 17, lineHeight = TITLE_LINE)
+    /** A time at a row's end, where a place lists one (home's rows show none). */
     val timestamp = happyTextStyle(fontSize = 13, lineHeight = TITLE_LINE).copy(fontFeatureSettings = "tnum")
 
     /** 13 + a 22 line + 13: 48 at the default font scale, iOS's row. */
@@ -183,23 +199,45 @@ internal fun TileMark(glyph: Ionicon, tile: RowTile, size: Dp = AgentHomeSpec.ma
 val LocalAgentPictures = staticCompositionLocalOf<AgentPictures?> { null }
 
 /**
- * A conversation's mark at [size]: a bot's picture over its ThumbHash, or
- * its kind's glyph on a softly tinted tile: iOS's person for a bot without
- * a picture, the checkbox for a task.
+ * A conversation's mark at [size], as happy-ios's grouped home has it
+ * (SidebarRows.swift, RowView.swift): the person's Happy wears Happy's
+ * mark; a bot its picture over its ThumbHash; a bot without one, and every
+ * task, the placeholder its own ID picks, a rounded square like a picture,
+ * moving with Animated Avatars on. [radius] rounds a picture's and a
+ * placeholder's corners.
  */
 @Composable
-internal fun ConversationMark(row: AgentFeedRow.Conversation, size: Dp) {
+internal fun ConversationMark(row: AgentFeedRow.Conversation, size: Dp, radius: Dp = AgentHomeSpec.tileRadius) {
     val picture = row.picture
-    if (picture != null) {
-        AgentPicture(picture, row.thumbhash, size)
-        return
+    when {
+        row.happy -> HappyMark(size)
+        picture != null -> AgentPicture(picture, row.thumbhash, size, radius)
+        else -> PlaceholderAvatar(row.seed ?: row.agentId, size, shape = RoundedCornerShape(radius))
     }
-    if (row.kind == ConversationKind.Bot) TileMark(Ionicon.PersonCircleOutline, RowTile.Indigo, size) else TileMark(Ionicon.CheckboxOutline, RowTile.Orange, size)
+}
+
+/** Happy's clay mark, as drawn, filling the mark's square. */
+@Composable
+private fun HappyMark(size: Dp) {
+    Image(painterResource(R.drawable.clay_happy_mark), contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.size(size))
+}
+
+/**
+ * A project's mark: its picture over its ThumbHash, desktop's home glyph
+ * for the home project, or the placeholder its ID picks.
+ */
+@Composable
+internal fun FolderMarkView(mark: FolderMark, size: Dp) {
+    when (mark) {
+        is FolderMark.Picture -> AgentPicture(mark.path, mark.thumbhash, size)
+        FolderMark.Home -> TileMark(Ionicon.HomeOutline, RowTile.Blue, size)
+        is FolderMark.Placeholder -> PlaceholderAvatar(mark.seed, size, shape = RoundedCornerShape(AgentHomeSpec.tileRadius))
+    }
 }
 
 /** A picture the agent serves, read once ([AgentPictures]), a rounded square over its ThumbHash. */
 @Composable
-private fun AgentPicture(path: String, thumbhash: String?, size: Dp) {
+private fun AgentPicture(path: String, thumbhash: String?, size: Dp, radius: Dp = AgentHomeSpec.tileRadius) {
     val pictures = LocalAgentPictures.current
     val bytes by produceState(pictures?.kept(path, thumbhash), pictures, path, thumbhash) {
         value = pictures?.kept(path, thumbhash) ?: try {
@@ -214,7 +252,7 @@ private fun AgentPicture(path: String, thumbhash: String?, size: Dp) {
     RemoteImage(
         model = bytes,
         contentDescription = null,
-        modifier = Modifier.size(size).clip(RoundedCornerShape(AgentHomeSpec.tileRadius)),
+        modifier = Modifier.size(size).clip(RoundedCornerShape(radius)),
         background = HappyTheme.colors.surfaceHighest,
         cacheKey = pictures?.key(path, thumbhash),
         placeholder = rememberThumbHash(thumbhash),
@@ -261,11 +299,12 @@ fun agentHomeItems(feed: AgentFeed): List<AgentHomeItem> {
 /** The rows of [items] into a lazy list, each animating in and out unless motion is reduced. */
 fun LazyListScope.agentHomeRows(
     items: List<AgentHomeItem>,
-    now: Long,
     reduceMotion: Boolean,
     onOpen: (String) -> Unit,
     onOpenArtifacts: () -> Unit,
     onOpenSurface: (AgentFeedRow.Surface) -> Unit,
+    /** A Surface row's hold offers Leave, which comes here; null offers nothing. */
+    onLeaveSurface: ((AgentFeedRow.Surface) -> Unit)? = null,
 ) {
     items(items, key = { it.key }, contentType = { (it as? AgentHomeItem.Row)?.row?.let { row -> row::class } ?: it::class }) { item ->
         val motion = if (reduceMotion) Modifier else Modifier.animateItem(
@@ -282,12 +321,10 @@ fun LazyListScope.agentHomeRows(
             )
             is AgentHomeItem.Row -> CardRow(item, motion) {
                 when (val row = item.row) {
-                    is AgentFeedRow.Conversation -> ConversationRow(row, now, reduceMotion, onOpen)
+                    is AgentFeedRow.Conversation -> ConversationRow(row, onOpen)
                     is AgentFeedRow.Folder -> FolderRow(row)
-                    AgentFeedRow.Artifacts -> PlaceRow(stringResource(R.string.agent_home_artifacts), Ionicon.DocumentTextOutline, RowTile.Purple, onOpenArtifacts)
-                    is AgentFeedRow.Surface -> RowTile.surface(row.type).let { (glyph, tile) ->
-                        PlaceRow(row.name, glyph, tile) { onOpenSurface(row) }
-                    }
+                    AgentFeedRow.Artifacts -> PlaceRow(stringResource(R.string.artifacts_title), Ionicon.DocumentTextOutline, RowTile.Purple, onOpenArtifacts)
+                    is AgentFeedRow.Surface -> SurfaceRow(row, { onOpenSurface(row) }, onLeaveSurface)
                     is AgentFeedRow.Section -> Unit
                 }
             }
@@ -295,51 +332,23 @@ fun LazyListScope.agentHomeRows(
     }
 }
 
-/**
- * One row's part of its card: the card's ground, its top corners rounded
- * on its first row and its bottom ones on its last, a pressed row's
- * highlight clipped to them, and the hairline under every row but the
- * last, from [content]'s title to the card's edge.
- */
+/** One row's part of its card ([HomeCardRow]), 48 high at the default font scale, the hairline from its title. */
 @Composable
 private fun CardRow(item: AgentHomeItem.Row, modifier: Modifier, content: @Composable () -> Unit) {
-    val colors = HappyTheme.colors
-    val radius = AgentHomeSpec.cardRadius
-    val shape = RoundedCornerShape(
-        topStart = if (item.first) radius else 0.dp,
-        topEnd = if (item.first) radius else 0.dp,
-        bottomStart = if (item.last) radius else 0.dp,
-        bottomEnd = if (item.last) radius else 0.dp,
-    )
-    Box(
-        modifier = modifier
-            .contentMaxWidth(LocalWindowLayout.current)
-            .height(AgentHomeSpec.rowHeight())
-            .testTag(AgentHomeTags.row(item.key))
-            .padding(horizontal = AgentHomeSpec.cardInset),
-    ) {
-        Box(Modifier.fillMaxSize().clip(shape).background(colors.surfaceHigh)) {
-            content()
-            if (!item.last) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(start = titleStart(item.row))
-                        .fillMaxWidth()
-                        .height(hairline())
-                        .testTag(AgentHomeTags.ROW_DIVIDER)
-                        .background(colors.divider),
-                )
-            }
-        }
-    }
+    HomeCardRow(
+        place = HomeCardPlace(item.first, item.last),
+        height = AgentHomeSpec.rowHeight(),
+        dividerStart = titleStart(item.row),
+        modifier = modifier,
+        tag = AgentHomeTags.row(item.key),
+    ) { content() }
 }
 
 /** Where a card row's title starts, from its card's edge: its level's lane, then its mark's when it wears one. */
 private fun titleStart(row: AgentFeedRow): Dp {
     val (depth, marked) = when (row) {
         is AgentFeedRow.Conversation -> row.depth to AgentHomeSpec.hasMark(row.kind)
-        is AgentFeedRow.Folder -> row.depth to (row.picture != null)
+        is AgentFeedRow.Folder -> row.depth to (row.mark != null)
         AgentFeedRow.Artifacts, is AgentFeedRow.Surface -> 0 to true
         is AgentFeedRow.Section -> return 0.dp
     }
@@ -348,11 +357,12 @@ private fun titleStart(row: AgentFeedRow): Dp {
 
 /**
  * One conversation, on one line: a bot's or task's 30 mark, the title 17/22
- * (shimmering while it works), and the time or a 10 dot in a 48-minimum
- * corner. The whole row opens it.
+ * (desktop's sheen while it runs, [AgentFeedRow.Conversation.running]),
+ * and a 10 dot 12 after it while it waits or is unread. No time. The whole
+ * row opens it.
  */
 @Composable
-private fun ConversationRow(row: AgentFeedRow.Conversation, now: Long, reduceMotion: Boolean, onOpen: (String) -> Unit) {
+private fun ConversationRow(row: AgentFeedRow.Conversation, onOpen: (String) -> Unit) {
     val colors = HappyTheme.colors
     val marked = AgentHomeSpec.hasMark(row.kind)
     val title = row.title ?: stringResource(R.string.session_new_chat)
@@ -374,30 +384,53 @@ private fun ConversationRow(row: AgentFeedRow.Conversation, now: Long, reduceMot
                 .weight(1f)
                 .testTag(AgentHomeTags.ROW_TITLE),
         ) {
-            if (row.working && !reduceMotion) {
-                ShimmerText(text = title, style = AgentHomeSpec.title, baseColor = colors.textSecondary, highlightColor = colors.text)
-            } else {
-                Text(
-                    title,
-                    style = AgentHomeSpec.title,
-                    color = colors.text,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.wrapContentHeight(unbounded = true),
+            ShimmerText(
+                text = title,
+                style = AgentHomeSpec.title,
+                baseColor = colors.text,
+                highlightColor = ShimmerSpec.sheen(colors.text, colors.surfaceHigh),
+                shimmering = row.running,
+                modifier = Modifier.wrapContentHeight(unbounded = true),
+            )
+        }
+        Corner(row.blocked, row.unread)
+    }
+}
+
+/**
+ * A Surface's row. Held, it offers Leave in a drop-down under it, as iOS's
+ * held row and desktop's menu do (the close glyph, not in red); the screen
+ * asks before it leaves ([onLeave]).
+ */
+@Composable
+private fun SurfaceRow(row: AgentFeedRow.Surface, onOpen: () -> Unit, onLeave: ((AgentFeedRow.Surface) -> Unit)?) {
+    var menu by remember { mutableStateOf(false) }
+    val (glyph, tile) = RowTile.surface(row.type)
+    Box(Modifier.fillMaxSize()) {
+        PlaceRow(row.name, glyph, tile, onOpen, onLongClick = onLeave?.let { { menu = true } })
+        if (onLeave != null) {
+            HappyDropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                HappyMenuItem(
+                    label = stringResource(R.string.surface_leave),
+                    leading = { Icon(Ionicon.Close, MenuSpec.icon, HappyTheme.colors.text) },
+                    onClick = {
+                        menu = false
+                        onLeave(row)
+                    },
+                    modifier = Modifier.testTag(AgentHomeTags.LEAVE),
                 )
             }
         }
-        Corner(row.activityAt, now, row.blocked, row.unread)
     }
 }
 
 /** Artifacts, or a Surface: its glyph on its tile, and its name. */
 @Composable
-private fun PlaceRow(name: String, glyph: Ionicon, tile: RowTile, onClick: () -> Unit) {
+private fun PlaceRow(name: String, glyph: Ionicon, tile: RowTile, onClick: () -> Unit, onLongClick: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxSize()
-            .clickable(role = Role.Button, onClick = onClick)
+            .combinedClickable(role = Role.Button, onClick = onClick, onLongClick = onLongClick)
             .padding(start = AgentHomeSpec.markInset, end = AgentHomeSpec.paddingEnd),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -417,10 +450,14 @@ private fun PlaceRow(name: String, glyph: Ionicon, tile: RowTile, onClick: () ->
     }
 }
 
-/** A project or a worktree: its name, and a cloned repo's picture before it. It opens nothing. */
+/**
+ * A project or a worktree: its name, shimmering while work runs inside it,
+ * and a project's mark before it ([FolderMarkView]). It opens nothing.
+ */
 @Composable
 private fun FolderRow(row: AgentFeedRow.Folder) {
-    val picture = row.picture
+    val colors = HappyTheme.colors
+    val mark = row.mark
     Row(
         modifier = Modifier
             .fillMaxSize()
@@ -428,55 +465,44 @@ private fun FolderRow(row: AgentFeedRow.Folder) {
             .padding(start = AgentHomeSpec.markInset + AgentHomeSpec.indent * row.depth, end = AgentHomeSpec.paddingEnd),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (picture != null) {
-            Box(modifier = Modifier.size(AgentHomeSpec.mark).testTag(AgentHomeTags.ROW_MARK)) { AgentPicture(picture, null, AgentHomeSpec.mark) }
+        if (mark != null) {
+            Box(modifier = Modifier.size(AgentHomeSpec.mark).testTag(AgentHomeTags.ROW_MARK)) { FolderMarkView(mark, AgentHomeSpec.mark) }
         }
-        Text(
-            row.name,
-            style = AgentHomeSpec.title,
-            color = HappyTheme.colors.text,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        Box(
             modifier = Modifier
-                .padding(start = if (picture != null) AgentHomeSpec.markGap else 0.dp)
+                .padding(start = if (mark != null) AgentHomeSpec.markGap else 0.dp)
                 .weight(1f)
-                .wrapContentHeight(unbounded = true)
                 .testTag(AgentHomeTags.ROW_TITLE),
-        )
-    }
-}
-
-/** The time of the last activity, or in its place a dot: orange waiting, blue unread. The slot keeps its width. */
-@Composable
-private fun Corner(activityAt: Long, now: Long, blocked: Boolean, unread: Boolean) {
-    val colors = HappyTheme.colors
-    val stamp = remember(activityAt, now / 60_000) { if (activityAt > 0) formatSessionListTimestamp(activityAt, now) else "" }
-    val dot = blocked || unread
-    val label = when {
-        blocked -> stringResource(R.string.status_input_required)
-        unread -> stringResource(R.string.status_unread)
-        else -> null
-    }
-    Box(
-        modifier = Modifier
-            .padding(start = 8.dp)
-            .widthIn(min = AgentHomeSpec.cornerMinWidth)
-            .then(if (label != null) Modifier.semantics { contentDescription = label } else Modifier),
-        contentAlignment = Alignment.CenterEnd,
-    ) {
-        if (dot) {
-            StatusDot(color = if (blocked) BlockedDotColor else UnreadDotColor, size = AgentHomeSpec.dot)
-        } else {
-            Text(
-                stamp,
-                style = AgentHomeSpec.timestamp,
-                color = colors.textSecondary,
-                textAlign = TextAlign.End,
-                maxLines = 1,
+        ) {
+            ShimmerText(
+                text = row.name,
+                style = AgentHomeSpec.title,
+                baseColor = colors.text,
+                highlightColor = ShimmerSpec.sheen(colors.text, colors.surfaceHigh),
+                shimmering = row.running,
                 modifier = Modifier.wrapContentHeight(unbounded = true),
             )
         }
     }
+}
+
+/**
+ * A dot at the row's end while it needs something: orange waiting, blue
+ * unread; nothing otherwise (home shows no times). The title gives way to
+ * it, on the same line, so the row's height never changes.
+ */
+@Composable
+private fun Corner(blocked: Boolean, unread: Boolean) {
+    if (!blocked && !unread) return
+    val label = stringResource(if (blocked) R.string.status_input_required else R.string.status_unread)
+    StatusDot(
+        color = if (blocked) BlockedDotColor else UnreadDotColor,
+        size = AgentHomeSpec.dot,
+        modifier = Modifier
+            .padding(start = AgentHomeSpec.cornerGap)
+            .semantics { contentDescription = label }
+            .testTag(AgentHomeTags.ROW_DOT),
+    )
 }
 
 /** The list itself; [header] rows (a banner) go above the conversations. */
@@ -484,12 +510,12 @@ private fun Corner(activityAt: Long, now: Long, blocked: Boolean, unread: Boolea
 fun AgentHomeList(
     items: List<AgentHomeItem>,
     state: LazyListState,
-    now: Long,
     onOpen: (String) -> Unit,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
     onOpenArtifacts: () -> Unit = {},
     onOpenSurface: (AgentFeedRow.Surface) -> Unit = {},
+    onLeaveSurface: ((AgentFeedRow.Surface) -> Unit)? = null,
     header: (LazyListScope.() -> Unit)? = null,
     bottom: @Composable () -> Unit = {},
 ) {
@@ -500,7 +526,7 @@ fun AgentHomeList(
         contentPadding = contentPadding,
     ) {
         header?.invoke(this)
-        agentHomeRows(items, now, reduceMotion, onOpen, onOpenArtifacts, onOpenSurface)
+        agentHomeRows(items, reduceMotion, onOpen, onOpenArtifacts, onOpenSurface, onLeaveSurface)
         item(key = "bottom", contentType = "bottom") { bottom() }
     }
 }

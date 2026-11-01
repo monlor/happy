@@ -24,14 +24,19 @@ final class HomeRendererHarness {
         func option(_ name: String) -> String? {
             arguments.firstIndex(of: name).flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
         }
-        let renderer = HomeListRenderer(rawValue: option("-renderer") ?? "UITableView") ?? .tableView
-        let restoreRenderer = option("-renderer") == "stored"
         let grouping = option("-grouping") ?? "flat"
         let sessionCount = Int(option("-sessionCount") ?? "0") ?? 0
         let archiveCount = Int(option("-archiveCount") ?? "0") ?? 0
         let secondMachine = arguments.contains("-secondMachine")
+        // `-freshSettings`: this launch starts from no stored settings or
+        // drafts, whatever an earlier one left.
+        let fresh = arguments.contains("-freshSettings")
         Task {
-            let controller = AccountController(serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/home-renderer-harness", credentialStore: InMemoryCredentialStore(), storeDirectory: nil, rnServerImport: { .confirmed(ServerConfig.defaultServerURL) }, localSettingsFactory: { UserDefaultsStore(suiteName: "home-renderer-harness.\($0)") }, transport: HomeHarnessOffline(), connector: HomeHarnessNoSocket())
+            let controller = AccountController(serverConfig: ServerConfig(storage: InMemoryKeyValueStore()), clientID: "ios/home-renderer-harness", credentialStore: InMemoryCredentialStore(), storeDirectory: nil, rnServerImport: { .confirmed(ServerConfig.defaultServerURL) }, localSettingsFactory: { id in
+                let suite = "home-renderer-harness.\(id)"
+                if fresh { UserDefaults.standard.removePersistentDomain(forName: suite) }
+                return UserDefaultsStore(suiteName: suite)
+            }, transport: HomeHarnessOffline(), connector: HomeHarnessNoSocket())
             do {
                 // `-accountMix`: the switcher lists one of each kind, an
                 // account made for a computer, this legacy one and an agent
@@ -47,13 +52,15 @@ final class HomeRendererHarness {
                 }
                 guard let session = controller.session else { fatalError("Home harness missing session") }
                 self.account = controller
-                if !restoreRenderer {
-                    controller.localSettings.homeListRenderer = renderer
-                    controller.localSettings.chatListRenderer = arguments.contains("-chatUltraList") ? .ultraList : .collectionView
-                }
                 let store = session.store
+                let namedProfile = arguments.contains("-namedProfile")
                 try await Task.detached {
                     try SeededAccount.seed(store)
+                    // `-namedProfile`: this account has a name and a GitHub
+                    // login, as one signed in with GitHub does.
+                    if namedProfile {
+                        _ = try store.applyProfile(AccountProfile(id: "home-harness", timestamp: 1, firstName: "Steve", github: GitHubProfile(id: 1, login: "steve")))
+                    }
                     if archiveCount > 0, let template = try store.sessions().first {
                         try store.upsertSessions((0..<archiveCount).map { index in
                             var row = template
@@ -99,12 +106,12 @@ final class HomeRendererHarness {
                 let home = LegacyHomeViewController(context: context, session: session)
                 let navigation = UINavigationController(rootViewController: home)
                 AppCoordinator.applyAppearance(to: navigation.navigationBar)
-                let shell = TabletShellViewController(context: context, detail: navigation)
+                let shell = ShellViewController(context: context, phone: navigation)
                 window.rootViewController = shell
                 if arguments.contains("-qaProbe"), let window = window as? HarnessWindow {
                     qaProbe = ChatUltraQAProbe(window: window, chat: nil)
                 }
-                shell.rootDidChange()
+                shell.updateMode()
                 if archiveCount > 0, let window = window as? HarnessWindow {
                     archiveProbe = HomeArchiveProbe(window: window, snapshots: store.homeSnapshots())
                 }
@@ -287,7 +294,7 @@ final class HomeArchiveProbe: NSObject {
         guard !view.isHidden, let window else { return [] }
         let layer = view.layer.presentation() ?? view.layer
         let opacity = inherited * layer.opacity
-        let isRow = view is SessionRowCell || view is ProjectChatCell || view is ListRowView
+        let isRow = view is ListRowView
         let archived = isRow && (view.accessibilityLabel.map { label in
             archivedPrefixes.map { $0.contains { label.hasPrefix($0 + ",") } } ?? label.hasPrefix("Archived fixture")
         } ?? false)

@@ -5,9 +5,10 @@ import HappyLayout
 import UIKit
 import XCTest
 
-/// The measurer against the views it stands in for: every heading cell, a
-/// session's row and the notices header, at phone widths and screen scales,
-/// at the designed text size (`HomeListTextSizeTests` has the others).
+/// The measurer against the notices header it stands in for, at phone
+/// widths and screen scales, at the designed text size
+/// (`HomeListTextSizeTests` has the others); the rows' plans are
+/// `HomeRowPlanTextSizeTests`'s and `HomeRowLinesTests`'s.
 @MainActor
 final class HomeRowMeasurerTests: XCTestCase {
     private let widths: [CGFloat] = [320, 393, 430]
@@ -30,47 +31,6 @@ final class HomeRowMeasurerTests: XCTestCase {
         view.frame = CGRect(x: 0, y: 0, width: width, height: 100)
         view.layoutIfNeeded()
         return view.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
-    }
-
-    func testEveryHeadingMatchesItsCell() async {
-        for scale in scales {
-            let environment = await self.environment(scale)
-            for width in widths {
-                func check(_ cell: UITableViewCell, _ kind: HomeRowKind, line: UInt = #line) {
-                    XCTAssertEqual(
-                        HomeRowMeasurer.height(kind, width: width, environment: environment),
-                        height(cell, width: width, scale: scale),
-                        accuracy: 0.001,
-                        "\(kind) at \(width) @\(scale)x",
-                        line: line
-                    )
-                }
-
-                for banded in [true, false] {
-                    let toggle = ArchiveToggleCell(style: .default, reuseIdentifier: nil)
-                    toggle.banded = banded
-                    toggle.configure(hidden: true)
-                    check(toggle, .archiveToggle(label: Strings.Sidebar.showArchived, banded: banded))
-                }
-
-                let machine = ProjectMachineHeaderCell(style: .default, reuseIdentifier: nil)
-                check(machine, .machineHeader(name: ""))
-                machine.configure(name: "MacBook Pro")
-                check(machine, .machineHeader(name: "MacBook Pro"))
-
-                for workspace in [nil, "fix-login"] {
-                    for changes in [nil, Self.changes] {
-                        let row = SessionRowCell(style: .default, reuseIdentifier: nil)
-                        row.configure(Self.session(workspace: workspace, changes: changes), style: .gradient, monochrome: false)
-                        check(row, .flatSession(workspace: workspace != nil, changes: changes != nil))
-                    }
-                }
-
-                check(ProjectCardCell(style: .default, reuseIdentifier: nil), .projectCard)
-                check(WorktreeCell(style: .default, reuseIdentifier: nil), .worktree)
-                check(ProjectChatCell(style: .default, reuseIdentifier: nil), .chat)
-            }
-        }
     }
 
     func testTheNoticesMatchTheHeaderView() async {
@@ -117,23 +77,6 @@ final class HomeRowMeasurerTests: XCTestCase {
         // The designed lines, but the counts' 14.3, which no style fixes,
         // up to a third (as HomeListTextSizeTests has it).
         XCTAssertEqual(environment.rows.sessionLines, .init(title: 22, project: 20, workspace: 18, changes: 43.0 / 3))
-    }
-
-    /// The session list measures each heading as the text its cell is
-    /// configured with, and leaves the constant rows to their layouts.
-    func testTheSessionListMeasuresHeadingsAsItsCellsShowThem() {
-        typealias List = SessionListViewController
-        // Headings are gaps between cards now, the same at every size.
-        XCTAssertNil(List.kind(.flat(.dayHeader(.today)), grouped: false))
-        XCTAssertNil(List.kind(.project(.archiveHeader(.daysAgo(3))), grouped: true))
-        XCTAssertEqual(List.kind(.flat(.archiveToggle(hidden: true)), grouped: false), .archiveToggle(label: Strings.Sidebar.showArchived, banded: true))
-        XCTAssertEqual(List.kind(.project(.archiveToggle(hidden: false)), grouped: true), .archiveToggle(label: Strings.Sidebar.hideArchived, banded: false))
-        XCTAssertEqual(List.kind(.flat(.session(Self.session(workspace: "fix-login"))), grouped: false), .flatSession(workspace: true, changes: false))
-        XCTAssertEqual(List.kind(.flat(.session(Self.session(workspace: nil))), grouped: false), .flatSession(workspace: false, changes: false))
-        XCTAssertEqual(
-            List.kind(.flat(.session(Self.session(workspace: nil, changes: Self.changes))), grouped: false),
-            .flatSession(workspace: false, changes: true)
-        )
     }
 
     /// The banners take their words on the main thread, where the screens'

@@ -77,7 +77,9 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     var headerStatus: ChatHeaderStatus? { status.map(Self.headerStatus) }
 
     static func headerStatus(_ status: ComposerStatus) -> ChatHeaderStatus {
-        ChatHeaderStatus(text: text(status.text), color: UIColor(color(status.tone)))
+        var header = ChatHeaderStatus(text: text(status.text), color: UIColor(color(status.tone)))
+        if case .thinking = status.text { header.working = true }
+        return header
     }
 
     /// What the header says before the composer is made: from the record
@@ -114,6 +116,19 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
     /// Picked images wait here until the outbox has its own copies.
     private let staging: ComposerAttachmentStaging
     private let images: ComposerImagePicker
+    /// The "+" menu and what it opens, as the agent chat has them.
+    private lazy var attach = AttachMenuPresenter(pictures: images, composer: .init(
+        textView: { [weak self] in self?.card.textView },
+        focus: { [weak self] in self?.card.focus() },
+        addControl: { [weak self] in self?.card.addControl },
+        text: { [weak self] in self?.card.text ?? "" },
+        setText: { [weak self] text in
+            guard let self else { return }
+            card.setText(text, selection: NSRange(location: (text as NSString).length, length: 0))
+            agentInputCardDidChangeText(card)
+        },
+        send: { [weak self] in self?.sendPressed() }
+    ))
 
     /// useActiveSuggestions: the last list and its highlighted row, kept
     /// while the query moves, shown only while there is a query.
@@ -210,9 +225,6 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitHorizontalSizeClass.self]) { (self: Self, _) in
             self.applyDetails()
             self.composerDelegate?.composerDidInvalidateHeight(self)
-        }
-        registerForTraitChanges([ZenModeTrait.self]) { (self: Self, _) in
-            self.applyConfiguration()
         }
         registerForTraitChanges(UIView.textSizeTraits) { (self: Self, _) in
             guard self.syncTextSize() else { return }
@@ -608,8 +620,6 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         configuration.primaryAccessibilityLabel = primary == .voice ? Strings.Voice.title : nil
         configuration.isPrimaryBusy = isAborting
         configuration.showsAdd = canAttach
-        // localSettings.zenMode, as SessionView passes it.
-        configuration.zenMode = traitCollection.isZenMode
         configuration.attachments = canAttach
             ? images.images.map { AgentInputAttachmentPreview(id: $0.id, fileURL: $0.attachment.fileURL) }
             : []
@@ -750,8 +760,10 @@ final class SessionComposerView: UIView, ChatComposerView, AgentInputCardDelegat
         abort()
     }
 
+    /// Telegram's attachment menu, as the agent chat's "+" opens it.
     func agentInputCardDidPressAdd(_ card: AgentInputCardView) {
-        images.attach()
+        guard SessionComposerRules.canUseAttachments(state?.session.record), let host = hostViewController else { return }
+        attach.present(from: host)
     }
 
     func agentInputCard(_ card: AgentInputCardView, didRemoveAttachment id: String) {

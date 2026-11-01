@@ -128,14 +128,31 @@ public final class AgentClient: Sendable {
     /// this phone; the same `id` again answers the same task. Unnamed, it is
     /// "New Task" until its first message names it, as desktop's blank
     /// name does. Its conversation's ID, as the computer gives it.
-    public func createTask(_ identity: Identity, mutationId: String) async throws -> String {
-        let json: JSONValue = .object([
-            "id": .string(identity.taskId), "mutationId": .string(mutationId),
-            "agentId": .string(identity.agentId), "workspaceId": .string(identity.workspaceId),
-        ])
-        let answer = try await decode(JSONValue.self, "POST", "/v0/tasks", json: json)
+    public func createTask(_ identity: Identity, mutationId: String, name: String? = nil) async throws -> String {
+        let answer = try await decode(JSONValue.self, "POST", "/v0/tasks", json: Self.creation(identity, mutationId: mutationId, name: name))
         guard let agentId = answer["task"]?["agent"]?["id"]?.stringValue else { throw AgentClientError.invalidResponse }
         return agentId
+    }
+
+    /// Makes a bot (`POST /v0/bots`) under the names this phone gives it,
+    /// as desktop's `createBot` does; the same `mutationId` again answers
+    /// the same bot. Unnamed, the computer names it from its first message
+    /// ("New Bot" until then). Its conversation's ID, as the computer gives it.
+    public func createBot(_ identity: Identity, mutationId: String, name: String? = nil) async throws -> String {
+        let answer = try await decode(JSONValue.self, "POST", "/v0/bots", json: Self.creation(identity, mutationId: mutationId, name: name))
+        guard let agentId = answer["bot"]?["agent"]?["id"]?.stringValue else { throw AgentClientError.invalidResponse }
+        return agentId
+    }
+
+    /// A task's or bot's names; a blank name is left out rather than sent,
+    /// which the computer would refuse.
+    private static func creation(_ identity: Identity, mutationId: String, name: String?) -> JSONValue {
+        var fields: [String: JSONValue] = [
+            "id": .string(identity.taskId), "mutationId": .string(mutationId),
+            "agentId": .string(identity.agentId), "workspaceId": .string(identity.workspaceId),
+        ]
+        if let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty { fields["name"] = .string(name) }
+        return .object(fields)
     }
 
     /// The tasks the person joined, as sent, each holding the person's own
@@ -174,16 +191,18 @@ public final class AgentClient: Sendable {
         return names
     }
 
-    public func renameTask(_ taskId: String, name: String) async throws {
-        try await rename("/v0/tasks/\(Self.escape(taskId))", key: "task", name: name)
+    /// `mutationId`: the same for every try of one rename, so the computer
+    /// does it once (an intent's ID, `IntentOutbox`).
+    public func renameTask(_ taskId: String, name: String, mutationId: String = ClientID.make()) async throws {
+        try await rename("/v0/tasks/\(Self.escape(taskId))", key: "task", name: name, mutationId: mutationId)
     }
 
-    public func renameBot(_ botId: String, name: String) async throws {
-        try await rename("/v0/bots/\(Self.escape(botId))", key: "bot", name: name)
+    public func renameBot(_ botId: String, name: String, mutationId: String = ClientID.make()) async throws {
+        try await rename("/v0/bots/\(Self.escape(botId))", key: "bot", name: name, mutationId: mutationId)
     }
 
-    public func leaveTask(_ taskId: String) async throws {
-        _ = try await send("POST", "/v0/tasks/\(Self.escape(taskId))/leave", json: .object(["mutationId": .string(ClientID.make())]))
+    public func leaveTask(_ taskId: String, mutationId: String = ClientID.make()) async throws {
+        _ = try await send("POST", "/v0/tasks/\(Self.escape(taskId))/leave", json: .object(["mutationId": .string(mutationId)]))
     }
 
     public func archiveTask(_ taskId: String) async throws {
@@ -195,8 +214,8 @@ public final class AgentClient: Sendable {
     }
 
     /// A subtask's conversation (`POST /v0/agents/:agentId/archive`).
-    public func archiveAgent(_ agentId: String) async throws {
-        _ = try await send("POST", "/v0/agents/\(Self.escape(agentId))/archive", json: .object(["mutationId": .string(ClientID.make())]))
+    public func archiveAgent(_ agentId: String, mutationId: String = ClientID.make()) async throws {
+        _ = try await send("POST", "/v0/agents/\(Self.escape(agentId))/archive", json: .object(["mutationId": .string(mutationId)]))
     }
 
     /// Archival names the version it archives (`If-Match`).
@@ -207,8 +226,7 @@ public final class AgentClient: Sendable {
 
     /// A rename names the version it renames (`If-Match`); one that lost a
     /// race reads the newer version and renames that.
-    private func rename(_ path: String, key: String, name: String) async throws {
-        let mutationId = ClientID.make()
+    private func rename(_ path: String, key: String, name: String, mutationId: String) async throws {
         for attempt in 0..<2 {
             guard let version = try await decode(JSONValue.self, "GET", path)[key]?["version"]?.stringValue else { throw AgentClientError.invalidResponse }
             do {
@@ -223,8 +241,8 @@ public final class AgentClient: Sendable {
     // MARK: Surfaces
 
     /// Takes a Surface out of the reader's sidebar; its content stays for everyone.
-    public func leaveSurface(_ surfaceId: String) async throws {
-        _ = try await send("POST", "/v0/surfaces/\(Self.escape(surfaceId))/leave", json: .object(["mutationId": .string(ClientID.make())]))
+    public func leaveSurface(_ surfaceId: String, mutationId: String = ClientID.make()) async throws {
+        _ = try await send("POST", "/v0/surfaces/\(Self.escape(surfaceId))/leave", json: .object(["mutationId": .string(mutationId)]))
     }
 
     /// The joined Surfaces; nil where the daemon serves none (`404`, `501`).
@@ -384,6 +402,24 @@ public final class AgentClient: Sendable {
         }
         let path = "/v0/agents/\(Self.escape(agentId))/messages/\(Self.escape(messageId))/\(mode == nil ? "retry" : "switch")"
         return try await decode(Response.self, "POST", path, json: .object(body)).message
+    }
+
+    /// The question the agent is waiting on, or nil when none is.
+    public func question(_ agentId: String) async throws -> AgentWire.Question? {
+        struct Response: Decodable { var question: AgentWire.Question? }
+        return try await decode(Response.self, "GET", "/v0/agents/\(Self.escape(agentId))/question").question
+    }
+
+    /// Answers a question: each prompt's option labels or typed text, by
+    /// its ID. The first answer wins; a late one is refused with the
+    /// question as it now stands.
+    public func answerQuestion(_ agentId: String, questionId: String, answers: [String: [String]], mutationId: String) async throws -> AgentWire.Question {
+        struct Response: Decodable { var question: AgentWire.Question }
+        let body: JSONValue = .object([
+            "answers": .object(answers.mapValues { .array($0.map(JSONValue.string)) }),
+            "mutationId": .string(mutationId),
+        ])
+        return try await decode(Response.self, "POST", "/v0/agents/\(Self.escape(agentId))/question/\(Self.escape(questionId))/answer", json: body).question
     }
 
     public func markRead(_ agentId: String) async throws {
@@ -564,6 +600,6 @@ extension AgentConnections {
     /// A client for a paired device, sharing nothing with its identity refresh.
     public func agentClient(for accountID: String) -> AgentClient? {
         guard let credential = credential(for: accountID) else { return nil }
-        return AgentClient(transport: makeTransport(credential), token: credential.deviceToken)
+        return AgentClient(transport: transport(credential, for: accountID), token: credential.deviceToken)
     }
 }

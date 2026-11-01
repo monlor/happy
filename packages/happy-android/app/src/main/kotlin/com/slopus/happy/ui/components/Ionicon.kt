@@ -30,6 +30,7 @@ enum class Ionicon(val codepoint: Int) {
     Archive(0xf124), // archive
     ArchiveOutline(0xf125), // archive-outline
     ArrowBack(0xf127), // arrow-back
+    ArrowDownOutline(0xf131), // arrow-down-outline
     ArrowUp(0xf145), // arrow-up
     BugOutline(0xf1bb), // bug-outline
     BulbOutline(0xf1c1), // bulb-outline
@@ -142,7 +143,7 @@ enum class Ionicon(val codepoint: Int) {
     WarningOutline(0xf629), // warning-outline
 }
 
-private val IoniconsFamily = FontFamily(Font(R.font.ionicons))
+internal val IoniconsFamily = FontFamily(Font(R.font.ionicons))
 
 /**
  * One glyph in a [size] x [size] box, like `<Ionicons size={size} />`. Unlike
