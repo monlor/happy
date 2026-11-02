@@ -293,6 +293,7 @@ internal fun statusText(status: AgentLinkStatus): String = stringResource(
         AgentLinkStatus.Offline -> R.string.agent_settings_offline
         AgentLinkStatus.Revoked -> R.string.agent_settings_revoked
         AgentLinkStatus.UpdateRequired -> R.string.agent_settings_update
+        AgentLinkStatus.SignInRequired -> R.string.team_server_settings_signed_out
     },
 )
 

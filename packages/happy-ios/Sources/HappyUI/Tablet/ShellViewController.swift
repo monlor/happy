@@ -226,9 +226,44 @@ public final class ShellViewController: UIViewController {
     /// The sidebar's selection follows the main panel's root.
     private func followMainPanel() {
         placeToggle()
+        updateTopEdges()
         let root = isExpanded ? main.viewControllers.first.flatMap { $0 === placeholder ? nil : $0 } : nil
         let home = isExpanded ? sidebar.viewControllers.first : phone.viewControllers.first
         (home as? MainPanelFollowing)?.mainPanelDidShow(root)
+    }
+
+    // MARK: The main panel's top edge
+
+    /// The scroll views whose soft top edge this shell turned off.
+    private let unshadedEdges = NSHashTable<UIScrollView>.weakObjects()
+
+    /// iOS 26 shades a scroll view's top softly under its bar, but only
+    /// across the scroll view: in the main panel that is the panel, which
+    /// starts where the floating sidebar ends, so the shade stopped in a
+    /// hard line above the sidebar. While the sidebar floats beside them
+    /// the main panel's screens go without it, and their top is the
+    /// column's own ground right across; the chats keep their own header
+    /// fade (`HeaderScrimView`). With the sidebar hidden or the window a
+    /// phone's, the panel is the whole width and the shade comes back.
+    private func updateTopEdges() {
+        guard #available(iOS 26.0, *) else { return }
+        let shown = showsSidebar ? main.viewControllers.flatMap { Self.topScrollViews(in: $0.viewIfLoaded) } : []
+        for scroll in unshadedEdges.allObjects where !shown.contains(where: { $0 === scroll }) {
+            scroll.topEdgeEffect.isHidden = false
+            unshadedEdges.remove(scroll)
+        }
+        for scroll in shown where !scroll.topEdgeEffect.isHidden {
+            scroll.topEdgeEffect.isHidden = true
+            unshadedEdges.add(scroll)
+        }
+    }
+
+    /// The outermost scroll views in `view`: a scroll view's own are its
+    /// content, under no bar.
+    private static func topScrollViews(in view: UIView?) -> [UIScrollView] {
+        guard let view else { return [] }
+        if let scroll = view as? UIScrollView { return [scroll] }
+        return view.subviews.flatMap { topScrollViews(in: $0) }
     }
 
     // MARK: Mode
@@ -306,8 +341,10 @@ public final class ShellViewController: UIViewController {
         isExpanded = false
         sidebar.setViewControllers([], animated: false)
         main.setViewControllers([placeholder], animated: false)
+        leave(sidebar, main)
         phone.setViewControllers(stack, animated: false)
         placeToggle()
+        updateTopEdges()
         (stack.first as? MainPanelFollowing)?.mainPanelDidShow(nil)
         setNeedsStatusBarAppearanceUpdate()
     }
@@ -319,6 +356,7 @@ public final class ShellViewController: UIViewController {
         let columns = SplitStack.expanded(phone.viewControllers, placeholder: placeholder)
         isExpanded = true
         phone.setViewControllers([], animated: false)
+        leave(phone)
         sidebar.setViewControllers(columns.sidebar, animated: false)
         main.setViewControllers(columns.main, animated: false)
         followMainPanel()
@@ -328,6 +366,17 @@ public final class ShellViewController: UIViewController {
         DispatchQueue.main.async { [weak self] in
             guard let self, let split, isExpanded, sidebarHidden, split.displayMode != .secondaryOnly else { return }
             UIView.performWithoutAnimation { split.hide(.primary) }
+        }
+    }
+
+    /// The screens just taken off `stacks` hear they disappeared now, before
+    /// the stack they move to tells them they appeared: a stack set without
+    /// animation says so at its next layout, which may come after the other
+    /// stack's.
+    private func leave(_ stacks: UINavigationController...) {
+        for stack in stacks where stack.isViewLoaded {
+            stack.view.setNeedsLayout()
+            stack.view.layoutIfNeeded()
         }
     }
 
@@ -370,6 +419,9 @@ extension ShellViewController: UISplitViewControllerDelegate {
     }
 
     public func splitViewController(_ svc: UISplitViewController, willChangeTo displayMode: UISplitViewController.DisplayMode) {
+        // The sidebar coming or going, whoever moved it: the main panel's
+        // top edge follows once the mode has changed.
+        DispatchQueue.main.async { [weak self] in self?.updateTopEdges() }
         guard isExpanded, !rewriting, !resizing, !svc.isCollapsed else { return }
         // The sidebar's button, ⌃⌘S or the swipe: the person's choice.
         switch displayMode {
@@ -387,6 +439,8 @@ extension ShellViewController: UISplitViewControllerDelegate {
 extension ShellViewController: UINavigationControllerDelegate {
     public func navigationController(_ navigationController: UINavigationController, willShow viewController: UIViewController, animated: Bool) {
         Self.minimalBackButtons(in: navigationController)
+        // Before the screen slides in, so its top never flashes the shade.
+        if navigationController === main { updateTopEdges() }
     }
 
     public func navigationController(_ navigationController: UINavigationController, didShow viewController: UIViewController, animated: Bool) {
@@ -505,8 +559,18 @@ enum MainPanelKey {
         if let chat = controller as? ChatViewController, !chat.shownAgentId.isEmpty { return "agent:\(chat.shownAgentId)" }
         if controller is SettingsViewController { return "settings" }
         if controller is ArtifactsViewController { return "artifacts" }
+        if controller is TodoListsViewController { return "todos" }
         return nil
     }
+}
+
+/// A screen whose own content takes the back swipe while it has somewhere
+/// to go back to: the browser, with history. UIKit's pop doesn't begin
+/// then, so the swipe goes back a page; on the first page it closes the
+/// screen as everywhere else.
+@MainActor
+protocol TakesBackSwipe: AnyObject {
+    var takesBackSwipe: Bool { get }
 }
 
 /// UIKit's own swipe back, kept wherever there is something to go back
@@ -540,6 +604,7 @@ final class PopGestureDelegate: NSObject, UIGestureRecognizerDelegate {
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
         guard let navigation else { return false }
         var begins = navigation.viewControllers.count > 1 && navigation.transitionCoordinator == nil
+            && !(navigation.topViewController.map(Self.takesBackSwipe) ?? false)
         if #available(iOS 26.0, *), gesture === navigation.interactiveContentPopGestureRecognizer {
             // Unlike the edge recognizer, the content pan can begin anywhere.
             // Leave vertical scrolling and the opposite direction to content.
@@ -590,6 +655,12 @@ final class PopGestureDelegate: NSObject, UIGestureRecognizerDelegate {
     /// internal transition object, and the native swipes stop receiving touches.
     private func system(for gesture: UIGestureRecognizer) -> (any UIGestureRecognizerDelegate)? {
         isContent(gesture) ? contentSystem : edgeSystem
+    }
+
+    /// Whether `controller`, or a screen inside it, goes back on its own.
+    private static func takesBackSwipe(_ controller: UIViewController) -> Bool {
+        if let owner = controller as? TakesBackSwipe, owner.takesBackSwipe { return true }
+        return controller.children.contains(where: takesBackSwipe)
     }
 
     private static func isScrollPan(_ gesture: UIGestureRecognizer) -> Bool {

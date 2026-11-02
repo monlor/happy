@@ -3,26 +3,25 @@ import HappyLayout
 import XCTest
 
 final class AccountSwitcherLayoutTests: XCTestCase {
-    /// The switcher is its own glass, the bar's buttons' 44 tall: the
-    /// picture and the name sit on the 36 line inside it.
+    /// The switcher is the 36 line the picture and the name sit on; the
+    /// bar draws its glass 4 round it, its buttons' 44.
     func testNameUsesTheAvailableHeaderWidthOnOneCentredLine() {
         let room = AccountSwitcherLayout.availableWidth(barWidth: 393, safeArea: .zero, trailingItems: 1)
-        XCTAssertEqual(room, 313)
+        XCTAssertEqual(room, 305)
         let layout = AccountSwitcherLayout(title: CGSize(width: 210, height: 20), chevron: CGSize(width: 10, height: 6), maxWidth: room)
-        XCTAssertEqual(layout.size, CGSize(width: 282, height: 44))
-        XCTAssertEqual(layout.glass, CGRect(x: 0, y: 0, width: 282, height: 44))
-        XCTAssertEqual(layout.title, CGRect(x: 44, y: 12, width: 210, height: 20))
-        XCTAssertEqual(layout.picture, CGRect(x: 8, y: 8, width: 28, height: 28))
-        XCTAssertEqual(layout.chevron, CGRect(x: 258, y: 19, width: 10, height: 6))
+        XCTAssertEqual(layout.size, CGSize(width: 274, height: 36))
+        XCTAssertEqual(layout.title, CGRect(x: 40, y: 8, width: 210, height: 20))
+        XCTAssertEqual(layout.picture, CGRect(x: 4, y: 4, width: 28, height: 28))
+        XCTAssertEqual(layout.chevron, CGRect(x: 254, y: 15, width: 10, height: 6))
     }
 
     func testLongNamesTruncateBeforeTheTrailingActions() {
         let room = AccountSwitcherLayout.availableWidth(barWidth: 393, safeArea: LayoutInsets(left: 20, right: 20), trailingItems: 2)
-        XCTAssertEqual(room, 225)
+        XCTAssertEqual(room, 217)
         let layout = AccountSwitcherLayout(title: CGSize(width: 500, height: 20), chevron: CGSize(width: 10, height: 6), maxWidth: room)
         XCTAssertEqual(layout.size.width, room)
         XCTAssertEqual(layout.title.width, 153)
-        XCTAssertEqual(layout.chevron.maxX, room - 14)
+        XCTAssertEqual(layout.chevron.maxX, room - 10)
     }
 
     func testFloatingSearchHasRoomForTheWholeLastRowAndGlass() {
@@ -47,6 +46,15 @@ final class AccountSwitcherLayoutTests: XCTestCase {
         let searching = HomeListRoom(size: size, safeArea: LayoutInsets(top: 116, bottom: 86), control: CGRect(x: 28, y: 484, width: 286, height: 28), standing: true, kept: room)
         XCTAssertEqual(searching.insets.listBottom, 402)
         XCTAssertEqual(searching.insets.contentTop, 128)
+    }
+
+    /// An iPad's window narrower than the split: the field sits in the
+    /// navigation bar, at its top right, and the list runs to the safe
+    /// area's foot.
+    func testAFieldInTheBarLeavesTheFootToTheSafeArea() {
+        let room = HomeListRoom(size: CGSize(width: 700, height: 1210), safeArea: LayoutInsets(top: 86, bottom: 25), control: CGRect(x: 446, y: 32, width: 240, height: 44), standing: true, kept: nil)
+        XCTAssertEqual(room.insets.listBottom, 25)
+        XCTAssertEqual(room.insets.chromeTop, 86)
     }
 
     /// Mid-pop, UIKit lays home out with the toolbar on its way back: the

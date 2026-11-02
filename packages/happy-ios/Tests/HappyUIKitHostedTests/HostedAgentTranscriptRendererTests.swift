@@ -108,7 +108,7 @@ final class HostedAgentTranscriptRendererTests: XCTestCase {
         let plans = (0..<40).map { ChatRowPlan(id: "row-\($0)", size: CGSize(width: chat.view.bounds.width, height: 80), items: []) }
         transcript.apply(plans)
         try await until { transcript.list.loadedItemView(at: 0) != nil }
-        XCTAssertTrue(chat.sendFollowsNewest)
+        XCTAssertTrue(chat.sendFlies)
         XCTAssertEqual(scrim.presence, 1)
 
         transcript.list.scrollToTop(animated: false)
@@ -117,15 +117,15 @@ final class HostedAgentTranscriptRendererTests: XCTestCase {
 
         transcript.list.scrollTo(.init(index: 15), transition: .none)
         try await until { transcript.distanceFromNewest > 200 }
-        XCTAssertFalse(chat.sendFollowsNewest, "a send in history read the unused scroll view's offset")
+        XCTAssertFalse(chat.sendFlies, "a send in history read the unused scroll view's offset")
 
         transcript.list.scrollTo(.init(index: 0, pointOffset: -50), transition: .none)
         try await until { (30...80).contains(transcript.distanceFromNewest) }
-        XCTAssertFalse(transcript.followsNewest, "the 24pt reading threshold differs from the 80pt send threshold")
-        XCTAssertTrue(chat.sendFollowsNewest, "a send near the end should follow it")
+        XCTAssertFalse(transcript.followsNewest)
+        XCTAssertFalse(chat.sendFlies, "past Telegram's 20pt a send scrolls rather than flies")
         transcript.scrollToNewest(animated: false)
         try await until { abs(transcript.distanceFromNewest) < 1 }
-        XCTAssertTrue(chat.sendFollowsNewest)
+        XCTAssertTrue(chat.sendFlies)
     }
 
     func testAnAppendTargetsTheIncomingNewestRowAboveTheComposer() async throws {
@@ -186,7 +186,7 @@ final class HostedAgentTranscriptRendererTests: XCTestCase {
         let window = hostedKeyWindow(in: scene, root: host)
         defer { window.isHidden = true }
         window.layoutIfNeeded()
-        transcript.setViewport(size: transcript.bounds.size, insets: UIEdgeInsets(top: 100, left: 0, bottom: 50, right: 0))
+        transcript.setViewport(frame: CGRect(origin: .zero, size: transcript.bounds.size), insets: UIEdgeInsets(top: 100, left: 0, bottom: 50, right: 0))
         let tall = transcript.viewportHeight + 300
         transcript.apply([ChatRowPlan(id: "older", size: CGSize(width: 393, height: 80), items: []),
                           ChatRowPlan(id: "tall", size: CGSize(width: 393, height: tall), items: [])])

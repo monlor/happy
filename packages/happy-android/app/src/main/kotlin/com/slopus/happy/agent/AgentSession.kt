@@ -3,6 +3,7 @@ package com.slopus.happy.agent
 import com.slopus.happy.connection.AgentConnectionException
 import com.slopus.happy.connection.AgentConnections
 import com.slopus.happy.connection.AgentIdentity
+import com.slopus.happy.connection.RequestCategory
 import com.slopus.happy.connection.agentTransport
 import com.slopus.happy.connection.Transport
 import com.slopus.happy.conversation.UnsentWork
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -48,6 +50,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -56,7 +60,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /** How an agent connection's live link stands, as its home and chats show it. */
-enum class AgentLinkStatus { Connecting, Connected, Offline, Revoked, UpdateRequired }
+enum class AgentLinkStatus {
+    Connecting, Connected, Offline, Revoked, UpdateRequired,
+    /** A team server's sign-in expired (edge SSO): the person signs in again, then the link resumes. */
+    SignInRequired,
+}
 
 /**
  * One agent connection while the phone talks to it (iOS's DirectSyncEngine):
@@ -85,16 +93,23 @@ class AgentSession internal constructor(
     private val snapshotQueued = AtomicBoolean(false)
     // Asks for the settings changed here to be sent; one ask covers every change made meanwhile.
     private val settingsQueued = Channel<Unit>(Channel.CONFLATED)
-    private var link: AgentClient.Link? = null
-    private val token = MutableStateFlow<String?>(null)
+    private var route: Pair<com.slopus.happy.connection.AgentConnectionCredentials, Transport>? = null
 
+    /**
+     * The transport is made once; the bearer is asked for on every request,
+     * so a team server's access token is refreshed as it nears expiry.
+     */
     val client: AgentClient = AgentClient.lazy {
-        linkLock.withLock {
-            link ?: run {
-                val credentials = connections.credentials(connectionId) ?: throw AgentConnectionException(AgentConnectionException.Reason.Revoked)
-                AgentClient.Link(connections.transport(connectionId, credentials, makeTransport), credentials.deviceToken).also { link = it }
+        val (credentials, transport) = linkLock.withLock {
+            route ?: run {
+                val credentials = connections.linkCredentials(connectionId) ?: throw AgentConnectionException(AgentConnectionException.Reason.Revoked)
+                (credentials to connections.transport(connectionId, credentials, makeTransport)).also { route = it }
             }
         }
+        val renew: (suspend (String) -> String)? = if (credentials.oauth != null) { stale -> connections.renew(connectionId, stale) } else null
+        // The sign-in this request is made under: only its refusal signs out, never a newer one's.
+        val grant = connections.grant(connectionId)
+        AgentClient.Link(transport, connections.bearer(connectionId, credentials), renew, credentials.oauth?.let { { profile -> connections.signedOut(connectionId, profile, grant) } })
     }
 
     // Empty until the kept catalog is read off the main thread (init), then live.
@@ -122,9 +137,11 @@ class AgentSession internal constructor(
 
     /** The Surfaces being left, each with the agent's answer on its way ([leaveSurface]). */
     private val leaving = MutableStateFlow<Map<String, Deferred<String?>>>(emptyMap())
+    private val gitSnapshots = MutableStateFlow<Map<String, WorkspaceLineChanges>>(emptyMap())
+    private val gitRenewal = MutableStateFlow(0)
 
     /** Home's rows, derived off the main thread; equal rows keep their instances. */
-    val feed: StateFlow<AgentFeed> = combine(catalogState, leaving) { catalog, leaving -> AgentFeed.derive(catalog, leaving.keys) }
+    val feed: StateFlow<AgentFeed> = combine(catalogState, leaving, gitSnapshots) { catalog, leaving, git -> AgentFeed.derive(catalog, leaving.keys, git) }
         .distinctUntilChanged()
         .scan(null as AgentFeed?) { previous, next -> AgentFeed.reuse(previous, next) }
         // The seed is no feed: never shown, so a cached home never blinks empty.
@@ -165,7 +182,7 @@ class AgentSession internal constructor(
     val profile: AgentProfileSource by lazy { AgentProfileSource(client, events, scope) }
 
     /** Bots' pictures, as home's rows draw them. */
-    val pictures = AgentPictures(connectionId, cacheFile?.let { File(it.parentFile, it.nameWithoutExtension + ".pictures") }) { path -> client.send("GET", path).body }
+    val pictures = AgentPictures(connectionId, cacheFile?.let { File(it.parentFile, it.nameWithoutExtension + ".pictures") }) { path -> client.send("GET", path, category = RequestCategory.File).body }
 
     /** One conversation as the catalog knows it, live; null while unknown. */
     fun agent(agentId: String): Flow<WireAgent?> = catalogState
@@ -233,7 +250,19 @@ class AgentSession internal constructor(
         scope.launch {
             // The kept catalog first: home draws it, and the link resumes from its cursor.
             traced("AgentSession.readCache") { readCache() }?.let { cached -> catalogLock.withLock { catalogState.update { if (it.loaded) it else cached } } }
-            active.distinctUntilChanged().collectLatest { on -> if (on) live() }
+            // A team server that wants signing in again (a refused refresh) stops the link at once,
+            // even with its event stream still open, and it resumes from its cursor after.
+            val signedIn = connections.accounts.map { list -> list.none { it.id == connectionId && it.signInRequired } }.distinctUntilChanged()
+            combine(active.distinctUntilChanged(), signedIn, ::Pair).collectLatest { (on, signedIn) ->
+                when {
+                    !signedIn -> statusState.value = AgentLinkStatus.SignInRequired
+                    on -> coroutineScope {
+                        launch { watchGit() }
+                        live()
+                    }
+                    statusState.value == AgentLinkStatus.SignInRequired -> statusState.value = AgentLinkStatus.Connecting
+                }
+            }
         }
         scope.launch {
             settingsQueued.receiveAsFlow().collect { deliverSettings() }
@@ -250,7 +279,7 @@ class AgentSession internal constructor(
     suspend fun close() {
         scope.cancel()
         withContext(kotlinx.coroutines.NonCancellable) {
-            linkLock.withLock { link?.transport?.close(); link = null }
+            linkLock.withLock { route?.second?.close(); route = null }
         }
     }
 
@@ -260,7 +289,10 @@ class AgentSession internal constructor(
         // there; only a gap or a refused cursor reads the whole snapshot again.
         var snapshotRead = catalogState.value.let { it.loaded && it.cursor != null }
         while (true) {
+            awaitSignedIn()
             if (statusState.value != AgentLinkStatus.Connected) statusState.value = AgentLinkStatus.Connecting
+            // The sign-in this attempt runs under: a refusal it meets signs out only that one.
+            val grant = connections.grant(connectionId)
             try {
                 refreshIdentity()
                 if (!snapshotRead) {
@@ -281,6 +313,12 @@ class AgentSession internal constructor(
                         statusState.value = AgentLinkStatus.UpdateRequired
                         return
                     }
+                    AgentConnectionException.Reason.SignInRequired, AgentConnectionException.Reason.ProfileRequired -> {
+                        val profile = e.reason == AgentConnectionException.Reason.ProfileRequired
+                        connections.signedOut(connectionId, profile, grant)
+                        backoff = INITIAL_BACKOFF
+                        continue
+                    }
                     else -> statusState.value = AgentLinkStatus.Offline
                 }
             } catch (e: AgentApiException) {
@@ -295,16 +333,23 @@ class AgentSession internal constructor(
         }
     }
 
+    /**
+     * While a team server wants signing in again, the link waits, saying so,
+     * and resumes from its cursor once the person has.
+     */
+    private suspend fun awaitSignedIn() {
+        if (connections.accounts.value.none { it.id == connectionId && it.signInRequired }) return
+        statusState.value = AgentLinkStatus.SignInRequired
+        connections.accounts.first { list -> list.none { it.id == connectionId && it.signInRequired } }
+    }
+
     /** Health (protocol 27 or later) and the agent's own name and avatar, shown in the account menu. */
     private suspend fun refreshIdentity() {
         val known = connections.accounts.value.firstOrNull { it.id == connectionId }
-        val link = linkLock.withLock { link } ?: run {
-            client.reset() // reads the credentials and makes the link
-            linkLock.withLock { link }
-        } ?: throw AgentConnectionException(AgentConnectionException.Reason.Revoked)
-        val info = AgentIdentity.refresh(link.transport, link.token, known?.name.orEmpty(), known?.avatarFile?.let { known.avatarETag })
+        val info = AgentIdentity.refresh(client.requester, known?.name.orEmpty(), known?.avatarFile?.let { known.avatarETag }, oauth = client.isOAuth())
+        client.noteHealth(info)
         if (known != null) {
-            connections.update(connectionId, info.avatar) { it.copy(name = info.name, thumbhash = info.thumbhash ?: it.thumbhash, revoked = false) }
+            connections.update(connectionId, info.avatar) { it.copy(name = info.name, thumbhash = info.thumbhash ?: it.thumbhash, revoked = false, instanceId = info.instanceId) }
         }
     }
 
@@ -331,10 +376,16 @@ class AgentSession internal constructor(
                         val hello = AgentHello.of(event)
                         if (hello.gap) readSnapshot()
                         statusState.value = AgentLinkStatus.Connected
+                        gitRenewal.update { it + 1 }
                         onConnected()
                         // Every connect sends what was changed while offline.
                         if (catalogState.value.pendingSettings.isNotEmpty()) settingsQueued.trySend(Unit)
                     } else {
+                        if (event.type == "git.updated") {
+                            val id = event.data.string("workspaceId")
+                            val state = WorkspaceLineChanges.parse(event.data["git"])
+                            if (id != null && state != null && id in gitWorkspaceIds(feed.value)) receiveGit(mapOf(id to state))
+                        }
                         apply(event)
                     }
                     eventFlow.emit(event)
@@ -342,6 +393,44 @@ class AgentSession internal constructor(
             }
         } finally {
             stream.close()
+        }
+    }
+
+    private fun gitWorkspaceIds(feed: AgentFeed): Set<String> = feed.rows.mapNotNull { row ->
+        when (row) {
+            is AgentFeedRow.Conversation -> row.workspaceId
+            is AgentFeedRow.Folder -> row.id
+            else -> null
+        }
+    }.toSet()
+
+    /** One renewing subscription per foreground account; rows never start network work. */
+    private suspend fun watchGit() {
+        combine(feed.map(::gitWorkspaceIds).distinctUntilChanged(), gitRenewal, status) { ids, renewal, status ->
+            Triple(ids, renewal, status == AgentLinkStatus.Connected)
+        }.distinctUntilChanged().collectLatest { (ids, _, connected) ->
+            if (!connected) return@collectLatest
+            gitSnapshots.update { it.filterKeys(ids::contains) }
+            while (true) {
+                try {
+                    val response = client.send("POST", "/v0/git/watch", buildJsonObject {
+                        put("workspaceIds", JsonArray(ids.sorted().map(::JsonPrimitive)))
+                    })
+                    val body = AgentClient.json.parseToJsonElement(response.text) as? JsonObject
+                    val snapshots = body?.get("snapshots") as? JsonObject
+                    receiveGit(snapshots.orEmpty().mapNotNull { (id, value) ->
+                        WorkspaceLineChanges.parse(value)?.takeIf { id in ids }?.let { id to it }
+                    }.toMap())
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { /* Git is optional; never block the home feed. */ }
+                delay(30_000)
+            }
+        }
+    }
+
+    private fun receiveGit(states: Map<String, WorkspaceLineChanges>) {
+        gitSnapshots.update { previous ->
+            previous + states.filter { (id, state) -> state.scannedAt >= (previous[id]?.scannedAt ?: 0.0) }
         }
     }
 

@@ -33,6 +33,8 @@ import com.slopus.happy.payments.PurchasesRepository
 import com.slopus.happy.payments.RevenueCatPurchases
 import com.slopus.happy.connection.AgentConnections
 import com.slopus.happy.connection.PairingFlow
+import com.slopus.happy.connection.ServerAuthClient
+import com.slopus.happy.connection.ServerSignInFlow
 import com.slopus.happy.connection.TailcatTransport
 import com.slopus.happy.sync.AccountSync
 import com.slopus.happy.ui.changelog.ChangelogReadMarker
@@ -85,7 +87,7 @@ class AppGraph(
     context: Context,
     private val clientId: String,
     defaultServerUrl: String,
-    secureStoreKeys: SecureStoreKeys = AndroidKeyStoreKeys(),
+    secureStoreKeys: SecureStoreKeys = AndroidKeyStoreKeys(strongBox = AndroidKeyStoreKeys.hasStrongBox(context)),
     databaseName: String? = HappyDatabase.NAME,
 ) {
     private val appContext: Context = context.applicationContext ?: context
@@ -252,7 +254,11 @@ class AppGraph(
      * Agent connections over Happy Protocol V2: accounts of their own beside
      * the relay account, kept through a relay sign-out.
      */
+    /** Team server sign-in and token refresh (edge SSO): discovery, code exchange, refresh; never follows a redirect. */
+    val serverAuth = ServerAuthClient(okHttp)
+
     val agentConnections = AgentConnections(
+        serverAuth = serverAuth,
         secrets = ExpoSecureStore(
             prefs = context.getSharedPreferences(AgentConnections.SECRETS_PREFS, Context.MODE_PRIVATE),
             keys = secureStoreKeys,
@@ -342,6 +348,43 @@ class AppGraph(
     fun endAgentPairing(flow: PairingFlow) {
         flow.close()
         agentPairingState.compareAndSet(flow, null)
+    }
+
+    private val serverSignInState = MutableStateFlow<ServerSignInFlow?>(null)
+
+    /** The team server sign-in on screen, if any. In memory only: its PKCE verifier is a secret. */
+    val serverSignIn: StateFlow<ServerSignInFlow?> = serverSignInState.asStateFlow()
+
+    /**
+     * Starts signing in to the team server at [address] (a scanned code's),
+     * or signing [replacing] in again; replaces any unfinished one. It is
+     * kept only as [instanceId]'s installation: the code's, or the one
+     * [replacing] was.
+     */
+    fun startServerSignIn(address: String, replacing: String? = null, instanceId: String? = null) {
+        serverSignInState.value?.close()
+        val existing = agentConnections.accounts.value.firstOrNull { it.id == replacing }
+        val onboarding = existing?.takeIf { it.profileRequired }?.server
+        // Another member signing in again on [replacing]: their own connection takes its place, and opens.
+        serverSignInState.value = ServerSignInFlow(scope, agentConnections, serverAuth, replacing, instanceId ?: existing?.instanceId, onReplaced = { open(it) })
+            .also { flow -> if (onboarding != null) flow.onboard(onboarding) else flow.start(address) }
+    }
+
+    /** The sign-in screen left. */
+    fun endServerSignIn(flow: ServerSignInFlow) {
+        flow.close()
+        serverSignInState.compareAndSet(flow, null)
+    }
+
+    /** The browser came back to [ServerSignInFlow.REDIRECT_URI] (MainActivity). */
+    fun oauthCallback(uri: String) {
+        // Any app can send the redirect URI: nothing it holds takes the app down.
+        try {
+            serverSignInState.value?.callback(uri)
+        } catch (e: RuntimeException) {
+            // Only the kind: the callback may carry a code.
+            android.util.Log.w("ServerSignIn", "Ignored a callback that couldn't be read: ${e.javaClass.simpleName}")
+        }
     }
 
     /** What the agent lists this phone as: the name the person gave it, else the model. */

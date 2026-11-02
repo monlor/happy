@@ -775,7 +775,8 @@ decodes the drawn pixels back to the link.
 ### Deep links
 
 `happy://` links route as expo-router routes them for happy-app (the host
-is the first path segment), and so do `https://app.happy.engineering/<path>`
+is the first path segment; Happy Agent's own hosts and instance-locked links
+are not app paths, see "Team servers behind SSO"), and so do `https://app.happy.engineering/<path>`
 links. Every app path maps to its Compose route (`parseDeepLink` in
 `ui/connect/DeepLinks.kt`): `terminal?<key>` opens the confirm screen,
 `/terminal/connect` explains that the web link needs a browser,
@@ -793,6 +794,104 @@ verifies with, so a Play-distributed build should verify as it does; a build
 signed with only the upload key won't. Signed out, only the screens that need
 no account (server, restore, troubleshoot, changelog, onboarding settings)
 open; other links are dropped rather than pushed onto empty signed-in screens.
+
+### Team servers behind SSO (edge SSO)
+
+A Happy Agent server behind an HTTPS load balancer that enforces SSO is an
+`AgentConnection` with `server` (its origin) and `AgentConnectionCredentials.oauth`
+instead of a device token. The contract is shared with iOS and desktop; don't
+change its wire behaviour on Android alone.
+
+- **Adding one: by QR code only** (§8, Steve's decision; `connection/ServerInvite.kt`).
+  A phone never takes a typed or pasted server address: there is no address
+  field or menu item. Desktop shows `happy://<instanceId>/server?url=<percent-encoded
+  base URL>`, no secret in it; any of the app's scanners reads it
+  (`HappyCode.Server`, by shape, so a malformed one is refused as one).
+  `ServerInvite.parse` takes the grammar exactly (normalized `https:` base URL,
+  nothing else in the link, at most 4,096 characters) and repairs nothing.
+  Pasted into "Enter link manually", from the OS, or in a conversation it does
+  nothing (it isn't a `HappyUrls` link). A connection already on that
+  `instanceId` just opens; otherwise a base URL under a path prefix stops with
+  "…can't connect to yet" (the transport is origin-only), and an origin starts
+  the sign-in below. After the token exchange, health's `instanceId` must equal
+  the code's (`ServerSignInFlow.verify`; a new member's health behind the
+  profile gate is checked after the name); a mismatch, or none, drops the
+  credential and reads "This code doesn't match the server it points to."
+- **Sign-in** (`connection/ServerSignInFlow.kt`, `ServerAuth.kt`): `GET
+  /v0/authentication` lists the methods, then OAuth authorization code + PKCE
+  S256 in a Custom Tab (never a WebView), with RFC 8707 `resource` on
+  authorize, exchange and refresh. The redirect URI is **`happy://oauth/callback`**
+  on every flavor (`ServerSignInFlow.REDIRECT_URI`); the manifest's `happy`
+  scheme filter carries it, and MainActivity hands it to the flow before
+  `DeepLinks`. `authenticated` with no `userId` asks for a name (`PATCH
+  /v0/profile`) before the server is kept. A malformed callback (any app can
+  send the redirect URI) is ignored, never thrown.
+- **Binding the sign-in** (API.md, Steve-approved): a method whose `tokenUrl`
+  or `refreshUrl` isn't on `authorizationUrl`'s origin (parsed scheme, host,
+  port) is refused before the browser (`OAuthMethod.oneSite`, "…would send your
+  sign-in to a different site…"). The attempt (`PendingOAuth`) keeps the origin
+  and the method as found; the credential keeps `refreshUrl`, `client_id`,
+  `resource`; nothing is re-read from the server. After the exchange and every
+  refresh the access token's JWT `aud` (string or array, signature not
+  checked) must name the server: same origin, path `/` with a trailing slash
+  added (`ServerAuthClient.audienceIs`); otherwise it is dropped unused ("This
+  sign-in is for a different server."). Token requests never follow redirects.
+- **One member per connection** (as iOS: origin + `userId`): the `userId` is
+  kept with the credential and on the `AgentConnection`. The same member
+  signing in again renews their connection; another member gets a new one,
+  and the connection they signed in again on is wiped (credentials, entry,
+  caches: `AgentSessions` deletes the caches of any connection that goes, open
+  or not, and sweeps orphans at start) and theirs opens. The server is asked
+  who it is first and the new credential saved next; only then is the list
+  replaced in one write and the old member's let go, so a cancelled or failed
+  sign-in leaves the old connection whole. Each sign-in has a generation
+  (`AgentConnections.grant`): a refresh of an older one that lands after a
+  sign-in is dropped and its refusal hands back the new token instead of an
+  auth failure; requests sign out only the generation they were made under
+  (`signedOut(…, grant)`), checked and written under one hold of the lock.
+- **Storage**: credentials are sealed by an AES-256-GCM Android Keystore key
+  (non-exportable, no user authentication, StrongBox when the phone has one,
+  else the TEE: `AndroidKeyStoreKeys`) in app-private preferences, which
+  `data_extraction_rules.xml` / `backup_rules.xml` keep out of cloud backup and
+  device transfer (`CredentialStorageTest`). A team server whose key is gone
+  (restored or moved) reads as signed out.
+- **Tokens**: the refresh token lives with the credentials (Keystore,
+  `ExpoSecureStore`); access tokens are in memory only (`AgentConnections.bearer`,
+  refreshed 60 s before expiry, one refresh at a time per connection, rotation
+  persisted). The refresh token goes only to the `refreshUrl` and `client_id`
+  recorded at sign-in. Credentials go only in `Authorization`, on SSE and
+  WebSockets too; no OkHttp client here follows redirects.
+- **Sign in again** (`SignInRule`): any 3xx but 304, any 401, or a 403 that
+  isn't Happy JSON (`application/json` with string `error` and `code`). A
+  Happy-JSON 401 first asks `GET /v0/authentication` with the same bearer
+  (`AgentClient.recover`); an edge's 401 stands. `AgentConnection.signInRequired`
+  stops the account's links at once (`AgentSession`) and home shows "Sign in
+  again", which reopens the flow replacing the same connection (and checks
+  the `instanceId` it had). Paired agents
+  keep 401 = Revoked.
+- **Tunnels**: over HTTPS, the in-app browser prefers the WebSocket twin of a
+  CONNECT route (`<route>/websocket`, `WebSocketTunnel`) when health reports
+  `capabilities.webSocketTunnels`; otherwise CONNECT once, and an edge's refusal
+  turns tunnels off for that client with a note (`browser_tunnels_blocked`).
+- **No device management.** There are no Android Enterprise managed
+  configurations (Steve's decision). Tailcat, the hosted relay and pairing by
+  code are switched on the server (`happy.toml`); the app only hides what the
+  agent reports as off. Analytics is always the person's own choice. A pairing
+  the agent refuses with `unsupported` (or an older daemon's 404) reads "Phone
+  pairing is turned off on this agent." (`AgentConnectionException.Reason.Disabled`).
+- **Instance-locked links** (§7, `agent/HappyUrls.kt`, `ui/connection/HappyLinks.kt`):
+  `HappyUrls` ports happy-agent-client's `happyLinks.ts` grammar case for case
+  (`HappyUrlsTest`) plus the external form `happy://<instanceId>/<internal URL
+  without happy://>`. Health's `instanceId` is kept on each `AgentConnection`.
+  From outside (`DeepLinks`), only an external link opens, and only on the
+  connection with that `instanceId` (switching to it first, through
+  `DeepLink.OnConnection`, since each account has its own back stack); none
+  matching says "This link belongs to a Happy server you're not connected to."
+  and never falls back. Internal Happy links and `happy-file://` from outside,
+  and malformed ones, open nothing. Inside an artifact a Happy link means that
+  connection; `openOutside` never hands a Happy URL to the system. Sharing a
+  bundled artifact's page shares its external link, and isn't offered when the
+  server has no `instanceId`. Chat doesn't render `happy://` links as links yet.
 
 ## Push
 
@@ -1032,9 +1131,26 @@ is `packages/happy-ios`. The wire keeps its own names
   checks its MAC before anything is kept; `AgentIdentity` reads health
   (protocol 27 or later) and `config.node`; `AgentConnections` keeps each
   connection's credentials Keystore-encrypted, apart from relay credentials.
-- **Transport** (`TailcatTransport`): tailcat-kotlin, one client
-  per agent connection and a fresh TCP stream to `server.tailcat:<port>` per
-  HTTP/1.1 request, framed by `HttpResponseParser`. It uses
+- **Transport** (`TailcatTransport`): tailcat-kotlin, and a fresh TCP
+  stream to `server.tailcat:<port>` per HTTP/1.1 request, framed by
+  `HttpResponseParser`. Each request says its `RequestCategory`, which
+  picks its client in the connection's `TailcatClients` (iOS's, same names):
+  one for `Realtime` (the event stream), one for `Query` (the default) and up
+  to eight for `File` (pictures and avatars, attachments, messages with
+  images, tool-call media, artifact files, and the in-app browser's
+  sockets). Each client is made on first use with a node key of its own,
+  fresh on every connect: the agent and the DERP relay tell clients apart by
+  node key, and a relay keeps one connection per key. A file goes to the
+  file client with the fewest requests in flight; another is made only while
+  every one is busy. A query has 35 s, a file 15 min (any one read or write
+  still 35 s). A failure resets only the client it happened on, so a broken
+  file client never drops the event stream; a stack out of connections
+  (`RESOURCE_LIMIT`) is busy, not gone, and is kept. A new call site that
+  moves bytes passes `RequestCategory.File` (`TailcatClientsTest` pins the
+  existing ones). `HttpsTransport` (an agent with a public URL) has no
+  clients: each socket is its own TLS connection tagged with its category,
+  so `reset(category)` closes only that category's, with the same
+  deadlines; `AgentEndpointTransport` passes the category on. It uses
   tailcat-kotlin's default DERP map (`https://tailcat.dev/derpmap.json`),
   cached in `noBackupFilesDir/tailcat/derpmap.json` (`FileDerpMapCache`):
   with no network and no cached map, connecting fails.

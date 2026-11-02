@@ -20,7 +20,7 @@ import UniformTypeIdentifiers
 /// Previewing, it is what a hold on the row shows over the sidebar, as
 /// Telegram previews a chat: the newest messages under the name in a
 /// capsule, nothing to type in or tap, and nothing marked read.
-final class ChatViewController: UIViewController, ComposeHosting {
+final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed {
     typealias Intro = IntroView.Mark
 
     private let session: Session
@@ -252,10 +252,9 @@ final class ChatViewController: UIViewController, ComposeHosting {
             view.addSubview(transcriptHeaderScrim)
         }
         // Back, the title, and Compose alone, a glass circle as Back is:
-        // the permission mode is on the detail the title opens.
-        navigationItem.rightBarButtonItems = HeaderBar.trailing([
-            .compose: HeaderBar.composeItem { [weak self] in self?.compose() },
-        ])
+        // the permission mode is on the detail the title opens. New work
+        // has Back alone until its first send.
+        showHeader(animated: false)
         card.configuration.showsAdd = true
         card.configuration.showsExpand = true
         card.configuration.addAccessibilityLabel = Strings.addPicture
@@ -380,15 +379,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
         tellReadsNewest(moving: false)
     }
 
-    /// In the window as the push starts: new work's keyboard comes up now,
-    /// with the push, as Messages' compose does, not after it.
+    /// In the window as the push starts: new work's keyboard comes up with
+    /// the push, as Messages' compose does, not after it.
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
         if previewing { return }
         #if DEBUG
         composeTrace?.event("isAppearing window=\(view.window != nil)")
         #endif
-        takeOpeningFocus()
+        // Pushed with the keyboard already coming (`KeyboardPush`), the
+        // composer takes it once the push is over, not inside it.
+        if !keyboardPushed { takeOpeningFocus() }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -400,12 +401,15 @@ final class ChatViewController: UIViewController, ComposeHosting {
         ultraKeyboard?.refresh()
         guard !previewing, let navigationController else { return }
         _ = navigationController
-        // New work: the keyboard comes up now if it couldn't with the push.
+        // New work: the keyboard comes up now if it couldn't with the push,
+        // or the composer takes it from the push's stand-in.
         takeOpeningFocus()
+        keyboardPushed = false
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        MessageLiftOverlay.putBack(from: self)
         #if DEBUG
         probe?.observePop()
         composeTrace?.event("willDisappear interactive=\(transitionCoordinator?.isInteractive == true)")
@@ -669,6 +673,20 @@ final class ChatViewController: UIViewController, ComposeHosting {
         #endif
     }
 
+    /// Pushed by `KeyboardPush`: the keyboard comes up with the push, held
+    /// by a stand-in until the push is over.
+    private var keyboardPushed = false
+
+    func keyboardPushWillStart(keyboardUp: Bool) {
+        keyboardPushed = true
+        // Laid out with the keyboard down; its notification, heard once
+        // the screen is in the window, carries the card up with it.
+        if !keyboardUp { ultraKeyboard?.startsDown = true }
+    }
+
+    /// Already heard: this screen's observers come after the push's.
+    func keyboardPushStarted(_ keyboard: Notification) {}
+
     /// The keyboard is this screen's: the composer's or the name's.
     private var ownsKeyboard: Bool {
         card.textView.isFirstResponder || newWorkPanel?.name.isFirstResponder == true
@@ -679,7 +697,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
     /// and goes.
     private func layoutNewWorkPanel(above card: CGRect) {
         guard let newWorkPanel, !newWorkPanelGone else { return }
-        let layout = newWorkPanel.layout(width: view.bounds.width, top: view.safeAreaInsets.top, bottom: card.minY)
+        let layout = newWorkPanel.layout(width: view.bounds.width, sides: LayoutInsets(view.safeAreaInsets), top: view.safeAreaInsets.top, bottom: card.minY)
         newWorkPanel.place(layout)
         newWorkPanel.isHidden = !layout.fits
     }
@@ -694,6 +712,19 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // never goes down in between.
         if newWorkPanel.name.isFirstResponder { card.focus() }
         newWorkPanel.dismiss()
+        showHeader(animated: true)
+    }
+
+    /// Compose, at the bar's right.
+    private lazy var composeItems = HeaderBar.trailing([
+        .compose: HeaderBar.composeItem { [weak self] in self?.compose() },
+    ])
+
+    /// New work's header is Back alone until its first send
+    /// (`ConversationHeader`); every other conversation's has its name and
+    /// Compose.
+    private func showHeader(animated: Bool) {
+        ConversationHeader.show(newTask == nil || newWorkPanelGone, title: header, items: composeItems, on: navigationItem, animated: animated)
     }
 
     /// Nothing typed or picked.
@@ -717,8 +748,8 @@ final class ChatViewController: UIViewController, ComposeHosting {
                 card.focus()
                 return
             }
-            card.blur()
-            ComposeNavigation.replace(self, with: NewWork.chat(session, task: task))
+            // The keyboard, up or not, goes to the new screen with its push.
+            ComposeNavigation.replace(self, with: NewWork.chat(session, task: task), traits: card.textView, keyboardUp: ownsKeyboard)
         }
     }
 
@@ -934,8 +965,14 @@ final class ChatViewController: UIViewController, ComposeHosting {
         }
     }
 
+    /// The transcript's width: the screen less the safe area's sides
+    /// (`ChatScreenLayout.list`), which its rows are planned at.
+    private var transcriptWidth: CGFloat {
+        LayoutInsets(view.safeAreaInsets).sides(of: view.bounds.size).width
+    }
+
     private var planKey: ChatPlanner.Key {
-        var key = ChatPlanner.Key(width: view.bounds.width, maxContentWidth: ContentWidth.maxWidth, environment: traitCollection.textEnvironment, references: subagentReferences, subagentTitles: chat.subagentTitles, pageHeights: pageHeights)
+        var key = ChatPlanner.Key(width: transcriptWidth, maxContentWidth: ContentWidth.maxWidth, environment: traitCollection.textEnvironment, references: subagentReferences, subagentTitles: chat.subagentTitles, pageHeights: pageHeights)
         // Only a failure card reads the composer's model; without one the
         // key stays the warm chat's, so its rows planned ahead are taken.
         if chat.items.contains(where: { if case .failure = $0.role { true } else { false } }) {
@@ -1016,6 +1053,28 @@ final class ChatViewController: UIViewController, ComposeHosting {
         let conversation = conversation
         Task { await conversation.answer(ask.picked) }
     }
+
+    /// The width changed (a rotation, the sidebar, a window drag): the rows
+    /// near the screen are planned again at the new width while the main
+    /// thread waits, within UltraView's in-place time limit, so the frame
+    /// that shows the new width shows them at it. The rest follow with the
+    /// whole transcript's plans, which take these.
+    private func planInPlace() {
+        let width = transcriptWidth
+        guard let planned, width > 0, abs(planned.key.width - width) > 0.5 else { return }
+        let ids = ultra.planIDsNearScreen
+        guard !ids.isEmpty else { return }
+        let started = CACurrentMediaTime()
+        let plans = planner.plansInPlace(ids, width: width, until: .now() + ultra.list.inPlaceResizeTimeLimit)
+        ultra.showInPlace(plans)
+        inPlaceMilliseconds = (CACurrentMediaTime() - started) * 1000
+        inPlaceRows = plans.count
+    }
+
+    /// The last width change's wait for the rows near the screen, for the
+    /// tests: main-thread milliseconds, and the rows planned in time.
+    private(set) var inPlaceMilliseconds: Double = 0
+    private(set) var inPlaceRows = 0
 
     /// Plans the rows off the main thread, then shows them in one frame.
     private func replan() {
@@ -1148,7 +1207,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
         let toggles = plan.toggles.map { name in
             [UIAccessibilityCustomAction(name: name) { [weak self] _ in self?.toggle(id); return true }]
         }
-        row.accessibilityCustomActions = toggles
+        // A long press's actions: Copy, and Select Text on its own screen.
+        let selects = plan.selection.map { selection in
+            [
+                UIAccessibilityCustomAction(name: Strings.Chat.copy) { _ in UIPasteboard.general.string = selection.whole; return true },
+                UIAccessibilityCustomAction(name: Strings.TextSelection.title) { [weak self] _ in
+                    self?.navigationController?.pushViewController(TextSelectionViewController(text: selection.whole), animated: true)
+                    return true
+                },
+            ]
+        }
+        row.accessibilityCustomActions = (toggles ?? []) + (selects ?? [])
         let cardsHosted: [UIView] = plan.proposals.compactMap { proposalViews["\(id)#\($0.artifactId)"] }.filter { $0.superview === row }
         for card in cardsHosted { row.bringSubviewToFront(card) }
         // A row with media reads as its message, then each picture or
@@ -1217,6 +1286,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         if previewing { return layoutPreview() }
+        planInPlace()
         replan()
         if firstFrame == nil {
             firstFrame = drawn
@@ -1224,7 +1294,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
             ultra.list.accessibilityIdentifier = "transcript"
         }
         timeShown()
-        header.maxWidth = ChatTitleLayout.maxWidth(barWidth: view.bounds.width)
+        header.maxWidth = ChatTitleLayout.maxWidth(barWidth: transcriptWidth)
         // From where the keyboard rests, not the finger dragging it: the
         // card keeps its shape through a drag and changes once it settles.
         let compact = compacts
@@ -1252,7 +1322,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
         // The transcript starts under the navigation bar and scrolls under
         // it. The list is inverted: its top edge is the composer's edge.
         if ultra.frame != view.bounds { ultra.frame = view.bounds }
-        ultra.setViewport(size: view.bounds.size, insets: UIEdgeInsets(top: screen.listBottom, left: 0, bottom: view.safeAreaInsets.top, right: 0),
+        ultra.setViewport(frame: screen.list, insets: UIEdgeInsets(top: screen.listBottom, left: 0, bottom: view.safeAreaInsets.top, right: 0),
                           keyboard: insetMotion)
         layoutTranscript()
         updateHeaderEdge()
@@ -1290,7 +1360,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
         previewTitle.frame = layout.title.offsetBy(dx: -layout.pill.minX, dy: -layout.pill.minY)
         ultra.frame = view.bounds
         // Inverted: the list's top edge is the card's foot.
-        ultra.setViewport(size: view.bounds.size, insets: UIEdgeInsets(top: layout.listBottom, left: 0, bottom: layout.listTop, right: 0))
+        ultra.setViewport(frame: view.bounds, insets: UIEdgeInsets(top: layout.listBottom, left: 0, bottom: layout.listTop, right: 0))
         layoutTranscript()
         previewFade.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: layout.fadeOpaque)
         previewFade.clearFrom = layout.fadeClear / max(1, layout.fadeOpaque)
@@ -1306,7 +1376,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
 
     private func layoutTranscript() {
         var introLayout: MakeStuffIntroLayout?
-        if intro != nil { introLayout = introView.layout(width: view.bounds.width) }
+        if intro != nil { introLayout = introView.layout(width: transcriptWidth) }
         // Steering the turn hasn't taken waits under the newest settled
         // row, as next in the queue (desktop's
         // `conversationPendingSteering`). What the agent is at is the
@@ -1326,7 +1396,7 @@ final class ChatViewController: UIViewController, ComposeHosting {
         }
         let folds = foldMoved && view.window != nil
         foldMoved = false
-        ultra.apply(settled + waiting, intro: opening, animated: wasTaken, moves: folds)
+        ultra.apply(settled + waiting, intro: opening, animated: wasTaken, moves: folds, streaming: chat.working, queued: waiting.count)
         updateJump()
     }
 
@@ -1407,10 +1477,8 @@ final class ChatViewController: UIViewController, ComposeHosting {
     }
 
     /// A send follows the transcript the person is actually reading.
-    var sendFollowsNewest: Bool {
-        let distance = ultra.distanceFromNewest
-        return SendFollow.Send(following: followsNewest, distanceFromEnd: distance).follows
-    }
+    /// A send now would fly in from the composer (`SendFollow`).
+    var sendFlies: Bool { ChatSendFlight.flies(distance: ultra.distanceFromNewest) }
 
     private func send() {
         guard !acceptingSend else { return }
@@ -1433,12 +1501,17 @@ final class ChatViewController: UIViewController, ComposeHosting {
         }
         acceptingSend = true
         Haptics.play(.send)
-        // A reader at or near the end follows it there; one reading further
-        // up stays where they are. The transcript is never lifted.
+        // Telegram's send: the reader is carried to the end; at the end
+        // the message flies in from the composer, from history it arrives
+        // with the scroll. The transcript is never lifted.
         let id = ClientID.make()
-        if sendFollowsNewest {
+        if sendFlies {
+            ultra.flight = ChatSendFlight(source: ChatSendFlight.source(from: card, in: view), host: view, message: id)
             followsNewest = true
             ultra.follow()
+        } else {
+            followsNewest = true
+            ultra.scrollToNewest(animated: !UIAccessibility.isReduceMotionEnabled)
         }
         let conversation = conversation
         let store = session.store
@@ -1988,6 +2061,22 @@ extension ChatViewController: AgentChatTranscriptHost {
     }
 
     func transcriptHeld(_ action: ChatRowAction, in view: UIView, frame: CGRect, at point: CGPoint) {
+        // A message lifts, Telegram's way, with Copy and Select.
+        if !previewing, let plan = (view as? ChatPlanView)?.plan, let selection = plan.selection, let window = view.window {
+            switch action {
+            case .copyMenu, .markdownSelectable:
+                let transcript = ultra
+                let source = MessageLiftSource(
+                    plan: plan, selection: selection,
+                    canvas: { [weak transcript] in transcript?.canvas(forPlan: plan.id) },
+                    setLifted: { [weak transcript] lifted in transcript?.liftedId = lifted ? plan.id : nil },
+                    host: self
+                )
+                if MessageLiftOverlay.present(source, in: window) != nil { return }
+            default:
+                break
+            }
+        }
         hold(action)
     }
 }

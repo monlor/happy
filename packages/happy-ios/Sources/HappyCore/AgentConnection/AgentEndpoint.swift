@@ -44,7 +44,9 @@ actor AgentEndpoint {
 
     @discardableResult
     func apply(_ advertisement: AgentEndpointAdvertisement, from source: Snapshot) async throws -> Bool {
-        guard !retired, !changing, source.revision == revision,
+        // A signed-in server's origin is where its person signed in; a
+        // daemon never moves the bearer somewhere else.
+        guard !retired, !changing, source.revision == revision, credentials.signIn == nil,
               case .publicUrl(let url) = advertisement, url != credentials.publicUrl else { return false }
         changing = true
         defer { changing = false }
@@ -106,8 +108,12 @@ actor AgentEndpointTransport: AgentTransport {
     }
 
     func request(method: String, path: String, credential: String, body: Data?, headers: [String: String]) async throws -> HTTP1Response {
+        try await request(method: method, path: path, credential: credential, body: body, headers: headers, category: .query)
+    }
+
+    func request(method: String, path: String, credential: String, body: Data?, headers: [String: String], category: RequestCategory) async throws -> HTTP1Response {
         let (base, snapshot) = try await current()
-        let response = try await base.request(method: method, path: path, credential: credential, body: body, headers: headers)
+        let response = try await base.request(method: method, path: path, credential: credential, body: body, headers: headers, category: category)
         if method == "GET", path == "/v0/config", response.status == 200, credential == snapshot.credentials.deviceToken {
             let advertisement = try AgentEndpointAdvertisement.decode(response.body)
             let changed = try await endpoint.apply(advertisement, from: snapshot)
@@ -122,11 +128,17 @@ actor AgentEndpointTransport: AgentTransport {
     func send(method: String, path: String, credential: String, body: Data, upload: Bool, sent: @escaping @Sendable (Int) -> Void) async throws -> HTTP1Response {
         try await current().0.send(method: method, path: path, credential: credential, body: body, upload: upload, sent: sent)
     }
+    func send(method: String, path: String, credential: String, body: Data, category: RequestCategory, sent: @escaping @Sendable (Int) -> Void) async throws -> HTTP1Response {
+        try await current().0.send(method: method, path: path, credential: credential, body: body, category: category, sent: sent)
+    }
     func stream(path: String, credential: String, headers: [String: String]) async throws -> HTTP1Stream {
         try await current().0.stream(path: path, credential: credential, headers: headers)
     }
     func browserConnection() async throws -> any BrowserStream { try await current().0.browserConnection() }
+    func proxyTunnel(_ path: String, credential: String) async throws -> any BrowserStream { try await current().0.proxyTunnel(path, credential: credential) }
+    func bearer(_ credential: String) async throws -> String { try await current().0.bearer(credential) }
     func reset() async { await selected?.0.reset() }
+    func reset(_ category: RequestCategory) async { await selected?.0.reset(category) }
     func close() async {
         closed = true
         await endpoint.removeObserver(id)

@@ -26,11 +26,66 @@ actor ChatPlanner {
         var modelNames: [String: String] = [:]
     }
 
+    /// A row as it was planned, and what from.
+    struct Planned: @unchecked Sendable {
+        var item: ChatItem
+        var key: Key
+        var copied: Bool
+        var opened: Bool
+        var proposals: [ProposalShown?]
+        var plan: ChatRowPlan
+    }
+
+    final class Cache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var rows: [String: Planned] = [:]
+
+        subscript(id: String) -> Planned? {
+            get { lock.withLock { rows[id] } }
+            set { lock.withLock { rows[id] = newValue } }
+        }
+
+        var plans: [String: ChatRowPlan] { lock.withLock { rows.mapValues(\.plan) } }
+
+        func replace(with next: [String: Planned]) {
+            lock.withLock {
+                // A row planned again at another width while these were
+                // planned at the old one is kept for the next pass.
+                var next = next
+                for id in adopted {
+                    guard let row = rows[id], let planned = next[id], planned.item == row.item, planned.key != row.key else { continue }
+                    next[id] = row
+                }
+                adopted = []
+                rows = next
+            }
+        }
+
+        private var adopted: Set<String> = []
+
+        /// `next` in place of `row`, if `row` is still what is kept.
+        func adopt(_ next: Planned, replacing row: Planned, id: String) {
+            lock.withLock {
+                guard let kept = rows[id], kept.plan === row.plan else { return }
+                rows[id] = next
+                adopted.insert(id)
+            }
+        }
+    }
+
     /// An inline page's height until it has measured itself.
     static let pageHeight: CGFloat = 120
 
     private let syntax: CodeSyntaxService
-    private var cache: [String: (item: ChatItem, key: Key, copied: Bool, opened: Bool, proposals: [ProposalShown?], plan: ChatRowPlan)] = [:]
+    /// Each row as last planned, by item ID. Behind a lock rather than the
+    /// actor, so a width change can plan rows again while the main thread
+    /// waits (`plansInPlace`).
+    private let cache = Cache()
+    /// The time each person's message first showed, which it keeps while
+    /// it is shown: the computer's time for a send replaces this phone's
+    /// when it is taken, and may be a minute on ("12:59" to "1:00"), which
+    /// would widen the bubble or move the time to a line of its own.
+    private var times: [String: Double?] = [:]
 
     init(syntax: CodeSyntaxService) {
         self.syntax = syntax
@@ -39,14 +94,19 @@ actor ChatPlanner {
     /// `proposals` are the sidebar proposals the items show, as they stand;
     /// `opened` the other agents' messages opened to read.
     func plans(_ items: [ChatItem], key: Key, copied: String?, opened: Set<String> = [], proposals: [String: ProposalShown] = [:]) -> [ChatRowPlan] {
-        var next: [String: (item: ChatItem, key: Key, copied: Bool, opened: Bool, proposals: [ProposalShown?], plan: ChatRowPlan)] = [:]
+        var next: [String: Planned] = [:]
         var plans: [ChatRowPlan] = []
         // Only a failure card reads the composer's model: another pick
         // plans no other row again.
         var others = key
         others.switchTarget = nil
         others.modelNames = [:]
-        for item in items {
+        var shownTimes: [String: Double?] = [:]
+        for var item in items {
+            if item.role == .user {
+                if let first = times[item.id] { item.time = first }
+                shownTimes[item.id] = item.time
+            }
             let isCopied = copied == item.id
             let isOpened = opened.contains(item.id)
             let shown = item.proposalIds.map { proposals[$0] }
@@ -58,11 +118,47 @@ actor ChatPlanner {
             } else {
                 plan = Self.plan(item, key: reads, copied: isCopied, opened: isOpened, syntax: syntax, proposals: proposals)
             }
-            next[item.id] = (item, reads, isCopied, isOpened, shown, plan)
+            next[item.id] = Planned(item: item, key: reads, copied: isCopied, opened: isOpened, proposals: shown, plan: plan)
             if plan.size.height > 0 { plans.append(plan) }
         }
-        cache = next
+        cache.replace(with: next)
+        times = shownTimes
+        // The newest of the agent's words may be streaming: where they are
+        // is worked out here, off the main thread, for showing them as
+        // they come.
+        plans.last(where: \.revealable)?.warmReveal()
         return plans
+    }
+
+    /// Plans the rows `ids` again at `width`, each as it was last planned
+    /// but for the width, while the main thread waits, until `deadline` at
+    /// the latest: a width change shows them at the new width in its own
+    /// frame. The rows plan side by side, off the main thread. Their plans
+    /// are kept for the next `plans`, which takes them for rows that
+    /// haven't changed meanwhile; a row not planned in time is left out.
+    nonisolated func plansInPlace(_ ids: [String], width: CGFloat, until deadline: DispatchTime) -> [String: ChatRowPlan] {
+        let rows = ids.compactMap { id in self.cache[id].map { (id, $0) } }.filter { abs($0.1.key.width - width) > 0.5 }
+        guard !rows.isEmpty else { return [:] }
+        let cache = cache, syntax = syntax
+        let planned = Cache()
+        let group = DispatchGroup()
+        for (id, row) in rows {
+            group.enter()
+            DispatchQueue.global(qos: .userInteractive).async {
+                defer { group.leave() }
+                var key = row.key
+                key.width = width
+                var proposals: [String: ProposalShown] = [:]
+                for (proposal, shown) in zip(row.item.proposalIds, row.proposals) { proposals[proposal] = shown }
+                var next = row
+                next.key = key
+                next.plan = Self.plan(row.item, key: key, copied: row.copied, opened: row.opened, syntax: syntax, proposals: proposals)
+                cache.adopt(next, replacing: row, id: id)
+                planned[id] = next
+            }
+        }
+        _ = group.wait(timeout: deadline)
+        return planned.plans
     }
 
     static func plan(_ item: ChatItem, key: Key, copied: Bool, opened: Bool = false, syntax: CodeSyntaxService, proposals: [String: ProposalShown] = [:]) -> ChatRowPlan {
@@ -84,7 +180,7 @@ actor ChatPlanner {
         let text = HappyReferences.plain(item.text, view: key.references.view)
         switch item.role {
         case .agent:
-            return Self.body(item, key: key, syntax: syntax, proposals: proposals) {
+            return Self.body(item, key: key, syntax: syntax, proposals: proposals, revealable: true) {
                 MessageLayout.agent(width: width, maxContentWidth: key.maxContentWidth, parts: $0)
             }
         case .user:
@@ -114,19 +210,40 @@ actor ChatPlanner {
             // On its way: each picture shows how far it is, and can be
             // taken out; one that failed is sent again with a tap.
             let uploading = item.delivery == .sending || failure
+            // Telegram's outgoing status: the clock until the computer has
+            // it, a check once it does, two once the agent took it into a run.
+            let delivery: MessageDelivery = switch item.delivery {
+            case .sending: .sending
+            case .pending: .received
+            case .sent: .accepted
+            case .failed: .failed
+            }
+            let onMedia = body == nil
+            let ink = onMedia ? Palette.deliveryOnMedia : Palette.deliveryInk
+            let time = MessageTime.text(item.time, ink: ink, in: environment)
+            let status = MessageTime.status(time, in: environment)
             let layout = MessageLayout.user(
                 width: width, maxContentWidth: key.maxContentWidth, text: body?.measurable,
                 fold: body.map { _ in .init(preview: preview.measurable, control: control.measurable, opened: opened, lineHeight: ChatTextStyles.text.lineHeight ?? 24) },
-                pictures: pictures.map(\.image), showsStatus: failure
+                // A refusal is the red mark in the slot, as Telegram's: no
+                // line under the bubble, so the row never grows when a send fails.
+                pictures: pictures.map(\.image), showsStatus: false,
+                delivery: status, trailing: body?.trailing
             )
             var items: [ChatDrawItem] = []
             var hits: [ChatHit] = []
             if let bubble = layout.bubble {
                 items.append(.box(ChatBox(frame: bubble, fill: Palette.userBubble, radius: M.bubbleRadius)))
                 if layout.foldControl != nil { hits.append(ChatHit(frame: bubble, action: .toggleTool(item.id))) }
+                else if failure { hits.append(ChatHit(frame: bubble, action: .retry(localId: item.id))) }
                 hits.append(ChatHit(frame: bubble, action: .copyMenu(text), hold: true))
             }
-            if let body, let frame = layout.text { items.append(.text((layout.cut ? preview : body).layout(for: frame), frame)) }
+            var selectable: [ChatSelectable.Text] = []
+            if let body, let frame = layout.text {
+                let drawn = (layout.cut ? preview : body).layout(for: frame)
+                items.append(.text(drawn, frame))
+                selectable.append(.init(layout: drawn, frame: frame))
+            }
             if let frame = layout.foldControl { items.append(.text(control.layout(for: frame), frame)) }
             for (picture, frame) in zip(pictures, layout.pictures) {
                 let key = MediaLoader.sentKey(picture.id)
@@ -142,20 +259,23 @@ actor ChatPlanner {
                     hits.append(ChatHit(frame: frame, action: .openMedia(key)))
                 }
             }
-            if failure, let frame = layout.status {
-                let line = ChatTextLayout(
-                    ChatTextStyles.pendingStatus.string(Strings.sendFailed, color: Palette.statusError, alignment: .right, lineBreakMode: .byTruncatingTail, in: environment),
-                    width: frame.width, maxLines: 1
-                )
-                items.append(.text(line, frame))
-                hits.insert(ChatHit(frame: frame, action: .retry(localId: item.id)), at: 0)
+            // The mark says where it is, so the bubble is never dimmed.
+            if let box = layout.delivery {
+                if let pill = layout.deliveryPill {
+                    items.append(.box(ChatBox(frame: pill, fill: Palette.deliveryPill, radius: pill.height / 2)))
+                }
+                let placed = ChatDeliveryMark.items(status, box: box, time: time, state: delivery, tint: ink, message: item.id)
+                items += placed.items
+                if failure { hits.insert(ChatHit(frame: placed.mark.insetBy(dx: -8, dy: -8), action: .retry(localId: item.id)), at: 0) }
             }
-            // On its way, or waiting for the agent to take it: dimmed, never
-            // moved. Pictures still uploading say so themselves, undimmed.
-            let rings = uploading && !pictures.isEmpty
-            let alpha: CGFloat = !rings && (item.delivery == .sending || item.delivery == .pending) ? 0.6 : 1
             let label = [text, failure ? Strings.sendFailed : ""].filter { !$0.isEmpty }.joined(separator: ", ")
-            return ChatRowPlan(id: item.id, size: layout.size, items: items, hits: hits, alpha: alpha, accessibilityLabel: label, toggles: layout.foldControl == nil ? nil : toggles)
+            let shape = layout.bubble.map { ChatBox(frame: $0, fill: Palette.userBubble, radius: M.bubbleRadius) }
+                ?? ChatBox(frame: layout.pictures.reduce(CGRect.null) { $0.union($1) })
+            let flight = ChatRowFlight(bubble: shape, text: layout.text, status: layout.delivery, media: !pictures.isEmpty)
+            let selection = layout.bubble.flatMap { bubble in
+                selectable.isEmpty ? nil : ChatSelectable(texts: selectable, whole: text, frame: bubble, card: false)
+            }
+            return ChatRowPlan(id: item.id, size: layout.size, items: items, hits: hits, accessibilityLabel: label, toggles: layout.foldControl == nil ? nil : toggles, flight: flight, selection: selection)
         case .collaborator, .failure, .tool, .turnEnd, .trace, .question:
             // Planned above.
             return ChatRowPlan(id: item.id, size: CGSize(width: width, height: 0), items: [])
@@ -166,7 +286,7 @@ actor ChatPlanner {
     /// agent text (Figtree 16/24 markdown, soft breaks as spaces, blocks 8
     /// apart, no copy button: a long press selects instead) and the
     /// pictures, recordings, files and artifacts where they were presented.
-    static func body(_ item: ChatItem, key: Key, syntax: CodeSyntaxService, proposals: [String: ProposalShown], layout: ([MessageLayout.Part]) -> MessageLayout) -> ChatRowPlan {
+    static func body(_ item: ChatItem, key: Key, syntax: CodeSyntaxService, proposals: [String: ProposalShown], revealable: Bool = false, layout: ([MessageLayout.Part]) -> MessageLayout) -> ChatRowPlan {
         let environment = key.environment
         let text = HappyReferences.plain(item.text, view: key.references.view)
         var parts: [MessageLayout.Part] = []
@@ -226,6 +346,7 @@ actor ChatPlanner {
         let layout = layout(parts)
         var items: [ChatDrawItem] = []
         var hits: [ChatHit] = []
+        var selectable: [ChatSelectable.Text] = []
         var proposals: [(artifactId: String, layout: SidebarProposalLayout, frame: CGRect)] = []
         func media(_ media: Media, _ frame: CGRect) {
             items.append(.media(ChatMedia(key: media.key, isVideo: media.isVideo, thumbhash: media.item.thumbhash, label: Strings.media(isVideo: media.isVideo, name: media.item.name)), frame: frame))
@@ -250,6 +371,7 @@ actor ChatPlanner {
                 let drawn = markdown.draw(placed, origin: origin)
                 items += drawn.items
                 hits += drawn.hits
+                selectable += drawn.texts
             case (.media(let frames), .gallery(let gallery)):
                 for (one, frame) in zip(gallery, frames) { media(one, frame) }
             case (.tree(let tree, let origin), .tree(let planned)):
@@ -276,7 +398,10 @@ actor ChatPlanner {
             }
         }
         // Each picture and recording reads as itself (`ChatMediaView`).
-        return ChatRowPlan(id: item.id, size: layout.size, items: items, hits: hits, accessibilityLabel: spoken.joined(separator: "\n\n"), proposals: proposals)
+        return ChatRowPlan(
+            id: item.id, size: layout.size, items: items, hits: hits, accessibilityLabel: spoken.joined(separator: "\n\n"), proposals: proposals,
+            revealable: revealable, selection: .covering(items, texts: selectable, whole: text)
+        )
     }
 
     /// What a failure card's action does, as desktop's card offers it:

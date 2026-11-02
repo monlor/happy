@@ -108,7 +108,7 @@ class AgentConnectionsTest {
         assertEquals(200, client.request("GET", "/v0/health", original.deviceToken).status)
         val accepting = transport
         transport = { object : Transport by daemon {
-            override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>) = TransportResponse(401)
+            override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>, category: RequestCategory) = TransportResponse(401)
         } }
         try { accounts.add(original, "Mac"); fail("revoked pairing accepted") }
         catch (error: AgentConnectionException) { assertEquals(AgentConnectionException.Reason.Revoked, error.reason) }
@@ -185,7 +185,7 @@ class AgentConnectionsTest {
     @Test
     fun aPictureThatIsntOneLeavesTheAgentReachable() = runBlocking {
         transport = { object : Transport by daemon {
-            override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>) =
+            override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>, category: RequestCategory) =
                 if (path == "/v0/node/avatar") TransportResponse(200, mapOf("content-type" to "text/html"), "<html>".toByteArray())
                 else daemon.request(method, path, credential, body, headers)
         } }
@@ -207,9 +207,21 @@ class AgentConnectionsTest {
     }
 
     @Test
+    fun theInstanceIdExternalLinksAreLockedToIsKeptFromHealth() = runBlocking {
+        val accounts = accounts()
+        assertEquals(null, accounts.add(credentials(), "Steve's Mac").instanceId)
+        daemon.instanceId = "k3x9q2m7p0a4b8c1d5e6f7g2"
+        assertEquals("k3x9q2m7p0a4b8c1d5e6f7g2", accounts.add(credentials(), "Steve's Mac").instanceId)
+        assertEquals("k3x9q2m7p0a4b8c1d5e6f7g2", accounts().accounts.value.single().instanceId)
+        // Anything but a well-formed id counts as none; the one known stays.
+        daemon.instanceId = "Not-An-Instance"
+        assertEquals("k3x9q2m7p0a4b8c1d5e6f7g2", accounts.add(credentials(), "Steve's Mac").instanceId)
+    }
+
+    @Test
     fun anUnreachableAgentIsKeptUnderTheCodesName() = runBlocking {
         transport = { object : Transport by daemon {
-            override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>) =
+            override suspend fun request(method: String, path: String, credential: String, body: ByteArray?, headers: Map<String, String>, category: RequestCategory) =
                 throw IOException("offline")
         } }
         assertEquals("Steve's Mac", accounts().add(credentials(), "Steve's Mac").name)
