@@ -12,6 +12,7 @@ import com.slopus.happy.diagnostics.traced
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -87,6 +88,8 @@ class AgentSession internal constructor(
     parent: CoroutineScope,
     makeTransport: (com.slopus.happy.connection.AgentConnectionCredentials) -> Transport = { agentTransport(it.address, it.port, it.publicUrl, it.tailcatAvailable != false) },
     private val random: Random = Random.Default,
+    /** Plays desktop's completion chime ([CompletionWatch] decides when). */
+    private val chime: () -> Unit = {},
 ) {
     private val scope = CoroutineScope(parent.coroutineContext + SupervisorJob(parent.coroutineContext[Job]) + Dispatchers.IO)
     private val linkLock = Mutex()
@@ -164,6 +167,17 @@ class AgentSession internal constructor(
         scope.launch { setSetting(DesktopSettings.PROJECTS_VISIBILITY, DesktopSettings.projectsVisibility(hidden)) }
     }
 
+    /** Desktop's Completion sound for this connection, which the chime follows ([CompletionWatch]). */
+    val completionSound: StateFlow<CompletionSound> = catalogState
+        .map { DesktopSettings.completionSound(it.settingValues) }
+        .distinctUntilChanged()
+        .stateIn(scope, SharingStarted.Eagerly, DesktopSettings.completionSound(catalogState.value.settingValues))
+
+    /** Sets the Completion sound, here and on every device this connection is used from. */
+    fun setCompletionSound(sound: CompletionSound) {
+        scope.launch { setSetting(DesktopSettings.COMPLETION_SOUND, DesktopSettings.completionSoundValue(sound)) }
+    }
+
     /**
      * Sets one of the person's user settings (API.md, `PUT /v0/user-settings/:key`):
      * shown at once, kept on this phone first, then sent with the time the
@@ -181,7 +195,17 @@ class AgentSession internal constructor(
     /** The person's own profile on this agent, as Settings' Profile row and page show it. */
     val profile: AgentProfileSource by lazy { AgentProfileSource(client, events, scope) }
 
+    /** The computer's accounts' plan usage, followed while a composer shows ([AgentUsageSource.follow]). */
+    val usage: AgentUsageSource by lazy {
+        AgentUsageSource({ client.decode<JsonObject>("GET", "/v0/usage") }, events, scope) { accounts ->
+            client.send("POST", "/v0/usage/refresh", buildJsonObject { put("providerIds", JsonArray(accounts.map(::JsonPrimitive))) })
+        }
+    }
+
     /** Bots' pictures, as home's rows draw them. */
+    /** Chat media kept on this phone for good, beside the catalog (iOS `MediaLibrary.agent`); null where nothing is kept. */
+    val media: com.slopus.happy.media.MediaLibrary? = cacheFile?.let { com.slopus.happy.media.MediaLibrary(File(it.parentFile, it.nameWithoutExtension + ".media")) }
+
     val pictures = AgentPictures(connectionId, cacheFile?.let { File(it.parentFile, it.nameWithoutExtension + ".pictures") }) { path -> client.send("GET", path, category = RequestCategory.File).body }
 
     /** One conversation as the catalog knows it, live; null while unknown. */
@@ -268,8 +292,9 @@ class AgentSession internal constructor(
             settingsQueued.receiveAsFlow().collect { deliverSettings() }
         }
         if (cacheFile != null) {
+            // Undispatched: watching from the first value, so a load that comes first is not dropped as it.
             @OptIn(FlowPreview::class)
-            scope.launch {
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
                 catalogState.drop(1).filter { it.loaded }.debounce(1_000).collect { writeCache(it) }
             }
         }
@@ -279,6 +304,7 @@ class AgentSession internal constructor(
     suspend fun close() {
         scope.cancel()
         withContext(kotlinx.coroutines.NonCancellable) {
+            media?.stop()
             linkLock.withLock { route?.second?.close(); route = null }
         }
     }
@@ -363,6 +389,8 @@ class AgentSession internal constructor(
         }
     }
 
+    private val completions = CompletionWatch()
+
     /** The journal from the catalog's cursor until the stream ends or fails. */
     private suspend fun follow(onConnected: () -> Unit) {
         val stream = client.events(catalogState.value.cursor)
@@ -388,6 +416,8 @@ class AgentSession internal constructor(
                         }
                         apply(event)
                     }
+                    val listed = { agentId: String -> feed.value.conversations.any { it.agentId == agentId } }
+                    if (completions.finished(event, catalogState.value, listed, System.currentTimeMillis()) != null) chime()
                     eventFlow.emit(event)
                 }
             }
