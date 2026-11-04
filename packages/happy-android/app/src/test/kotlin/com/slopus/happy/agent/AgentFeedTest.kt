@@ -1,5 +1,7 @@
 package com.slopus.happy.agent
 
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -54,7 +56,7 @@ class AgentFeedTest {
         val feed = AgentFeed.derive(catalog(sample))
         assertEquals(
             listOf(
-                "section-places", "artifacts",
+                "section-places", "artifacts", "todos",
                 "section-bots", "agent-ab1", "agent-as1", "agent-as2", "agent-ab2",
                 "section-tasks", "agent-at2", "agent-at1",
                 "section-projects", "folder-p1", "agent-ap1", "folder-w1", "agent-aw1",
@@ -85,7 +87,7 @@ class AgentFeedTest {
         val hidden = catalog(sample.with("userSettings", kotlinx.serialization.json.JsonArray(listOf(Wire.projectsHidden(true, "v2")))))
         assertTrue(hidden.projectsHidden)
         assertEquals(
-            listOf("section-places", "artifacts", "section-bots", "agent-ab1", "agent-as1", "agent-as2", "agent-ab2", "section-tasks", "agent-at2", "agent-at1"),
+            listOf("section-places", "artifacts", "todos", "section-bots", "agent-ab1", "agent-as1", "agent-as2", "agent-ab2", "section-tasks", "agent-at2", "agent-at1"),
             keys(hidden),
         )
 
@@ -189,6 +191,33 @@ class AgentFeedTest {
         assertFalse(rows.getValue("ab1").happy)
         assertTrue(rows.getValue("ab2").happy)
         assertEquals("t1", rows.getValue("at1").seed)
+        // The Chief of Staff goes by the name the computer gives its bot (desktop ca4c303f), not one guessed.
+        assertEquals("Happy", feed.chiefOfStaffName())
+        assertEquals(null, AgentFeed.derive(catalog(Wire.bootstrap(bots = listOf(Wire.bot("b1", "Scout", Wire.agent("ab1")))))).chiefOfStaffName())
+    }
+
+    /** Desktop's bot attention (731c8bbc, 1dc8b566; iOS SidebarRows): hidden leaves the bot out, muted quiets it and its subtasks. */
+    @Test
+    fun aBotHiddenOnTheDesktopIsLeftOutAndAMutedOneIsQuiet() {
+        fun attention(bot: String, muted: Boolean = false, hidden: Boolean = false) = Wire.setting(
+            DesktopSettings.BOT_PREFIX + bot, buildJsonObject { put("muted", muted); put("hidden", hidden) }, "v1",
+        )
+        val feed = AgentFeed.derive(catalog(Wire.bootstrap(
+            bots = listOf(
+                Wire.bot("b1", "Loud", Wire.agent("ab1", status = "running", unread = true, question = true)),
+                Wire.bot("b2", "Quiet", Wire.agent("ab2", status = "running", unread = true, question = true, wait = true,
+                    subtasks = listOf(Wire.agent("as2", title = "Sub", status = "running", unread = true, subtask = true, parent = "ab2"))), orderKey = "2"),
+                Wire.bot("b3", "Hidden", Wire.agent("ab3"), orderKey = "3"),
+            ),
+            userSettings = listOf(attention("b2", muted = true), attention("b3", hidden = true)),
+        )))
+        val rows = feed.conversations.associateBy { it.agentId }
+        assertEquals(setOf("ab1", "ab2", "as2"), rows.keys)
+        assertTrue(rows.getValue("ab1").unread && rows.getValue("ab1").blocked)
+        for (quiet in listOf("ab2", "as2")) {
+            val row = rows.getValue(quiet)
+            assertFalse(quiet, row.working || row.unread || row.blocked || row.waiting)
+        }
     }
 
     @Test
@@ -272,8 +301,8 @@ class AgentFeedTest {
         assertFalse(AgentFeed.derive(AgentCatalog()).loaded)
         val empty = AgentFeed.derive(catalog(Wire.bootstrap()))
         assertTrue(empty.loaded)
-        // Artifacts is always there, as on desktop; nothing else is.
-        assertEquals(listOf("section-places", "artifacts"), empty.rows.map { it.key })
+        // The fixed Places rows remain even before anything is created.
+        assertEquals(listOf("section-places", "artifacts", "todos"), empty.rows.map { it.key })
     }
 
     @Test
@@ -290,10 +319,26 @@ class AgentFeedTest {
         )
         val rows = AgentFeed.derive(catalog(bootstrap)).rows
         assertEquals(
-            listOf("section-places", "artifacts", "surface-s2", "surface-s3", "surface-s1", "section-bots", "agent-ab1"),
+            listOf("section-places", "artifacts", "todos", "surface-s2", "surface-s3", "surface-s1", "section-bots", "agent-ab1"),
             rows.map { it.key },
         )
-        assertEquals(AgentFeedRow.Surface("s3", "Week", "calendar"), rows[3])
+        assertEquals(AgentFeedRow.Surface("s3", "Week", "calendar"), rows[4])
+    }
+
+    @Test
+    fun aComputerWithNoAccountListsItsOnePersonsSurfaces() {
+        fun local(id: String, name: String, orderKey: String) = buildJsonObject {
+            put("id", id); put("name", name); put("type", "todo"); put("status", "active"); put("archivedAt", JsonNull)
+            put("members", JsonArray(listOf(buildJsonObject { put("userId", JsonNull); put("orderKey", orderKey) })))
+        }
+        val bootstrap = JsonObject(
+            Wire.bootstrap(surfaces = listOf(local("s1", "Groceries", "2"), local("s2", "Launch", "1"))) +
+                ("profile" to buildJsonObject { put("userId", JsonNull) }),
+        )
+        assertEquals(
+            listOf("section-places", "artifacts", "todos", "surface-s2", "surface-s1"),
+            AgentFeed.derive(catalog(bootstrap)).rows.map { it.key },
+        )
     }
 
     @Test

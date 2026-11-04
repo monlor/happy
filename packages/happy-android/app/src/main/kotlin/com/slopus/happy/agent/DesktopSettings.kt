@@ -14,6 +14,11 @@ import kotlinx.serialization.json.put
  * change on the desktop shows here and one made here shows there.
  */
 object DesktopSettings {
+    /** Auto-join defaults on; enabling clears the override, as Happy Desktop does. */
+    fun autoJoin(values: Map<String, JsonElement>, kind: AutoJoinKind): Boolean = values[kind.key] != JsonPrimitive(false)
+
+    fun autoJoinValue(enabled: Boolean): JsonElement = if (enabled) JsonNull else JsonPrimitive(false)
+
     /** Whether the sidebar, and so home, lists the projects: `{"projectsHidden": true}` hides them. */
     const val PROJECTS_VISIBILITY = "happy-desktop.projectsVisibility"
 
@@ -42,6 +47,14 @@ object DesktopSettings {
         CompletionSound.Focused -> JsonPrimitive("focused")
         CompletionSound.Never -> JsonPrimitive("never")
     }
+
+    /** Whether the person hid bot [botId] on the desktop: home leaves it out (iOS SidebarRows, desktop 1dc8b566). */
+    fun botHidden(values: Map<String, JsonElement>, botId: String): Boolean =
+        (values[BOT_PREFIX + botId] as? JsonObject)?.get("hidden") == JsonPrimitive(true)
+
+    /** Whether the person muted bot [botId]: home lists it, its subtasks too, with no activity or unread (desktop 731c8bbc). */
+    fun botMuted(values: Map<String, JsonElement>, botId: String): Boolean =
+        (values[BOT_PREFIX + botId] as? JsonObject)?.get("muted") == JsonPrimitive(true)
 
     /** Whether the person muted or hid bot [botId]: it never chimes, whatever its connection says. */
     fun botQuiet(values: Map<String, JsonElement>, botId: String): Boolean {

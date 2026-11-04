@@ -1,21 +1,32 @@
 package com.slopus.happy.ui.home
 
+import com.slopus.happy.ui.onboarding.DESKTOP_URL
+
+import androidx.compose.ui.platform.LocalUriHandler
+
+import com.slopus.happy.ui.connect.LocalAddFlow
+
+import com.slopus.happy.ui.migration.DesktopMigrationSpec
+
+import com.slopus.happy.ui.migration.DesktopMigrationScreen
+
+import com.slopus.happy.ui.migration.DesktopMigrationRoute
+
+import com.slopus.happy.ui.migration.MigrationPath
+
 import com.slopus.happy.ui.page
 import androidx.activity.compose.ReportDrawnWhen
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalResources
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraphBuilder
@@ -23,6 +34,11 @@ import androidx.navigation.NavHostController
 import androidx.navigation.toRoute
 import com.slopus.happy.AppGraph
 import com.slopus.happy.BuildConfig
+import com.slopus.happy.chat.ComposerModeResolver
+import com.slopus.happy.connection.accountLinkState
+import com.slopus.happy.net.ConnectionStatus
+import com.slopus.happy.ui.chat.rememberShownLinkState
+import com.slopus.happy.ui.connection.rememberNetworkPath
 import com.slopus.happy.model.Settings
 import com.slopus.happy.model.gitStatusKey
 import com.slopus.happy.model.parseJsonObject
@@ -44,10 +60,13 @@ import com.slopus.happy.ui.onboarding.LinkComputerChecklist
 import com.slopus.happy.ui.session.DuplicateSheet
 import com.slopus.happy.ui.session.SessionInfoActions
 import com.slopus.happy.ui.session.SessionInfoLive
+import com.slopus.happy.ui.session.SessionInfoPermission
 import com.slopus.happy.ui.session.SessionInfoRoute
 import com.slopus.happy.ui.session.SessionInfoScreen
+import com.slopus.happy.model.resolveAvatar
 import com.slopus.happy.ui.settings.ChangelogRoute
-import com.slopus.happy.ui.theme.HappyTheme
+import com.slopus.happy.ui.tablet.MainPanelKey
+import com.slopus.happy.ui.tablet.MainPanelOpener
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
@@ -65,6 +84,8 @@ class HomeNavigation(
     val onDetails: (String) -> Unit,
     /** Compose: an empty chat whose first send starts the session, on the phone and in the tablet's detail pane. */
     val onCompose: () -> Unit = onNewSession,
+    /** The migration card's screen for its path (iOS ea1a0902f). */
+    val onMigration: (MigrationPath) -> Unit = {},
 ) {
     companion object {
         fun of(graph: AppGraph, nav: NavHostController, onOpenSession: (String) -> Unit, onTroubleshoot: () -> Unit) = HomeNavigation(
@@ -77,43 +98,68 @@ class HomeNavigation(
             onNewSession = { nav.navigate(NewSessionRoute) { launchSingleTop = true } },
             onDetails = { id -> nav.navigate(SessionInfoRoute(id)) },
             onCompose = { nav.composeChat() },
+            onMigration = { path -> nav.navigate(DesktopMigrationRoute(path.wire)) },
         )
     }
 }
 
 /**
- * Set by the tablet shell while its sidebar holds the session list: the home
- * route then leaves the detail blank (MainView.tsx's `isTablet` branch).
+ * Set by the tablet shell while its sidebar holds the account's home: the
+ * home route's page is then the empty main panel (happy-ios docs/IPAD.md).
  */
 val LocalHomeInSidebar = staticCompositionLocalOf { false }
 
 /**
- * A Happy account's home, [HomeRoute]'s while one is open (HappyApp). [onOpenSession]
- * belongs to the chat, [onTroubleshoot] to onboarding.
+ * Where home's taps lead through [go] ([MainPanelOpener]): pushes on the
+ * phone, the main panel's new root from the tablet's sidebar, each named
+ * by what it opens so opening it again goes back to it.
+ */
+fun HomeNavigation.through(go: MainPanelOpener): HomeNavigation = HomeNavigation(
+    onSettings = { go.open(MainPanelKey.SETTINGS, onSettings) },
+    onWhatsNew = { go.open(MainPanelKey.CHANGELOG, onWhatsNew) },
+    onOpenSession = { id -> go.open(MainPanelKey.session(id)) { onOpenSession(id) } },
+    onOpenMachine = { id -> go.open(MainPanelKey.machine(id)) { onOpenMachine(id) } },
+    onTroubleshoot = { go.open(MainPanelKey.TROUBLESHOOT, onTroubleshoot) },
+    onNewSession = { go.open(MainPanelKey.NEW_SESSION, onNewSession) },
+    onDetails = { id -> go.open(MainPanelKey.info(id)) { onDetails(id) } },
+    onCompose = { go.open(null, onCompose) },
+    onMigration = { path -> go.open(null) { onMigration(path) } },
+)
+
+/**
+ * A Happy account's home, [HomeRoute]'s while one is open (HappyApp), or the
+ * tablet's sidebar. [onOpenSession] belongs to the chat, [onTroubleshoot] to
+ * onboarding; [go] is where what it opens goes.
  */
 @Composable
-fun LegacyHome(graph: AppGraph, nav: NavHostController, onOpenSession: (sessionId: String) -> Unit, onTroubleshoot: () -> Unit) {
-    if (LocalHomeInSidebar.current) {
-        Box(Modifier.fillMaxSize().background(HappyTheme.colors.grouped.background).testTag(HomeTags.TABLET_BLANK))
-    } else {
-        HomeListHost(graph, remember(nav) { HomeNavigation.of(graph, nav, onOpenSession, onTroubleshoot) }, phone = true) { host ->
-            // Fully drawn (cold start's timeToFullDisplay, research/cold-start.md): the rows are read from disk.
-            ReportDrawnWhen { host.state != null }
-            HomeScreen(
-                state = host.state,
-                connectionStatus = host.connectionStatus,
-                grouping = host.grouping,
-                callbacks = host.callbacks,
-                actions = host.actions,
-                update = host.update,
-                offlineContent = { computers, onShowArchived ->
-                    LinkComputerChecklist(graph, computers = computers, onTroubleshoot = host.navigation.onTroubleshoot, onShowArchived = onShowArchived)
-                },
-                accounts = rememberAccountMenu(graph),
-                listState = host.listState,
-                syncing = host.syncing,
-            )
-        }
+fun LegacyHome(
+    graph: AppGraph,
+    nav: NavHostController,
+    onOpenSession: (sessionId: String) -> Unit,
+    onTroubleshoot: () -> Unit,
+    go: MainPanelOpener = MainPanelOpener.Push,
+) {
+    HomeListHost(graph, remember(nav, go) { HomeNavigation.of(graph, nav, onOpenSession, onTroubleshoot).through(go) }, phone = true) { host ->
+        // Fully drawn (cold start's timeToFullDisplay, research/cold-start.md): the rows are read from disk.
+        ReportDrawnWhen { host.state != null }
+        HomeScreen(
+            state = host.state,
+            connectionStatus = host.connectionStatus,
+            grouping = host.grouping,
+            callbacks = host.callbacks,
+            actions = host.actions,
+            update = host.update,
+            migration = host.migration,
+            offlineContent = { computers, onShowArchived ->
+                LinkComputerChecklist(graph, computers = computers, onTroubleshoot = host.navigation.onTroubleshoot, onShowArchived = onShowArchived)
+            },
+            accounts = rememberAccountMenu(graph),
+            listState = host.listState,
+            syncing = host.syncing,
+            link = rememberShownLinkState(
+                accountLinkState(host.connectionStatus == ConnectionStatus.CONNECTED, catchingUp = host.syncing || host.state == null, network = rememberNetworkPath()),
+            ),
+        )
     }
 }
 
@@ -123,6 +169,19 @@ fun NavGraphBuilder.homeRoutes(
     nav: NavHostController,
     onOpenSession: (sessionId: String) -> Unit = {},
 ) {
+    page<DesktopMigrationRoute> { entry ->
+        val path = MigrationPath.of(entry.toRoute<DesktopMigrationRoute>().path) ?: MigrationPath.Desktop
+        val add = LocalAddFlow.current
+        val uriHandler = LocalUriHandler.current
+        DesktopMigrationScreen(
+            path = path,
+            scanning = add?.isLoading == true,
+            onBack = { nav.popBackStack() },
+            onScan = { add?.scan() },
+            onOpenSite = { uriHandler.openUri(DESKTOP_URL) },
+            onLearnMore = { uriHandler.openUri(DesktopMigrationSpec.LEARN_MORE_URL) },
+        )
+    }
     page<NewSessionRoute> {
         val dock = rememberNewSessionDock(
             graph,
@@ -172,7 +231,24 @@ private fun SessionInfoRouteScreen(graph: AppGraph, id: String, nav: NavHostCont
         gitStatus = pathKey?.let(statuses::get),
         gitStatusFiles = pathKey?.let { account?.fileCache?.statusFiles(it)?.files },
         composer = mirror,
+        avatar = session?.resolveAvatar(snapshot?.projects.orEmpty()),
     )
+    // Opened over its chat, the chat's permission mode is picked here, as its header's menu picks it (iOS da5fda505).
+    val overChat = remember(nav, id) {
+        nav.previousBackStackEntry?.let { it.destination.hasRoute<SessionRoute>() && it.toRoute<SessionRoute>().id == id } == true
+    }
+    val resources = LocalResources.current
+    val metadata = session?.metadata
+    val modes = remember(metadata, mirror, settings.agentDefaultOverrides) {
+        ComposerModeResolver.resolve(metadata, mirror, settings.agentDefaultOverrides, resources::getString)
+    }
+    val latestMirror by rememberUpdatedState(mirror)
+    val latestMetadata by rememberUpdatedState(metadata)
+    val permission = if (!overChat) null else remember(modes, account, id) {
+        SessionInfoPermission(modes) { field, option ->
+            account?.composer?.setAgentModes(id, ComposerModeResolver.patch(field, option, latestMetadata, latestMirror))
+        }
+    }
     val context = LocalContext.current
     val actions = remember(nav, onOpenSession, context, services, id) {
         SessionInfoActions(
@@ -199,6 +275,7 @@ private fun SessionInfoRouteScreen(graph: AppGraph, id: String, nav: NavHostCont
         continuations = services.continuations,
         actions = actions,
         live = live,
+        permission = permission,
     )
 }
 

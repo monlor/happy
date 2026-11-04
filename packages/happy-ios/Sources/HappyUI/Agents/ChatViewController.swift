@@ -271,7 +271,7 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         pictures.onChange = { [weak self] in
             guard let self else { return }
             card.configuration.attachments = pictures.images.map {
-                AgentInputAttachmentPreview(id: $0.id, fileURL: $0.attachment.fileURL, name: $0.attachment.name, mimeType: $0.attachment.mimeType)
+                AgentInputAttachmentPreview(id: $0.id, fileURL: $0.attachment.fileURL, name: $0.attachment.name, mimeType: $0.attachment.mimeType, preparing: $0.preparing)
             }
             updatePrimary()
         }
@@ -892,7 +892,8 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
             addControl: { [weak self] in self?.card.addControl },
             text: { [weak self] in self?.card.text ?? "" },
             setText: { [weak self] text in self?.card.setText(text, selection: NSRange(location: (text as NSString).length, length: 0)) },
-            send: { [weak self] in self?.send() }
+            send: { [weak self] in self?.send() },
+            sendsWhilePreparing: true
         ))
         presenter.onSettled = { [weak self] added, keyboardWasUp in self?.settleFocus(added: added, keyboardWasUp: keyboardWasUp) }
         return presenter
@@ -1493,12 +1494,19 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
     private func send() {
         guard !acceptingSend else { return }
         let text = card.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let picked = pictures.images.map(\.attachment)
-        let pickedIDs = pictures.images.map(\.id)
-        guard !text.isEmpty || !picked.isEmpty else { return }
+        // Pictures still being read go as their thumbnails, and the message
+        // waits for them (`PreviewAttachment`).
+        let ready = pictures.images.filter { !$0.preparing }
+        let waiting = pictures.images.filter(\.preparing)
+        let picked = ready.map(\.attachment)
+        let pickedIDs = ready.map(\.id)
+        let previews = waiting.map {
+            PreviewAttachment(id: $0.id, thumbnail: $0.attachment.fileURL, width: $0.attachment.width, height: $0.attachment.height)
+        }
+        guard !text.isEmpty || !picked.isEmpty || !previews.isEmpty else { return }
         // One of the agent's commands, typed out: it runs, never sent as
         // words. Pictures make it a message.
-        if picked.isEmpty, let invocation = SlashCommands.invocation(text, in: chat.slashCommands) {
+        if picked.isEmpty, previews.isEmpty, let invocation = SlashCommands.invocation(text, in: chat.slashCommands) {
             return run(invocation.command, arguments: invocation.arguments)
         }
         // A question waiting takes what is typed as its answer, as on
@@ -1531,7 +1539,6 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         let conversation = conversation
         let store = session.store
         let staged = pictures
-        let kind = newTask?.choice.kind ?? .task
         #if DEBUG
         composeTrace?.event("send choice=\(String(describing: newTask?.choice))")
         #endif
@@ -1539,7 +1546,9 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
         newWorkPanel?.isLocked = true
         Task {
             await store.attentionInput()
-            let accepted = await conversation.send(id: id, text: text, attachments: picked)
+            // New work's first message is drawn at once; the task is made
+            // behind it, and a refusal leaves it failed, to retry.
+            let accepted = await conversation.send(id: id, text: text, attachments: picked, previews: previews)
             acceptingSend = false
             if !accepted, !newWorkPanelGone { newWorkPanel?.isLocked = false }
             if accepted {
@@ -1547,9 +1556,20 @@ final class ChatViewController: UIViewController, ComposeHosting, KeyboardPushed
                     card.setText("", selection: NSRange(location: 0, length: 0))
                 }
                 staged.removeSent(pickedIDs)
+                let handed = staged.handOff(waiting.map(\.id))
+                guard !handed.isEmpty else { return }
+                // The rest go once they are read, as one message.
+                var read: [String: OutgoingAttachment] = [:]
+                for pick in handed {
+                    if let picture = await pick.picture.value { read[pick.id] = picture }
+                }
+                await conversation.prepared(id, read)
+                staged.discard(read.values.map(\.fileURL))
+                // The transcript may still draw a thumbnail a moment longer.
+                try? await Task.sleep(for: .seconds(5))
+                staged.discard(handed.map(\.thumbnail))
             } else {
-                let refusal = await conversation.sendRefusal
-                let message = refusal.map { Strings.newWorkFailed(kind, $0) } ?? "The message could not be saved. Your text and attachments are still here."
+                let message = "The message could not be saved. Your text and attachments are still here."
                 let alert = UIAlertController(title: Strings.Common.error, message: message, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: Strings.Common.ok, style: .default))
                 present(alert, animated: true)
